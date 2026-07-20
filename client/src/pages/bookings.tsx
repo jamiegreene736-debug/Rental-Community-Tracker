@@ -44,6 +44,7 @@ import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log"
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
 import { vendorVisibleEmailAddresses, replySubjectForBuyInEmail, replyRecipientForBuyInEmail } from "@shared/buy-in-email-display";
 import { mergeAliasThread } from "@shared/unified-buyin-alias";
+import { paidRateTone, type PaidRateSourceRecord } from "@shared/paid-rate-extraction";
 import type { GroundFloorRequirement, GroundFloorStatus } from "@shared/ground-floor";
 import { scheduledChargeDateIso, nextScheduledChargeDate, type GuestyPaymentRow } from "@shared/guesty-payment-schedule";
 import { haversineFeet, walkMinutesFromFeet, MAX_BUY_IN_WALK_MINUTES } from "@shared/walking-distance";
@@ -338,6 +339,9 @@ type BuyInCommunicationsResponse = {
   // Buy-ins THIS read auto-marked bought in (an inbound alias email is
   // purchase proof) — non-empty triggers a bookings-row refresh client-side.
   autoMarkedBuyInIds?: number[];
+  // Buy-ins whose actually-paid rate THIS read extracted/updated from an
+  // alias email — non-empty triggers the same bookings-row refresh.
+  paidRateUpdatedBuyInIds?: number[];
 };
 
 type AutoFillSearchSummary = {
@@ -5781,6 +5785,9 @@ type GuestInboxResponse = {
   // True when THIS read flipped the owning buy-in to booked (inbound alias
   // email = purchase proof) — triggers a bookings-row refresh client-side.
   autoMarkedBoughtIn?: boolean;
+  // True when THIS read extracted/updated the actually-paid rate from an
+  // alias email — triggers the same bookings-row refresh.
+  paidRateUpdated?: boolean;
   syncResult?: { imported: number; skipped?: string };
 };
 
@@ -12807,6 +12814,28 @@ export default function Bookings() {
                                   <div className="min-w-0">
                                     <p className="text-sm truncate">
                                       {fmtMoney(slot.buyIn.costPaid)}
+                                      {/* Actually-paid rate, extracted from the unit's alias
+                                          inbox (VRBO/Booking confirmation total). GREEN when it
+                                          matches/undercuts the recorded cost, RED when we paid
+                                          more than the books say. Tooltip = source email. */}
+                                      {(() => {
+                                        const paid = (slot.buyIn as { paidRate?: string | number | null }).paidRate;
+                                        const tone = paidRateTone(slot.buyIn.costPaid, paid);
+                                        if (!tone) return null;
+                                        const src = (slot.buyIn as { paidRateSource?: PaidRateSourceRecord | null }).paidRateSource;
+                                        const title = src
+                                          ? `From alias email: "${src.subject ?? "(no subject)"}"${src.emailAt ? ` · ${new Date(src.emailAt).toLocaleDateString()}` : ""}\n${src.quote}`
+                                          : "Extracted from the unit alias inbox";
+                                        return (
+                                          <span
+                                            className={`font-medium ${tone === "red" ? "text-red-600" : "text-green-600"}`}
+                                            title={title}
+                                            data-testid={`text-paid-rate-${r._id}-${slot.unitId}`}
+                                          >
+                                            {" "}· paid {fmtMoney(paid)}
+                                          </span>
+                                        );
+                                      })()}
                                       {" · "}
                                       {fmtDate(slot.buyIn.checkIn)} → {fmtDate(slot.buyIn.checkOut)}
                                     </p>
@@ -14135,6 +14164,15 @@ function BuyInVendorEmailPanel({
     queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
   }, [guestThreadQuery.data?.autoMarkedBoughtIn]);
 
+  // Same refresh when the /api/guest-inbox read extracted the actually-paid
+  // rate from an alias email (green/red "paid $X" on the slot card).
+  useEffect(() => {
+    if (!guestThreadQuery.data?.paidRateUpdated) return;
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+  }, [guestThreadQuery.data?.paidRateUpdated]);
+
   const createAlias = useMutation({
     mutationFn: () => apiRequest("POST", `/api/bookings/${reservation._id}/simplelogin/alias`, { guestName, buyInId: buyIn.id }).then((r) => r.json()),
     onSuccess: () => {
@@ -14234,6 +14272,21 @@ function BuyInVendorEmailPanel({
       description: "An email arrived at the unit alias — the purchase is verified and recorded.",
     });
   }, [data?.autoMarkedBuyInIds]);
+
+  // Same refresh when THIS read extracted the actually-paid rate from an
+  // alias email — the green/red "paid $X" figure on the slot card comes from
+  // the bookings queries. Invalidate-only, no toast (quiet bookkeeping).
+  const paidRateHandledRef = useRef("");
+  useEffect(() => {
+    const ids = data?.paidRateUpdatedBuyInIds ?? [];
+    if (ids.length === 0) return;
+    const key = ids.slice().sort((a, b) => a - b).join(",");
+    if (paidRateHandledRef.current === key) return;
+    paidRateHandledRef.current = key;
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/bookings/guesty-all"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+  }, [data?.paidRateUpdatedBuyInIds]);
 
   // ── Gmail-style alias inbox: which message is open in the reading pane ──────
   // Selection is a stable row KEY over the MERGED thread (pm-<id> /
