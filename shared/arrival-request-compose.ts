@@ -82,40 +82,62 @@ export function resolveBookedListingTitle(input: {
   return "";
 }
 
+/**
+ * "on VRBO" / "on Booking.com" / "on Airbnb" channel mention derived from the
+ * booked listing URL — the operator's preferred identifier over pasting the
+ * raw URL into the PM email (2026-07-20 template edit). PM/direct sites → "".
+ */
+export function channelLabelFromListingUrl(url: string | null | undefined): string {
+  const raw = String(url ?? "").trim();
+  if (!raw) return "";
+  const host = raw.replace(/^https?:\/\//i, "").split(/[/?#]/, 1)[0]!.toLowerCase();
+  if (/(^|\.)((vrbo|homeaway|abritel|fewo-direkt|stayz|bookabach)\.[a-z.]+)$/.test(host)) return "VRBO";
+  if (/(^|\.)booking\.com$/.test(host)) return "Booking.com";
+  if (/(^|\.)airbnb\.[a-z.]+$/.test(host)) return "Airbnb";
+  return "";
+}
+
 export type ArrivalRequestEmailInput = {
   /** The BOOKED listing's title (the PM's own listing name), when known. */
   listingTitle?: string | null;
-  /** The booked listing URL — always included when present. */
+  /** The booked listing URL — used for the channel mention (and as the
+   * identifier of last resort when no title is known). */
   listingUrl?: string | null;
+  /** Signs the email (operator rule: the PM ties the request to the booking). */
   guestName?: string | null;
   /** Preformatted stay dates (the caller owns date formatting). */
   checkInText?: string | null;
   checkOutText?: string | null;
+  /** Mention that the booking is settled ("Everything should be paid in
+   * full.") — pass true for booked units (operator template, 2026-07-20). */
+  paidInFull?: boolean;
   /** Fallback identity when no booked-listing title/URL is known. */
   fallbackPropertyName?: string | null;
   unitLabel?: string | null;
 };
 
 /**
- * Default subject + body for the PM arrival-details request. Identifies the
- * unit by the PM's OWN listing (title and/or URL); only with neither does it
- * fall back to the operator's internal property name.
+ * Default subject + body for the PM arrival-details request, matching the
+ * operator's hand-edited template (2026-07-20): identify the unit by the PM's
+ * OWN listing title + the CHANNEL name ("on VRBO") — never the raw URL when a
+ * title is known, no "for <guest>" clause — and state the booking is paid in
+ * full for booked units. The raw URL survives only as the identifier of last
+ * resort (no title), and the internal property name only with neither.
  */
 export function buildArrivalRequestEmail(input: ArrivalRequestEmailInput): { subject: string; body: string } {
   const title = String(input.listingTitle ?? "").trim();
   const url = String(input.listingUrl ?? "").trim();
   const guest = String(input.guestName ?? "").trim();
+  const channel = channelLabelFromListingUrl(url);
   const fallback = [String(input.fallbackPropertyName ?? "").trim(), String(input.unitLabel ?? "").trim()]
     .filter(Boolean)
     .join(" - ");
 
-  const listingPhrase = title && url
-    ? `your listing "${title}" (${url})`
-    : title
-      ? `your listing "${title}"`
-      : url
-        ? `your listing ${url}`
-        : fallback || "your listing";
+  const listingPhrase = title
+    ? `your listing "${title}"`
+    : url
+      ? `your listing ${url}`
+      : fallback || "your listing";
 
   const subject = `Arrival details request - ${title || fallback || "upcoming stay"}`;
 
@@ -123,10 +145,13 @@ export function buildArrivalRequestEmail(input: ArrivalRequestEmailInput): { sub
     ? ` from ${input.checkInText} to ${input.checkOutText}`
     : "";
 
+  const bookedSentence = `We booked ${listingPhrase}${channel && title ? ` on ${channel}` : ""}${stay}.`
+    + (input.paidInFull ? " Everything should be paid in full." : "");
+
   const body = [
     `Hi,`,
     ``,
-    `We booked ${listingPhrase} for ${guest || "our guest"}${stay}.`,
+    bookedSentence,
     `Can you please send the arrival details, property address, access code, Wi-Fi, parking instructions, and any check-in notes when available?`,
     ``,
     `Thank you,`,
