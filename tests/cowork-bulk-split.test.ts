@@ -287,44 +287,48 @@ check("no suppression → no line", describeCoworkSuppression(0, 1_000_000, 1_00
   const claimsSrc = fs.readFileSync(path.join(here, "../server/buy-in-checkout-claims.ts"), "utf8");
 
   check(
+    // Bulk FIND went headless 2026-07-20: its ready set is now the live-run
+    // filter (bulkFindReady), not dispatch memory. Checkout keeps the memory.
     "both bulk buttons bind their COUNT to the ready set, not the raw selection",
-    bookingsSrc.includes("findDispatchSplit.ready.length")
+    bookingsSrc.includes("bulkFindReady.length")
       && bookingsSrc.includes("checkoutDispatchSplit.ready.length")
       && !bookingsSrc.includes("(${selectedBulkCoworkReservations.length})"),
   );
   check(
-    // M1: ONE ROW PER KIND. Collapsing them meant that with BOTH kinds held,
-    // the checkout button read (0), was disabled (which also suppresses its
-    // tooltip), and had no line and no override for up to 4 hours — a
-    // silently skipped booking, this module's own stated worst case.
-    "suppression renders per KIND, each with its own count and escape",
+    // M1 held its ground through the headless split: the CHECKOUT hold line is
+    // always visible with its own count + escape, and the FIND hold (now a
+    // LIVE-run fact, not TTL memory) renders its own separate line — no
+    // override button on purpose; a stuck run is cancelled from its row panel.
+    "suppression renders per KIND, each with its own count (checkout keeps the escape)",
     bookingsSrc.includes("text-cowork-dispatch-suppressed-${kind}")
       && bookingsSrc.includes("button-cowork-dispatch-resend-${kind}")
-      && /\["bulk-find", findDispatchSplit\.suppressed/.test(bookingsSrc)
+      && bookingsSrc.includes('data-testid="text-bulk-find-live-runs"')
       && /\["bulk-prepare-checkout", checkoutDispatchSplit\.suppressed/.test(bookingsSrc),
   );
   check(
-    // M2: the fallback path means the operator PASTED the brief, so the run is
-    // live. Shortening a card sitting's window would re-enable the button
-    // mid-sitting and let a second batch open a second unsubmitted payment tab.
-    "the shortened fallback window applies to FIND only, never to a card sitting",
-    bookingsSrc.includes('ttlOverrideMs: COWORK_DISPATCH_TTL["bulk-find"].baseMs')
+    // M2's hazard is now structural: bulk find no longer writes dispatch
+    // memory at all (the run store is the gate), so no fallback-TTL shortcut
+    // can exist — and a card sitting's window must NEVER be shortened.
+    "no shortened fallback window anywhere — find has no dispatch memory, a card sitting keeps its full window",
+    !bookingsSrc.includes('ttlOverrideMs: COWORK_DISPATCH_TTL["bulk-find"].baseMs')
       && !bookingsSrc.includes('ttlOverrideMs: COWORK_DISPATCH_TTL["bulk-prepare-checkout"].baseMs'),
   );
   check(
     // M3: the launchers write AFTER awaiting a relay POST of up to ~143KB; the
     // storage listener can land inside that window, so a value captured at
-    // render would erase the other tab's records.
+    // render would erase the other tab's records. (>= 2 since bulk find went
+    // headless: the checkout recorder + the suppression-row clear.)
     "dispatch memory is written through an UPDATER, never a captured value",
     bookingsSrc.includes("(update: (prev: CoworkDispatchRecord[]) => CoworkDispatchRecord[]) => {")
-      && (bookingsSrc.match(/persistCoworkDispatches\(\(prev\)/g) ?? []).length >= 3
+      && (bookingsSrc.match(/persistCoworkDispatches\(\(prev\)/g) ?? []).length >= 2
       && !/persistCoworkDispatches\(recordCoworkDispatches\(\s*coworkDispatches/.test(bookingsSrc),
   );
   check(
     // M4: after a bulk launch the button is DISABLED, so the generic "click the
     // button again" recovery dead-ends on exactly the path it exists for.
+    // (1 = bulk checkout; bulk find no longer launches Cowork.)
     "the bulk toast's recovery instruction points at 'Send anyway', not the disabled button",
-    (bookingsSrc.match(/coworkLaunchToastCopy\(result, label, "bulk"\)/g) ?? []).length === 2,
+    (bookingsSrc.match(/coworkLaunchToastCopy\(result, label, "bulk"\)/g) ?? []).length === 1,
     (bookingsSrc.match(/coworkLaunchToastCopy\(result, label, "bulk"\)/g) ?? []).length,
   );
   check(
@@ -344,7 +348,7 @@ check("no suppression → no line", describeCoworkSuppression(0, 1_000_000, 1_00
   );
   check(
     "both bulk button counts respect their cap, so the label can't promise more than it sends",
-    bookingsSrc.includes("Math.min(findDispatchSplit.ready.length, COWORK_BULK_FIND_MAX)")
+    bookingsSrc.includes("Math.min(bulkFindReady.length, CLAUDE_FIND_RUN_BULK_MAX)")
       && bookingsSrc.includes("Math.min(checkoutDispatchSplit.ready.length, COWORK_BULK_CHECKOUT_MAX)"),
   );
   check(

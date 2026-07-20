@@ -21,11 +21,14 @@ import {
   ClaudeFindRunRecord,
   ClaudeFindRunStore,
   ClaudeFindRunUpdate,
+  CLAUDE_FIND_RUN_BULK_MAX,
   CLAUDE_FIND_RUN_STORE_KEY,
   activeClaudeFindRunForReservation,
   applyClaudeFindRunUpdate,
   checkoutRunEligibility,
   claimNextClaudeFindRun,
+  claudeFindRunnerActivity,
+  claudeFindRunQueueAhead,
   claudeFindRunWatchdogVerdict,
   claudeFindRunHistoryForReservation,
   clientClaudeFindRunView,
@@ -159,6 +162,60 @@ function requestApiRoot(req: Request): string {
   return `${proto}://${host}`.replace(/\/+$/, "");
 }
 
+/**
+ * Enqueue one FIND run into the store. Shared by the single button and the
+ * bulk batch so a bulk-queued run is byte-for-byte what the single button
+ * would have created — same brief builder, same guest-expectation phase, same
+ * run-scoped token. Returns the conflict view when a run is already live for
+ * the reservation (which also de-dupes a reservation appearing twice in one
+ * bulk body: the first item enqueues, the second sees it active).
+ */
+function enqueueFindRunInStore(
+  store: ClaudeFindRunStore,
+  input: CoworkBuyInPromptInput,
+  apiRoot: string,
+  nowIso: string,
+): { run: ClaudeFindRunRecord } | { conflict: ClaudeFindRunRecord } {
+  const active = activeClaudeFindRunForReservation(store.runs, input.reservationId);
+  if (active) return { conflict: active };
+  const id = randomUUID();
+  const token = randomBytes(24).toString("hex");
+  const prompt = buildCoworkBuyInPrompt(
+    { ...input, baseUrl: apiRoot },
+    // afterAttach "guest_expectation": the run continues past attach into a
+    // READ-ONLY guest-experience check (2026-07-20) — it studies the
+    // original listing vs the attached units and records a happy/concerns/
+    // unhappy verdict; a concerns/unhappy verdict alerts the operator. Never
+    // books, detaches, or re-finds.
+    { headlessRun: { runId: id, runToken: token }, afterAttach: "guest_expectation" },
+  );
+  const run: ClaudeFindRunRecord = {
+    id,
+    reservationId: input.reservationId,
+    propertyId: input.propertyId,
+    propertyName: input.propertyName,
+    guestName: input.guestName ?? null,
+    status: "queued",
+    createdAt: nowIso,
+    claimedAt: null,
+    heartbeatAt: null,
+    endedAt: null,
+    cancelRequested: false,
+    attentionReason: null,
+    report: null,
+    error: null,
+    events: [{ at: nowIso, kind: "status", text: "Run queued — waiting for the Mac runner to claim it." }],
+    droppedEvents: 0,
+    token,
+    prompt,
+    unitIds: input.units.map((u) => u.unitId),
+    checkIn: input.checkIn,
+    checkOut: input.checkOut,
+  };
+  store.runs.push(run);
+  return { run };
+}
+
 /** Async-handler guard: a store/DB failure answers 500 instead of rejecting. */
 function guarded(handler: (req: Request, res: Response) => Promise<unknown>): (req: Request, res: Response) => void {
   return (req, res) => {
@@ -185,48 +242,64 @@ export function registerClaudeFindRunRoutes(app: Express): void {
     const nowIso = new Date().toISOString();
 
     const result = await mutateStore((store) => {
-      const active = activeClaudeFindRunForReservation(store.runs, input.reservationId);
-      if (active) return { conflict: clientClaudeFindRunView(active) };
-      const id = randomUUID();
-      const token = randomBytes(24).toString("hex");
-      const prompt = buildCoworkBuyInPrompt(
-        { ...input, baseUrl: apiRoot },
-        // afterAttach "guest_expectation": the run continues past attach into a
-        // READ-ONLY guest-experience check (2026-07-20) — it studies the
-        // original listing vs the attached units and records a happy/concerns/
-        // unhappy verdict; a concerns/unhappy verdict alerts the operator. Never
-        // books, detaches, or re-finds.
-        { headlessRun: { runId: id, runToken: token }, afterAttach: "guest_expectation" },
-      );
-      const run: ClaudeFindRunRecord = {
-        id,
-        reservationId: input.reservationId,
-        propertyId: input.propertyId,
-        propertyName: input.propertyName,
-        guestName: input.guestName ?? null,
-        status: "queued",
-        createdAt: nowIso,
-        claimedAt: null,
-        heartbeatAt: null,
-        endedAt: null,
-        cancelRequested: false,
-        attentionReason: null,
-        report: null,
-        error: null,
-        events: [{ at: nowIso, kind: "status", text: "Run queued — waiting for the Mac runner to claim it." }],
-        droppedEvents: 0,
-        token,
-        prompt,
-        unitIds: input.units.map((u) => u.unitId),
-        checkIn: input.checkIn,
-        checkOut: input.checkOut,
-      };
-      store.runs.push(run);
-      return { run: clientClaudeFindRunView(run) };
+      const outcome = enqueueFindRunInStore(store, input, apiRoot, nowIso);
+      return "conflict" in outcome
+        ? { conflict: clientClaudeFindRunView(outcome.conflict) }
+        : { run: clientClaudeFindRunView(outcome.run) };
     });
     if ("conflict" in result && result.conflict) {
       return res.status(409).json({ error: "A find-run is already active for this reservation", run: result.conflict });
     }
+    return res.json(result);
+  }));
+
+  // Operator: start a BULK batch of find-runs (2026-07-20 — "extend the
+  // headless runner to bulk"). One run per reservation, identical to what the
+  // per-row button creates; the daemon runner is sequential by construction,
+  // so enqueueing N runs IS the batch — they drain one at a time with per-row
+  // live logs. Item semantics are bulk-shaped: an invalid or already-active
+  // item is SKIPPED with its reason while the rest of the batch queues (an
+  // all-or-nothing 409 would make one live run block seven fresh bookings).
+  app.post("/api/claude-find-runs/bulk", guarded(async (req, res) => {
+    if (!requireOperator(res)) return;
+    if (claudeFindRunsDisabled()) {
+      return res.status(503).json({ error: "Headless find-runs are disabled (CLAUDE_FIND_RUNS_DISABLED=1)" });
+    }
+    const rawItems = Array.isArray((req.body as Record<string, unknown> | undefined)?.items)
+      ? ((req.body as Record<string, unknown>).items as unknown[])
+      : [];
+    if (rawItems.length === 0) return res.status(400).json({ error: "items (1+) required" });
+    if (rawItems.length > CLAUDE_FIND_RUN_BULK_MAX) {
+      return res.status(400).json({ error: `At most ${CLAUDE_FIND_RUN_BULK_MAX} runs per bulk batch — send the rest in a second batch` });
+    }
+    const apiRoot = requestApiRoot(req);
+    const nowIso = new Date().toISOString();
+    const result = await mutateStore((store) => {
+      const created: ReturnType<typeof clientClaudeFindRunView>[] = [];
+      const skipped: { reservationId: string; error: string }[] = [];
+      for (const raw of rawItems) {
+        const validated = validateCreateBody((raw ?? {}) as CreateRunBody);
+        if (!validated.ok) {
+          const rid = typeof (raw as CreateRunBody)?.reservationId === "string"
+            ? String((raw as CreateRunBody).reservationId)
+            : "(unknown)";
+          skipped.push({ reservationId: rid, error: validated.error });
+          continue;
+        }
+        const outcome = enqueueFindRunInStore(store, validated.input, apiRoot, nowIso);
+        if ("conflict" in outcome) {
+          skipped.push({
+            reservationId: validated.input.reservationId,
+            error: `A ${outcome.conflict.kind === "checkout" ? "checkout" : "find"}-run is already active for this reservation`,
+          });
+          continue;
+        }
+        created.push(clientClaudeFindRunView(outcome.run, {
+          queueAhead: claudeFindRunQueueAhead(store.runs, outcome.run.id),
+        }));
+      }
+      return { created, skipped };
+    });
     return res.json(result);
   }));
 
@@ -365,7 +438,11 @@ export function registerClaudeFindRunRoutes(app: Express): void {
     const history: Record<string, ReturnType<typeof claudeFindRunHistoryForReservation>> = {};
     for (const reservationId of ids) {
       const latest = latestClaudeFindRunForReservation(store.runs, reservationId);
-      if (latest) runs[reservationId] = clientClaudeFindRunView(latest);
+      // queueAhead tells a bulk-queued row "2 runs ahead in line" instead of a
+      // generic "waiting for the Mac runner" that reads like an outage.
+      if (latest) runs[reservationId] = clientClaudeFindRunView(latest, {
+        queueAhead: claudeFindRunQueueAhead(store.runs, latest.id),
+      });
       const prior = claudeFindRunHistoryForReservation(store.runs, reservationId);
       if (prior.length) history[reservationId] = prior;
     }
@@ -717,8 +794,12 @@ export function startClaudeFindRunWatchdog(): void {
     void mutateStore((store) => {
       const nowMs = Date.now();
       const nowIso = new Date(nowMs).toISOString();
+      // Runner-activity context (bulk, 2026-07-20): queued runs waiting behind
+      // a live run must not be failed as "runner never picked this up".
+      // Computed BEFORE any verdicts so one tick judges a consistent snapshot.
+      const activity = claudeFindRunnerActivity(store.runs, nowMs);
       for (const run of store.runs) {
-        const verdict = claudeFindRunWatchdogVerdict(run, nowMs);
+        const verdict = claudeFindRunWatchdogVerdict(run, nowMs, activity);
         if (verdict.action === "fail") {
           run.status = "failed";
           run.error = verdict.error ?? "Watchdog closed the run.";

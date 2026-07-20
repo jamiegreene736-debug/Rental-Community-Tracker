@@ -63,6 +63,32 @@ Before making any changes:
   Locked by tests/host-friction.test.ts (65, npm chain). Verified: full `npm test` REAL exit 0,
   build clean (strings bundle-grepped both bundles), check 335 = baseline. See AGENTS.md
   "Host friction" Load-Bearing section + the 2026-07-20 Decision Log line.
+- 2026-07-20 (BULK buy-in find → HEADLESS runs, same as the standalone button): Operator asked
+  whether "Auto Cowork bulk" was headless like the per-row search (it was not — it deep-linked/
+  relayed one Cowork batch brief needing a send press) and directed: "extend the headless runner
+  to bulk and then merge PR with main". SHIPPED (`claude/bulk-buy-in-cowork-headless-84991e`):
+  the bulk button ("Auto bulk · find cheapest (N)") now POSTs `POST /api/claude-find-runs/bulk
+  {items}` — ONE headless find-run per selected reservation via the SAME `enqueueFindRunInStore`
+  constructor as the per-row button (cap `CLAUDE_FIND_RUN_BULK_MAX`=8; invalid/already-active
+  items skipped per-item with reasons, never batch-fatal); the daemon runner's sequential claim
+  loop IS the batch — runs drain one at a time with per-row live logs. DON'T RE-CHASE / DON'T
+  SIMPLIFY: (a) the WATCHDOG is queue-aware now — `claudeFindRunnerActivity` context means a
+  queued run behind a busy runner is never failed "runner never picked this up", the claim
+  window re-arms from runner activity when the head-of-line run finishes, the 90-min ceiling
+  measures from claimedAt (work time), and `CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS` (12h = cap ×
+  ceiling) backstops a wedged line; (b) bulk-find DISPATCH MEMORY is retired — "already being
+  worked" is the live run store (server 409 inside the store write tail + a client bulk-gate
+  status query), and the checkout batch's cross-kind hold reads the same live-run set;
+  (c) `buildCoworkBulkBuyInPrompt` survives in shared/ but the client must never call it again
+  (test-locked); bulk CHECKOUT deliberately stays the Cowork card-sitting deep link. Queued rows
+  read "Queued — N runs ahead in the Mac runner's line" (`queueAhead` on the status payload).
+  Locked: claude-find-run 181/0 (queue watchdog matrix, queueAhead, bulk endpoint + client
+  source guards); cowork-launch 61/0 / cowork-buyin-prompt 284/0 / cowork-bulk-split 50/0
+  repointed. Verified: full `npm test` REAL exit 0, `npm run check` 335 = baseline (stash A/B
+  identical), build clean (bulk endpoint + new label bundle-grepped; "Auto Cowork bulk" gone).
+  Live daemon leg unchanged (the runner already claims sequentially) — post-deploy: select
+  several bookings, click "Auto bulk · find cheapest", expect N runs queued with queue positions
+  and no Cowork window.
 
 - 2026-07-20 (alias email history "the same for both aliases" + per-unit "SMS/Text History"):
   Operator (Menehune two-unit screenshot): both units' "Email history (6)" read as identical, and
