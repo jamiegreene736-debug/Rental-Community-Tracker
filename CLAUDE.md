@@ -43,6 +43,43 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-20 (buy-in "Confirm mgmt contact" — on-site management lookup saved into arrival info):
+  Operator: after a unit is attached and confirmation emails arrive but the arrival details
+  haven't, add a button like "confirm local on-site management team contact details" that looks
+  up the management company (probably via Claude) and saves the contact into the arrival
+  information section — so someone can CALL them to chase the arrival details. SHIPPED
+  (`claude/back-office-tasks-tab-o6h7dv`, PR after #1127): `POST
+  /api/buy-ins/:id/management-contact-lookup` → engine `server/management-contact-lookup.ts` —
+  ONE Claude WEB-SEARCH call (callClaudeWebSearchJson, model `MANAGEMENT_CONTACT_MODEL` default
+  claude-sonnet-4-6, kill `MANAGEMENT_CONTACT_LOOKUP_DISABLED=1`) over the unit's merged
+  alias-inbox corpus (aliasCandidatesForBuyIn + extractionMessagesFromSources — the SAME
+  buy_in_emails ∪ guest_inbox_messages sources the arrival-details extractor reads, vendor-mail
+  synced first fail-soft) + the booked listing URL/property context. HONESTY GATE (load-bearing,
+  shared/management-contact-logic.ts, test-locked): email-cited contacts must be VERBATIM in the
+  cited email (quote present, phone digit-for-digit, email/company case-insensitive); web-found
+  contacts need an http(s) sourceUrl + confidence ≥ 0.6; OTA customer-support lines
+  (VRBO/Expedia/Booking/Airbnb support) rejected outright; implausible phone/email shapes reject
+  the result rather than silently dropping the field; no ANTHROPIC key or nothing confident →
+  honest 422, NO regex fallback (an invented phone number is worse than none). SAVES into the
+  EXISTING arrival-info columns managementCompany/managementContact (they already render as
+  "Local contact:" in the guest AD message and prefill the PM compose form) + NEW provenance
+  jsonb `buy_ins.management_contact_source` (ManagementContactSourceRecord: cited email
+  subject/date or source URL + quote + confidence + confirmedAt; schema + schema-maintenance
+  boot ALTER). UI (bookings.tsx): sky "Confirm mgmt contact" (PhoneCall icon) on the
+  attached-unit toolbar next to "Unit details" + the same button inside the Unit-arrival-details
+  dialog where onApplied mirrors the saved values into the form fields; emerald "✓ <company> ·
+  from email …/found online (host)" chip with quote/URL tooltip; the arrival summary card gained
+  an "On-site management" row and buyInHasArrivalDetails now counts the mgmt fields so the card
+  renders when the contact is the ONLY arrival info (the exact chase scenario). Verified:
+  management-contact-lookup 8-section suite (validation matrix incl. hallucinated-phone
+  rejection + source guards on engine/route/schema/UI), full `npm test` REAL exit 0, build clean
+  (button + column bundle-grepped), `npm run check` 334 = baseline (A/B identical up to TS
+  union-ordering noise), engine no-key/kill-switch paths behaviorally smoked (honest failures),
+  UI proven on the BUILT bundle (static SPA + Playwright, mocked /api: toolbar button → one
+  lookup POST → confirmed chip → "On-site management" summary row; dialog button fills the
+  form). Live Claude/web leg not smokeable in-session — post-deploy: expand a booked buy-in and
+  click "Confirm mgmt contact"; expect the toast + the contact saved in Unit details.
+
 - 2026-07-20 (Back-Office Tasks tab — admin-created to-dos the agent team resolves): Operator
   (Guest-Inbox screenshot): add a tab near Guest Issues, "something like Back Office Tasks",
   where he creates a task manually as admin and the agent marks it resolved (case example:

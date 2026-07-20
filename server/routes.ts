@@ -13300,6 +13300,24 @@ Requirements:
     }
   });
 
+  // "Confirm on-site management contact" — look up the LOCAL management team's
+  // contact details for an attached buy-in (alias-inbox emails first, then the
+  // listing page / Claude web search) and save them into the arrival-info
+  // columns. Validation lives in shared/management-contact-logic.ts — an
+  // unverified/invented contact is rejected server-side, never persisted.
+  app.post("/api/buy-ins/:id/management-contact-lookup", async (req, res) => {
+    try {
+      const buyInId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(buyInId)) return res.status(400).json({ error: "Invalid buy-in id" });
+      const { lookupManagementContactForBuyIn } = await import("./management-contact-lookup");
+      const result = await lookupManagementContactForBuyIn(buyInId);
+      if (!result.ok) return res.status(422).json({ ok: false, error: result.message, emailCount: result.emailCount ?? 0 });
+      return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: "Management-contact lookup failed", message: err.message });
+    }
+  });
+
   app.get("/api/bookings/:reservationId/rental-agreement", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
