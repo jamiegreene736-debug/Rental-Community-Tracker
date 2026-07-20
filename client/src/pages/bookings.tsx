@@ -45,6 +45,7 @@ import { totalNightlyBuyInForMonth } from "@shared/pricing-rates";
 import { buildBuyInSearchDebugLog, sanitizeForChatText } from "@shared/safe-log";
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay, splitEmailBodyIntoSegments } from "@shared/email-body-format";
 import { stripLinkMarkers } from "@shared/email-mime";
+import { extractPhoneForSms, formatPmSmsPhone, pmSmsPhoneKey } from "@shared/pm-sms";
 import { vendorVisibleEmailAddresses, replySubjectForBuyInEmail, replyRecipientForBuyInEmail } from "@shared/buy-in-email-display";
 import { mergeAliasThread } from "@shared/unified-buyin-alias";
 import { buildArrivalRequestEmail, resolveBookedListingTitle } from "@shared/arrival-request-compose";
@@ -14740,6 +14741,7 @@ function BuyInVendorEmailPanel({
         </div>
         )}
       </details>
+      <PmSmsThread buyIn={buyIn} />
       {travelerEmail && hasInboundHost && (
         <div className="space-y-1.5 rounded-md border bg-sky-50/40 p-2 dark:bg-sky-950/20">
           <Textarea
@@ -14771,6 +14773,164 @@ function BuyInVendorEmailPanel({
 function extractEmailForInput(value: string): string {
   const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return match?.[0] ?? "";
+}
+
+// ── PM text thread (operator ask 2026-07-20: "text back and forth with the
+// management company" beside the email history). Sends ride the SAME
+// Quo/OpenPhone number that texts guests; the thread is every SMS exchanged
+// with the PM's phone (last-10-digit match), so replies the PM texts back
+// appear here once the Quo webhook mirrors them. Phone prefills from the
+// saved management contact ("Confirm mgmt contact" stores "phone · email").
+type PmSmsThreadResponse = {
+  buyInId: number;
+  phone: string;
+  messages: Array<{
+    id: number;
+    direction: string;
+    body: string;
+    sentAt: string;
+    status?: string | null;
+  }>;
+  sms: { configured: boolean; missing: string[] };
+  inboundConfigured: boolean;
+};
+
+function PmSmsThread({ buyIn }: { buyIn: BuyIn }) {
+  const { toast } = useToast();
+  const [phone, setPhone] = useState(() => extractPhoneForSms(buyIn.managementContact ?? ""));
+  const [draft, setDraft] = useState("");
+  const [open, setOpen] = useState(false);
+
+  // Prefill the phone the moment "Confirm mgmt contact" saves one — never
+  // overwrite a number the operator already typed.
+  useEffect(() => {
+    const saved = extractPhoneForSms(buyIn.managementContact ?? "");
+    if (saved) setPhone((cur) => (cur.trim() ? cur : saved));
+  }, [buyIn.managementContact]);
+
+  const phoneKey = pmSmsPhoneKey(phone);
+  const threadQuery = useQuery<PmSmsThreadResponse>({
+    queryKey: ["/api/buy-ins", buyIn.id, "pm-sms", phoneKey],
+    queryFn: () => apiRequest("GET", `/api/buy-ins/${buyIn.id}/pm-sms?phone=${encodeURIComponent(phone.trim())}`).then((r) => r.json()),
+    enabled: open,
+    refetchInterval: open && phoneKey ? 30_000 : false,
+  });
+  const messages = threadQuery.data?.messages ?? [];
+
+  const sendText = useMutation({
+    mutationFn: async () => {
+      // Direct fetch, not apiRequest — a 4xx body carries the actionable
+      // reason (unconfigured Quo, bad phone) and apiRequest throws opaquely.
+      const resp = await fetch(`/api/buy-ins/${buyIn.id}/pm-sms`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ phone: phone.trim(), body: draft.trim() }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(String(data?.message ?? data?.error ?? `HTTP ${resp.status}`));
+      return data;
+    },
+    onSuccess: () => {
+      setDraft("");
+      threadQuery.refetch();
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings"] });
+      toast({ title: "Text sent", description: `Sent to ${formatPmSmsPhone(phone)}.` });
+    },
+    onError: (err: any) => {
+      toast({ title: "Text failed", description: String(err?.message ?? err), variant: "destructive" });
+    },
+  });
+
+  return (
+    <details
+      className="rounded-md border bg-background/70 p-2"
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+      data-testid={`pm-sms-thread-${buyIn.id}`}
+    >
+      <summary className="cursor-pointer text-xs font-medium">
+        <MessageSquare className="mr-1 inline h-3.5 w-3.5 text-teal-600" />
+        Text messages with PM{messages.length > 0 ? ` (${messages.length})` : ""}
+      </summary>
+      <div className="mt-2 space-y-2">
+        <div className="flex items-center gap-2">
+          <Input
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            placeholder="PM phone, e.g. (808) 879-6284"
+            className="h-8 max-w-[220px] text-xs"
+            data-testid={`pm-sms-phone-${buyIn.id}`}
+          />
+          {!phoneKey && phone.trim() && (
+            <span className="text-[10px] text-amber-700 dark:text-amber-300">Needs a full 10-digit number</span>
+          )}
+        </div>
+        {threadQuery.data && !threadQuery.data.sms.configured && (
+          <div className="text-[11px] text-amber-700 dark:text-amber-300">
+            SMS is not configured on the server — ask ops to set {threadQuery.data.sms.missing.join(" + ")} on Railway.
+          </div>
+        )}
+        {threadQuery.data && threadQuery.data.sms.configured && !threadQuery.data.inboundConfigured && (
+          <div className="text-[11px] text-amber-700 dark:text-amber-300">
+            Outbound texts work, but PM replies won't appear here until QUO_WEBHOOK_SECRET + the OpenPhone webhook are configured.
+          </div>
+        )}
+        <div className="max-h-[260px] space-y-1.5 overflow-y-auto rounded-md border bg-background p-2">
+          {threadQuery.isLoading && open && <div className="text-[11px] text-muted-foreground">Loading texts…</div>}
+          {!threadQuery.isLoading && messages.length === 0 && (
+            <div className="text-[11px] text-muted-foreground">
+              {phoneKey
+                ? "No texts with this number yet — send the first one below."
+                : "Enter the management company's phone number to see and send texts."}
+            </div>
+          )}
+          {messages.map((m) => {
+            const outbound = m.direction === "outbound";
+            return (
+              <div key={m.id} className={`flex ${outbound ? "justify-end" : "justify-start"}`}>
+                <div
+                  className={`max-w-[80%] whitespace-pre-wrap break-words rounded-lg px-2.5 py-1.5 text-xs leading-relaxed ${
+                    outbound
+                      ? "bg-teal-600 text-white"
+                      : "border bg-muted/60 text-foreground"
+                  }`}
+                  title={m.status ?? undefined}
+                >
+                  <EmailBodyWithLinks body={m.body} />
+                  <div className={`mt-0.5 text-[9px] ${outbound ? "text-teal-100" : "text-muted-foreground"}`}>
+                    {formatEmailTimestampForDisplay(m.sentAt) ?? ""}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex items-end gap-2">
+          <Textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="Text the management company…"
+            className="min-h-[52px] flex-1 text-xs"
+            maxLength={1600}
+            data-testid={`pm-sms-draft-${buyIn.id}`}
+          />
+          <Button
+            size="sm"
+            className="h-8 bg-teal-600 text-white hover:bg-teal-700"
+            disabled={sendText.isPending || !phoneKey || !draft.trim()}
+            onClick={() => sendText.mutate()}
+            data-testid={`pm-sms-send-${buyIn.id}`}
+          >
+            {sendText.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Send className="mr-1 h-3 w-3" />}
+            Send text
+          </Button>
+        </div>
+        <div className="text-[10px] text-muted-foreground">
+          Sends from the operator's Quo/OpenPhone number — the same one guests text. Replies from the PM land in this thread.
+        </div>
+      </div>
+    </details>
+  );
 }
 
 // Stable selection key for a merged alias-thread row (Gmail-style inbox):

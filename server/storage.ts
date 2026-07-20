@@ -396,6 +396,7 @@ export interface IStorage {
 
   createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage>;
   getQuoSmsMessagesByConversation(conversationId: string, limit?: number): Promise<QuoSmsMessage[]>;
+  getQuoSmsMessagesByPhoneLast10(last10: string, limit?: number): Promise<QuoSmsMessage[]>;
   getQuoSmsMessageByProviderId(providerMessageId: string): Promise<QuoSmsMessage | undefined>;
   upsertQuoCallEvent(c: InsertQuoCallEvent): Promise<QuoCallEvent>;
   getQuoCallEventsByConversation(conversationId: string, limit?: number): Promise<QuoCallEvent[]>;
@@ -1929,6 +1930,19 @@ export class DatabaseStorage implements IStorage {
       .from(quoSmsMessages)
       .where(eq(quoSmsMessages.conversationId, conversationId))
       .orderBy(desc(quoSmsMessages.sentAt))
+      .limit(limit);
+  }
+
+  // PM text thread (buy-in panel): every SMS exchanged with a phone number,
+  // matched on the last 10 digits so formatting/prefix differences between
+  // stored rows never split the thread. Ascending = chat order.
+  async getQuoSmsMessagesByPhoneLast10(last10: string, limit = 200): Promise<QuoSmsMessage[]> {
+    const key = String(last10 ?? "").replace(/\D/g, "").slice(-10);
+    if (key.length !== 10) return [];
+    return db.select()
+      .from(quoSmsMessages)
+      .where(sql`right(regexp_replace(${quoSmsMessages.guestPhone}, '\\D', '', 'g'), 10) = ${key}`)
+      .orderBy(quoSmsMessages.sentAt)
       .limit(limit);
   }
 
