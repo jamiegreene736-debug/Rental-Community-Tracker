@@ -53982,6 +53982,68 @@ ${SLEEPING_CAPACITY_RULE}
     }
   });
 
+  // ========== INBOX — Unmatched texts ("Texts" tab) ==========
+  // Third-party texts to the Quo number (e.g. a Canary Technologies
+  // verification link) match no Guesty conversation, so recordQuoWebhook
+  // stores them with conversationId null — previously rendered NOWHERE.
+  // These routes surface them, grouped per sender number.
+
+  app.get("/api/inbox/unmatched-texts", async (_req, res) => {
+    try {
+      const { groupUnmatchedTexts } = await import("@shared/unmatched-texts");
+      const rows = await storage.getUnmatchedQuoSmsMessages(1000);
+      const threads = groupUnmatchedTexts(rows as any);
+      return res.json({ threads });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to load unmatched texts", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/unmatched-texts/reply", async (req, res) => {
+    try {
+      const { phone, body } = req.body as { phone?: string; body?: string };
+      const to = normalizePhone(String(phone ?? ""));
+      if (!phoneLast10(to)) return res.status(400).json({ error: "A valid phone number is required" });
+      const smsBody = String(body ?? "").trim();
+      if (!smsBody) return res.status(400).json({ error: "Message body is required" });
+      const config = getQuoSmsConfigStatus();
+      if (!config.configured) {
+        return res.status(503).json({
+          error: "SMS is not configured",
+          message: `Add ${config.missing.join(" and ")} in Railway before sending texts.`,
+          missing: config.missing,
+        });
+      }
+      // conversationId stays null so the reply remains part of the unmatched
+      // thread (grouped by number) instead of vanishing into no conversation.
+      const message = await sendQuoSms({
+        conversationId: null,
+        reservationId: null,
+        guestName: null,
+        to,
+        body: smsBody,
+      });
+      return res.json({ ok: true, message });
+    } catch (err: any) {
+      console.error(`[quo-sms] unmatched-texts reply failed: ${err?.message ?? err}`);
+      return res.status(500).json({ error: "Failed to send SMS", message: err.message });
+    }
+  });
+
+  app.post("/api/inbox/unmatched-texts/link", async (req, res) => {
+    try {
+      const { phone, reservationId } = req.body as { phone?: string; reservationId?: string | null };
+      const { pmSmsPhoneKey } = await import("@shared/pm-sms");
+      const key = pmSmsPhoneKey(String(phone ?? ""));
+      if (!key) return res.status(400).json({ error: "A valid phone number is required" });
+      const rid = String(reservationId ?? "").trim() || null;
+      const updated = await storage.stampUnmatchedQuoSmsReservation(key, rid);
+      return res.json({ ok: true, updated, reservationId: rid });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to link texts to booking", message: err.message });
+    }
+  });
+
   // 2026-07-11 security fix: constant-time secret comparison for the Quo/OpenPhone
   // webhooks, and the shared secret is now read ONLY from a request header — the
   // old `req.query.secret` fallback put the secret in the URL, where it leaks into

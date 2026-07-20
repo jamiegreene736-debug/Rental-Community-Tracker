@@ -35,6 +35,7 @@ import {
   ToggleRight, X, ShieldAlert, MessageCircle, DollarSign, ClipboardList,
   FileText, Mail, ShieldCheck, Paperclip, PhoneCall, PhoneMissed, Voicemail,
   Search, Loader2, ExternalLink, Copy, Link2, MailOpen, Reply, Image,
+  Smartphone,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
@@ -42,6 +43,13 @@ import {
 import type { MessageTemplate } from "@shared/schema";
 import { autoReplyTierBadge, type AutoReplyTierBadge } from "@shared/guest-question-tier";
 import { GuestIssuesPanel, GuestIssuesTab } from "@/components/GuestIssuesPanel";
+import { UnmatchedTextsTab } from "@/components/unmatched-texts-tab";
+import {
+  UNMATCHED_TEXTS_SEEN_KEY,
+  countUnreadUnmatchedThreads,
+  parseUnmatchedSeenMap,
+  type UnmatchedTextThread,
+} from "@shared/unmatched-texts";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { getGuestyAmenities, getAmenityLabel } from "@/data/guesty-amenities";
 import { fallbackWalkForResort } from "@shared/walking-distance";
@@ -4499,6 +4507,22 @@ export default function InboxPage() {
   const openBackOfficeIssueCount = unresolvedIssues.filter((i) => i?.kind === "back_office").length;
   const openBackOfficeTaskCount = unresolvedIssues.filter((i) => i?.kind === "back_office_task").length;
 
+  // ── Unmatched texts ("Texts" tab badge) ──
+  // Same queryKey the tab component uses, so TanStack dedupes the fetch; the
+  // seen-map version bumps when the tab stamps a thread read, clearing the badge.
+  const [unmatchedSeenVersion, setUnmatchedSeenVersion] = useState(0);
+  const { data: unmatchedTextsData } = useQuery<{ threads: UnmatchedTextThread[] }>({
+    queryKey: ["/api/inbox/unmatched-texts"],
+    queryFn: async () => (await apiRequest("GET", "/api/inbox/unmatched-texts")).json(),
+    refetchInterval: 60_000,
+  });
+  const unreadUnmatchedTextCount = useMemo(() => {
+    const seen = parseUnmatchedSeenMap(
+      typeof localStorage === "undefined" ? null : localStorage.getItem(UNMATCHED_TEXTS_SEEN_KEY),
+    );
+    return countUnreadUnmatchedThreads(unmatchedTextsData?.threads ?? [], seen);
+  }, [unmatchedTextsData?.threads, unmatchedSeenVersion]);
+
   const approveReservation = useMutation({
     mutationFn: (id: string) =>
       apiRequest("PUT", `/api/guesty-proxy/reservations/${id}/confirm`, {}).then(r => r.json()),
@@ -4693,6 +4717,20 @@ export default function InboxPage() {
                 </span>
               )}
             </TabsTrigger>
+            {/* Texts — inbound SMS to the Quo number that matched NO Guesty
+                conversation (Canary verification links, unknown PMs). Visible to
+                operator AND agents: these often carry links a guest needs. */}
+            <TabsTrigger value="texts" data-testid="tab-texts">
+              <Smartphone className="h-4 w-4 mr-1.5" /> Texts
+              {unreadUnmatchedTextCount > 0 && (
+                <span
+                  className="ml-1.5 rounded-full bg-sky-600 text-white text-[10px] min-w-4 h-4 px-1 flex items-center justify-center"
+                  data-testid="badge-texts-unread"
+                >
+                  {unreadUnmatchedTextCount >= 100 ? "99+" : unreadUnmatchedTextCount}
+                </span>
+              )}
+            </TabsTrigger>
             {/* Back-Office Issues (refunds/cancellations/billing) is OPERATOR-ONLY —
                 hidden from the remote agent login. The server also withholds
                 back_office rows from the agent role (defense in depth). */}
@@ -4755,6 +4793,16 @@ export default function InboxPage() {
                 setSelectedConvId(conversationId);
                 setActiveTab("messages");
               }}
+            />
+          </TabsContent>
+
+          {/* ── TEXTS TAB ── (visible to operator AND agents)
+              Per-number threads of unmatched inbound SMS with clickable links,
+              a reply composer, and (admin) a link-to-booking action. */}
+          <TabsContent value="texts">
+            <UnmatchedTextsTab
+              canLinkBooking={isAdmin}
+              onSeenChanged={() => setUnmatchedSeenVersion((v) => v + 1)}
             />
           </TabsContent>
 

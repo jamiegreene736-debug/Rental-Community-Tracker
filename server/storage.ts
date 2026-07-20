@@ -397,6 +397,8 @@ export interface IStorage {
   createQuoSmsMessage(m: InsertQuoSmsMessage): Promise<QuoSmsMessage>;
   getQuoSmsMessagesByConversation(conversationId: string, limit?: number): Promise<QuoSmsMessage[]>;
   getQuoSmsMessagesByPhoneLast10(last10: string, limit?: number): Promise<QuoSmsMessage[]>;
+  getUnmatchedQuoSmsMessages(limit?: number): Promise<QuoSmsMessage[]>;
+  stampUnmatchedQuoSmsReservation(last10: string, reservationId: string | null): Promise<number>;
   getQuoSmsMessageByProviderId(providerMessageId: string): Promise<QuoSmsMessage | undefined>;
   upsertQuoCallEvent(c: InsertQuoCallEvent): Promise<QuoCallEvent>;
   getQuoCallEventsByConversation(conversationId: string, limit?: number): Promise<QuoCallEvent[]>;
@@ -1944,6 +1946,30 @@ export class DatabaseStorage implements IStorage {
       .where(sql`right(regexp_replace(${quoSmsMessages.guestPhone}, '\\D', '', 'g'), 10) = ${key}`)
       .orderBy(quoSmsMessages.sentAt)
       .limit(limit);
+  }
+
+  // Unmatched texts (inbox "Texts" tab): every row the webhook could NOT tie
+  // to a Guesty conversation — third-party senders (Canary links, unknown
+  // PMs). NULL and '' both count as "no conversation" (legacy rows stored '').
+  async getUnmatchedQuoSmsMessages(limit = 1000): Promise<QuoSmsMessage[]> {
+    return db.select()
+      .from(quoSmsMessages)
+      .where(sql`(${quoSmsMessages.conversationId} IS NULL OR ${quoSmsMessages.conversationId} = '')`)
+      .orderBy(desc(quoSmsMessages.sentAt))
+      .limit(limit);
+  }
+
+  // "Link to booking" on an unmatched thread: stamp the reservation onto every
+  // conversation-less row for that number (last-10 match, same convention as
+  // getQuoSmsMessagesByPhoneLast10). Never touches conversation-matched rows.
+  async stampUnmatchedQuoSmsReservation(last10: string, reservationId: string | null): Promise<number> {
+    const key = String(last10 ?? "").replace(/\D/g, "").slice(-10);
+    if (key.length !== 10) return 0;
+    const rows = await db.update(quoSmsMessages)
+      .set({ reservationId: reservationId ?? null })
+      .where(sql`right(regexp_replace(${quoSmsMessages.guestPhone}, '\\D', '', 'g'), 10) = ${key} AND (${quoSmsMessages.conversationId} IS NULL OR ${quoSmsMessages.conversationId} = '')`)
+      .returning({ id: quoSmsMessages.id });
+    return rows.length;
   }
 
   async getQuoSmsMessageByProviderId(providerMessageId: string): Promise<QuoSmsMessage | undefined> {
