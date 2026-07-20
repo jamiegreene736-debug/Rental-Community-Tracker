@@ -19,7 +19,8 @@ import {
   Table, TableHeader, TableBody, TableHead, TableRow, TableCell,
 } from "@/components/ui/table";
 import { Progress } from "@/components/ui/progress";
-import { useToast } from "@/hooks/use-toast";
+import { useToast, toast as showGlobalToast } from "@/hooks/use-toast";
+import { withListingStayDates } from "@shared/listing-stay-dates";
 import {
   aliasAttachmentHref,
   filesToAliasEmailAttachments,
@@ -12873,19 +12874,57 @@ export default function Bookings() {
                                       {slot.buyIn.airbnbConfirmation && (
                                         <span className="font-mono">#{slot.buyIn.airbnbConfirmation}</span>
                                       )}
-                                      {slot.buyIn.airbnbListingUrl && (
-                                        <a
-                                          href={slot.buyIn.airbnbListingUrl}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          onClick={(e) => e.stopPropagation()}
-                                          className="ml-2 text-primary hover:underline inline-flex items-center gap-0.5"
-                                        >
-                                          {buyInFoundViaAirbnbGoogleLens(slot.buyIn)
-                                            ? `view on Airbnb Lens direct site (${sourceLabelForUrl(slot.buyIn.airbnbListingUrl)})`
-                                            : `view on ${sourceLabelForUrl(slot.buyIn.airbnbListingUrl)}`} <ExternalLink className="h-2.5 w-2.5" />
-                                        </a>
-                                      )}
+                                      {slot.buyIn.airbnbListingUrl && (() => {
+                                        // Decorate the stored listing URL with the buy-in's own
+                                        // stay dates (shared/listing-stay-dates.ts — never clobbers
+                                        // dates the Cowork attach already baked in) so the click
+                                        // lands on the unit page with the dates pre-filled. Heals
+                                        // buy-ins attached before the prompt embedded dates.
+                                        const datedUrl = withListingStayDates(
+                                          slot.buyIn.airbnbListingUrl,
+                                          slot.buyIn.checkIn ?? r.checkIn,
+                                          slot.buyIn.checkOut ?? r.checkOut,
+                                        );
+                                        return (
+                                          <>
+                                            <a
+                                              href={datedUrl}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              onClick={(e) => e.stopPropagation()}
+                                              className="ml-2 text-primary hover:underline inline-flex items-center gap-0.5"
+                                              data-testid={`link-unit-listing-${slot.buyIn.id}`}
+                                            >
+                                              {buyInFoundViaAirbnbGoogleLens(slot.buyIn)
+                                                ? `view on Airbnb Lens direct site (${sourceLabelForUrl(slot.buyIn.airbnbListingUrl)})`
+                                                : `view on ${sourceLabelForUrl(slot.buyIn.airbnbListingUrl)}`} <ExternalLink className="h-2.5 w-2.5" />
+                                            </a>
+                                            {/* Browsers block web pages from OPENING an incognito/private
+                                                window (a privacy boundary — no API exists for it), so the
+                                                closest one-click affordance is copy + the keyboard shortcut.
+                                                Don't "fix" this into a window.open call; it can't work. */}
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                e.preventDefault();
+                                                navigator.clipboard?.writeText(datedUrl).then(
+                                                  () => showGlobalToast({
+                                                    title: "Link copied — dates included",
+                                                    description: "Open an incognito/private window (Cmd+Shift+N in Chrome, Cmd+Shift+N in Safari) and paste. Browsers don't let a page open incognito directly.",
+                                                  }),
+                                                  () => showGlobalToast({ title: "Copy failed", description: datedUrl, variant: "destructive" }),
+                                                );
+                                              }}
+                                              className="ml-1 text-muted-foreground hover:text-foreground underline decoration-dotted"
+                                              title="Copy the dated listing link for pasting into an incognito/private window"
+                                              data-testid={`button-copy-incognito-${slot.buyIn.id}`}
+                                            >
+                                              🕶 incognito
+                                            </button>
+                                          </>
+                                        );
+                                      })()}
                                       {buyInFoundViaAirbnbGoogleLens(slot.buyIn) && (
                                         <Badge
                                           variant="outline"

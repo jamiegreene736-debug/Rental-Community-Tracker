@@ -385,4 +385,108 @@ assert.match(extractSrc, /aliasCandidatesForBuyIn\(buyIn, aliasRows, attached\.l
 assert.match(extractSrc, /extractionMessagesFromSources\(guestMessages, unitPmEmails\)/, "refresh merges buy_in_emails into the corpus");
 assert.match(extractSrc, /extractReadableFromStoredMimeBody/, "extraction heals stored MIME bodies");
 
+// ── date-shaped values can never persist as unitAddress (buy-in 539 class) ────
+{
+  const {
+    parseArrivalDetailsFromText,
+    looksLikeDateOrTimeValue,
+    looksLikeStreetAddressValue,
+    splitWifiNameAndPassword,
+    isUsableArrivalField,
+    isPlausiblePropertyAddressForBuyIn,
+  } = await import("../server/buy-in-email");
+
+  for (const date of [
+    "07/21/2026",
+    "7/21/26",
+    "2026-07-21",
+    "07/21/2026 - 07/28/2026",
+    "Mon, July 21, 2026",
+    "July 21",
+    "21 July 2026",
+    "4:00 PM",
+    "16:00",
+  ]) {
+    assert.ok(looksLikeDateOrTimeValue(date), `date/time shape detected: ${date}`);
+    assert.ok(!looksLikeStreetAddressValue(date), `date is not a street: ${date}`);
+    assert.ok(!isUsableArrivalField("unitAddress", date), `date rejected as unitAddress: ${date}`);
+    assert.ok(
+      !isPlausiblePropertyAddressForBuyIn(date, null, "HI"),
+      `date rejected by plausibility gate: ${date}`,
+    );
+  }
+  for (const addr of [
+    "760 S Kihei Rd Unit 106, Kihei, HI 96753",
+    "2253 Poipu Rd, Unit B, Koloa, HI 96756",
+    "75-6082 Alii Dr, Kailua-Kona, HI 96740", // Hawaii hyphenated house number
+    "3830 Edward Rd 13C, Princeville, HI 96722",
+    "123 May St, Naples, FL 34102", // month-word street name is not a date
+  ]) {
+    assert.ok(!looksLikeDateOrTimeValue(addr), `real address is not a date: ${addr}`);
+    assert.ok(looksLikeStreetAddressValue(addr), `real address accepted: ${addr}`);
+    assert.ok(isUsableArrivalField("unitAddress", addr), `real address usable: ${addr}`);
+  }
+  // Non-street junk with digits also rejected.
+  assert.ok(!isUsableArrivalField("unitAddress", "Confirmation #HA-1234567"), "confirmation code rejected");
+
+  // The exact buy-in 539 failure: a "Check-in:" line must not become the address.
+  const parsed539 = parseArrivalDetailsFromText(
+    ["Check-in: 07/21/2026", "Wi-Fi: 'SpectrumSetup-C1' PASSWORD: 'littleshark860'", "Door code: 4821"].join("\n"),
+  );
+  assert.equal(parsed539.unitAddress, "", "check-in date never persists as unitAddress");
+  assert.equal(parsed539.wifiName, "SpectrumSetup-C1", "quoted wifi name split + unquoted");
+  assert.equal(parsed539.wifiPassword, "littleshark860", "embedded PASSWORD: split into wifiPassword");
+  assert.equal(parsed539.accessCode, "4821");
+
+  // Wi-Fi split helper + combined-capture rejection.
+  assert.deepEqual(
+    splitWifiNameAndPassword("'SpectrumSetup-C1' PASSWORD: 'littleshark860'"),
+    { name: "SpectrumSetup-C1", password: "littleshark860" },
+  );
+  assert.equal(splitWifiNameAndPassword("GuestNetwork"), null, "no password label → no split");
+  assert.ok(
+    !isUsableArrivalField("wifiName", "'SpectrumSetup-C1' PASSWORD: 'littleshark860'"),
+    "unsplit combined wifi capture rejected as a name (heals corrupt stored rows)",
+  );
+
+  // Separate-line wifi still parses exactly as before.
+  const parsedWifiLines = parseArrivalDetailsFromText(
+    ["Wi-Fi name: GuestNetwork", "Wi-Fi password: stay2026"].join("\n"),
+  );
+  assert.equal(parsedWifiLines.wifiName, "GuestNetwork");
+  assert.equal(parsedWifiLines.wifiPassword, "stay2026");
+}
+
+// ── reconcile clears a corrupt stored date-address (merge path) ───────────────
+{
+  const { mergeArrivalDetailsIntoBuyIn } = await import("../server/guest-inbox-arrival");
+  const healed = mergeArrivalDetailsIntoBuyIn(
+    {
+      unitAddress: "07/21/2026",
+      accessCode: "",
+      wifiName: "'SpectrumSetup-C1' PASSWORD: 'littleshark860'",
+      wifiPassword: "",
+      parkingInfo: "",
+      arrivalNotes: "",
+    } as any,
+    { unitAddress: "", accessCode: "", wifiName: "", wifiPassword: "", parkingInfo: "", arrivalNotes: "" },
+    null,
+    "HI",
+  );
+  assert.equal(healed.unitAddress, "", "corrupt date-address cleared on reconcile");
+  assert.equal(healed.wifiName, "", "corrupt combined wifi name cleared on reconcile");
+
+  const replaced = mergeArrivalDetailsIntoBuyIn(
+    { unitAddress: "07/21/2026", accessCode: "", wifiName: "", wifiPassword: "", parkingInfo: "", arrivalNotes: "" } as any,
+    { unitAddress: "760 S Kihei Rd Unit 106, Kihei, HI 96753", accessCode: "", wifiName: "", wifiPassword: "", parkingInfo: "", arrivalNotes: "" },
+    null,
+    "HI",
+  );
+  assert.equal(
+    replaced.unitAddress,
+    "760 S Kihei Rd Unit 106, Kihei, HI 96753",
+    "corrupt date-address replaced by the real street when a later email carries it",
+  );
+}
+
 console.log("arrival-email-extraction tests passed");
