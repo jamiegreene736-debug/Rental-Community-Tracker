@@ -4728,7 +4728,7 @@ function AdminDashboard() {
                                 <TableCell className="whitespace-nowrap text-sm">
                                   {formatShortDate(row.checkIn)} - {formatShortDate(row.checkOut)}
                                   <div className="text-[10px] text-muted-foreground">
-                                    cancelled {formatShortDate(row.cancelledAt)}
+                                    {row.bookedAt ? `booked ${formatShortDate(row.bookedAt)} · ` : ""}cancelled {formatShortDate(row.cancelledAt)}
                                   </div>
                                 </TableCell>
                                 <TableCell>
@@ -4946,7 +4946,8 @@ function AdminDashboard() {
                             )}
                           </div>
                           <div className="text-xs text-muted-foreground">
-                            {formatShortDate(row.checkIn)} – {formatShortDate(row.checkOut)} · cancelled {formatShortDate(row.cancelledAt)} · {row.confirmationCode ?? row.guestyReservationId}
+                            {formatShortDate(row.checkIn)} – {formatShortDate(row.checkOut)}
+                            {row.bookedAt ? ` · booked ${formatShortDate(row.bookedAt)}` : ""} · cancelled {formatShortDate(row.cancelledAt)} · {row.confirmationCode ?? row.guestyReservationId}
                           </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-2 sm:shrink-0">

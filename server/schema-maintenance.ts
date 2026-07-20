@@ -61,6 +61,15 @@ export async function ensureRuntimeSchema(): Promise<void> {
   `);
   console.log("[schema] ensured buy_ins arrival detail + ground-floor + community-verdict + guest-happy columns");
 
+  // Dashboard refund alert: when the guest originally BOOKED (Guesty
+  // reservation createdAt). Additive nullable; legacy rows heal on the next
+  // cancellation rescan (the dashboard GET fires one in the background).
+  await db.execute(sql`
+    ALTER TABLE reservation_cancellation_audits
+      ADD COLUMN IF NOT EXISTS booked_at timestamp
+  `);
+  console.log("[schema] ensured reservation_cancellation_audits.booked_at column");
+
   // Claude static-rate engine: additive nullable JSONB for the persisted
   // seasonal anchor plan. The table itself is created by db:push; this keeps a
   // Railway deploy usable before db:push runs.
