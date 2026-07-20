@@ -7,11 +7,18 @@ import {
   type ArrivalExtractionRecord,
 } from "../shared/arrival-email-verification";
 import {
+  aliasCandidatesForBuyIn,
   buildArrivalExtractionPrompt,
   extractionEmailsFromMessages,
   extractArrivalDetailsWithClaude,
   extractArrivalDetailsWithRegex,
+  mergeArrivalSourceMessages,
 } from "../server/arrival-email-extract";
+import {
+  ARRIVAL_SMS_HARD_LIMIT,
+  ARRIVAL_SMS_TARGET_LIMIT,
+  buildArrivalDetailsSmsMessage,
+} from "../shared/arrival-details-message";
 import type { GuestInboxMessage } from "../shared/schema";
 
 console.log("arrival-email-extraction tests");
@@ -236,5 +243,134 @@ const summaryRecord: ArrivalExtractionRecord = {
 };
 assert.match(summarizeArrivalExtraction(summaryRecord), /accessCode from email \(verified\)/, "summary names fields");
 assert.equal(summarizeArrivalExtraction(null), "", "null record summarizes to empty");
+
+// ── unified-alias sourcing: aliasCandidatesForBuyIn ──────────────────────────
+{
+  const aliasRows = [
+    { buyInId: 540, aliasEmail: "jacelyn.tsu.410862@emailprivaccy.com" },
+    { buyInId: 539, aliasEmail: "jacelyn.tsu.672676@emailprivaccy.com" },
+    { buyInId: null, aliasEmail: "jacelyn.tsu.res123@emailprivaccy.com" },
+  ];
+  const candidates = aliasCandidatesForBuyIn(
+    { id: 540, travelerEmail: "Jacelyn.Tsu.AE9958.B@emailprivaccy.com" } as any,
+    aliasRows,
+  );
+  assert.deepEqual(
+    candidates,
+    [
+      "jacelyn.tsu.410862@emailprivaccy.com", // unit-scoped alias row wins first
+      "jacelyn.tsu.ae9958.b@emailprivaccy.com", // legacy travelerEmail (re-mint history)
+      "jacelyn.tsu.res123@emailprivaccy.com", // legacy reservation-level alias
+    ],
+    "unit alias first, travelerEmail + reservation-level legacy still read",
+  );
+  assert.deepEqual(
+    aliasCandidatesForBuyIn({ id: 1, travelerEmail: null } as any, []),
+    [],
+    "no aliases anywhere → empty (unit reports messageCount 0)",
+  );
+  // Sibling unit's alias row must never leak in.
+  assert.ok(
+    !aliasCandidatesForBuyIn({ id: 540, travelerEmail: null } as any, aliasRows)
+      .includes("jacelyn.tsu.672676@emailprivaccy.com"),
+    "sibling unit alias excluded",
+  );
+}
+
+// ── unified-alias sourcing: buy_in_emails rows feed extraction, deduped ──────
+{
+  const inboxMsg = msg({
+    subject: "Your arrival details",
+    body: "Condo Door Code: 6969",
+    receivedAt: new Date("2026-07-10T00:00:00Z"),
+    providerMessageId: "<abc@mail>",
+  });
+  const pmDup = {
+    id: 7,
+    direction: "inbound",
+    fromEmail: inboxMsg.fromEmail,
+    toEmail: "alias@emailprivaccy.com",
+    subject: "Your arrival details",
+    body: "Condo Door Code: 6969",
+    providerMessageId: "abc@mail",
+    sentAt: new Date("2026-07-10T00:00:01Z"),
+  };
+  const pmOnly = {
+    id: 8,
+    direction: "inbound",
+    fromEmail: "pm@waikiki.com",
+    toEmail: "alias@emailprivaccy.com",
+    subject: "Wi-Fi info",
+    body: "WIFI Password: afb3aa7744cefa",
+    providerMessageId: "def@mail",
+    sentAt: new Date("2026-07-11T00:00:00Z"),
+  };
+  const outboundPm = { ...pmOnly, id: 9, direction: "outbound", providerMessageId: "out@mail" };
+  const merged = mergeArrivalSourceMessages([inboxMsg as any], [pmDup, pmOnly, outboundPm] as any);
+  assert.equal(merged.length, 2, "duplicate email seen by both ingesters collapses; outbound PM rows dropped");
+  const texts = merged.map((m) => String(m.body));
+  assert.ok(texts.some((t) => t.includes("6969")), "door-code email survives dedupe once");
+  assert.ok(texts.some((t) => t.includes("afb3aa7744cefa")), "PM-only email (buy_in_emails) reaches extraction");
+  const extractable = extractionEmailsFromMessages(merged);
+  assert.equal(extractable.length, 2, "merged rows are extraction-compatible");
+
+  // A host email that ONLY exists in buy_in_emails (the operator's screenshot
+  // case) must still produce an extraction.
+  const regexFromPmOnly = await extractArrivalDetailsWithRegex(
+    mergeArrivalSourceMessages([], [pmOnly] as any),
+    { ...hawaiiBuyIn, id: 1 } as any,
+    "HI",
+  );
+  assert.ok(regexFromPmOnly, "extraction runs on buy_in_emails-only history");
+  assert.equal(regexFromPmOnly!.fields.wifiPassword?.value, "afb3aa7744cefa", "wifi password extracted from PM row");
+}
+
+// ── SMS builder: compact, capped, sheds detail gracefully ────────────────────
+{
+  const baseUnit = {
+    unitLabel: "Menehune Shores 2BR",
+    unitAddress: "760 S Kihei Rd Unit 106, Kihei, HI 96753",
+    accessCode: "3438*",
+    wifiName: "SpectrumSetup-C1",
+    wifiPassword: "littleshark860",
+    parkingInfo: "Up to 2 vehicles in the marked stalls.",
+    arrivalNotes: "Lobby code: 1025\nPool code: 5747",
+  };
+  const sms = buildArrivalDetailsSmsMessage({
+    guestFirstName: "Jacelyn",
+    propertyName: "Menehune Shores",
+    checkInIso: "2026-07-21",
+    units: [baseUnit],
+    isHawaii: true,
+  });
+  assert.ok(sms.startsWith("Aloha Jacelyn"), "Hawaii greeting");
+  assert.ok(sms.includes("Access code: 3438*"), "code present");
+  assert.ok(sms.includes("SpectrumSetup-C1 / littleshark860"), "wifi present");
+  assert.ok(sms.includes("Mahalo, John Carpenter"), "sign-off present");
+  assert.ok(sms.length <= ARRIVAL_SMS_TARGET_LIMIT, `compact SMS under target (${sms.length})`);
+  assert.ok(!/[‘’“”—]/.test(sms), "ASCII only");
+
+  // Oversized notes shed before codes ever would.
+  const bloated = { ...baseUnit, arrivalNotes: "N".repeat(2000) };
+  const shed = buildArrivalDetailsSmsMessage({
+    guestFirstName: "Jacelyn",
+    propertyName: "Menehune Shores",
+    checkInIso: "2026-07-21",
+    units: [bloated, { ...bloated, unitLabel: "Unit B" }],
+    isHawaii: true,
+  });
+  assert.ok(shed.length <= ARRIVAL_SMS_HARD_LIMIT, "never exceeds the Quo hard limit");
+  assert.ok(shed.includes("Access code: 3438*"), "codes survive shedding");
+  assert.ok(!shed.includes("NNNNN"), "oversized notes were shed");
+
+  const zeroUnit = buildArrivalDetailsSmsMessage({
+    guestFirstName: "Sam",
+    propertyName: "",
+    units: [],
+    isHawaii: false,
+  });
+  assert.ok(zeroUnit.includes("still confirming"), "zero-unit SMS stays honest");
+  assert.ok(zeroUnit.startsWith("Hi Sam"), "mainland greeting");
+}
 
 console.log("arrival-email-extraction tests passed");

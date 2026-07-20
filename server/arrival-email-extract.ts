@@ -25,7 +25,8 @@ import {
   type ArrivalExtractionFieldRecord,
   type ArrivalExtractionRecord,
 } from "@shared/arrival-email-verification";
-import type { BuyIn, GuestInboxMessage } from "@shared/schema";
+import type { BuyIn, BuyInEmail, GuestInboxMessage } from "@shared/schema";
+import { mergeAliasThread } from "@shared/unified-buyin-alias";
 
 const MAX_EMAILS_FOR_EXTRACTION = 10;
 const MAX_CHARS_PER_EMAIL = 7_000;
@@ -37,6 +38,14 @@ type ExtractionEmail = {
   text: string;
 };
 
+// Structural subset of GuestInboxMessage the extraction actually reads — lets
+// buy_in_emails rows (the unified-alias PM/vendor ingester, 2026-07-19) feed the
+// same extraction pipeline without pretending to be guest_inbox_messages rows.
+export type ArrivalSourceMessage = Pick<
+  GuestInboxMessage,
+  "direction" | "subject" | "fromEmail" | "body"
+> & { receivedAt: GuestInboxMessage["receivedAt"] | string; id?: number; providerMessageId?: string | null };
+
 type BuyInContext = Pick<BuyIn, "propertyName" | "unitLabel" | "notes" | "propertyId">;
 
 type ClaudeFieldCandidate = { value?: string; quote?: string; emailIndex?: number } | null;
@@ -47,7 +56,66 @@ type ClaudeExtractionShape = {
   conflicts?: string[];
 };
 
-export function extractionEmailsFromMessages(messages: GuestInboxMessage[]): ExtractionEmail[] {
+/**
+ * Every alias address that could have received this unit's host emails, most
+ * specific first: the unit-scoped reservation_aliases row (the ONE unified
+ * alias since 2026-07-19), the buy_ins.travelerEmail backfill, then any legacy
+ * reservation-level alias rows (buyInId null). Re-minted units keep their old
+ * guest_inbox_messages under the OLD address, so the refresh must read all of
+ * them — the pre-fix code read travelerEmail only, which is why the Message AD
+ * dialog said "no host email found" while the Email history panel (which merges
+ * buy_in_emails via the alias rows) showed the host's emails fine.
+ */
+export function aliasCandidatesForBuyIn(
+  buyIn: Pick<BuyIn, "id" | "travelerEmail">,
+  aliasRows: Array<{ buyInId: number | null; aliasEmail: string | null }>,
+): string[] {
+  const out: string[] = [];
+  const push = (value: string | null | undefined) => {
+    const email = String(value ?? "").trim().toLowerCase();
+    if (email && email.includes("@") && !out.includes(email)) out.push(email);
+  };
+  for (const row of aliasRows) {
+    if (row.buyInId === buyIn.id) push(row.aliasEmail);
+  }
+  push(buyIn.travelerEmail);
+  for (const row of aliasRows) {
+    if (row.buyInId == null) push(row.aliasEmail);
+  }
+  return out;
+}
+
+/**
+ * One message set per unit for extraction: guest_inbox_messages rows for every
+ * alias candidate ∪ this unit's inbound buy_in_emails rows, deduped through the
+ * SAME mergeAliasThread the Email history panel renders (Message-ID first,
+ * subject+sender+10-min window fallback) so the refresh sees exactly what the
+ * operator sees in the panel.
+ */
+export function mergeArrivalSourceMessages(
+  inboxMessages: ArrivalSourceMessage[],
+  pmEmails: Array<Pick<BuyInEmail, "id" | "direction" | "fromEmail" | "toEmail" | "subject" | "body" | "providerMessageId" | "sentAt">>,
+): ArrivalSourceMessage[] {
+  const inbound = pmEmails.filter((e) => String(e.direction ?? "").toLowerCase() === "inbound");
+  const merged = mergeAliasThread(
+    inbound.map((e) => ({ ...e, sentAt: e.sentAt })),
+    inboxMessages.map((m, i) => ({ ...m, id: m.id ?? -(i + 1), receivedAt: m.receivedAt })),
+  );
+  return merged.map((row) =>
+    row.source === "pm"
+      ? {
+          direction: "inbound",
+          subject: row.email.subject ?? "",
+          fromEmail: row.email.fromEmail ?? "",
+          body: row.email.body ?? "",
+          receivedAt: row.email.sentAt as any,
+          providerMessageId: row.email.providerMessageId ?? null,
+        }
+      : (row.message as ArrivalSourceMessage),
+  );
+}
+
+export function extractionEmailsFromMessages(messages: ArrivalSourceMessage[]): ExtractionEmail[] {
   // Newest first — the prompt tells Claude the first email wins conflicts.
   return [...messages]
     .filter((m) => m.direction !== "outbound")
@@ -116,7 +184,7 @@ function fieldRecordFrom(
  * verbatim verification. Exported with an injectable caller for tests.
  */
 export async function extractArrivalDetailsWithClaude(
-  messages: GuestInboxMessage[],
+  messages: ArrivalSourceMessage[],
   buyIn: BuyInContext | null,
   communityState: string | null,
   callJson: typeof callClaudeJson = callClaudeJson,
@@ -191,7 +259,7 @@ export async function extractArrivalDetailsWithClaude(
 
 /** Regex fallback (no API key / Claude down): same record shape, method "regex". */
 export async function extractArrivalDetailsWithRegex(
-  messages: GuestInboxMessage[],
+  messages: ArrivalSourceMessage[],
   buyIn: BuyIn,
   communityState: string | null,
 ): Promise<ArrivalExtractionRecord | null> {
@@ -250,33 +318,73 @@ export async function refreshArrivalDetailsForReservation(reservationId: string)
   const { syncGuestInboxForAlias } = await import("./guest-inbox-sync");
   const { expectedStateHintFromBuyIn } = await import("./buy-in-email");
   const { BUY_IN_MARKET_LOCATIONS, resolveBuyInMarket } = await import("@shared/buy-in-market");
+  const { db } = await import("./db");
+  const { reservationAliases, buyInEmails } = await import("@shared/schema");
+  const { eq, and, desc } = await import("drizzle-orm");
+
+  // Pull the unified-alias PM/vendor mailbox FIRST — since 2026-07-19 the
+  // host's arrival email usually lands in buy_in_emails (keyed by the
+  // reservation_aliases unit alias), not only in guest_inbox_messages.
+  try {
+    const { syncBuyInVendorEmailsForReservation } = await import("./buy-in-email-sync");
+    await syncBuyInVendorEmailsForReservation(reservationId);
+  } catch (err: any) {
+    console.warn("[arrival-extract] buy-in vendor email sync failed:", err?.message ?? err);
+  }
+
+  const aliasRows = await db
+    .select()
+    .from(reservationAliases)
+    .where(eq(reservationAliases.reservationId, reservationId))
+    .catch(() => [] as Array<{ buyInId: number | null; aliasEmail: string | null }>);
 
   const attached = await storage.getBuyInsByReservation(reservationId);
   const units: ArrivalRefreshUnitResult[] = [];
+  const syncedAliases = new Set<string>();
 
   for (const buyIn of attached) {
-    const alias = String(buyIn.travelerEmail ?? "").trim().toLowerCase();
+    const aliases = aliasCandidatesForBuyIn(buyIn, aliasRows);
     const result: ArrivalRefreshUnitResult = {
       buyInId: buyIn.id,
       unitId: buyIn.unitId,
       unitLabel: buyIn.unitLabel,
-      aliasEmail: alias || null,
+      aliasEmail: aliases[0] ?? null,
       synced: null,
       messageCount: 0,
       extraction: null,
       updatedFields: [],
     };
     units.push(result);
-    if (!alias) continue;
 
-    try {
-      result.synced = await syncGuestInboxForAlias(alias);
-    } catch (err: any) {
-      result.synced = { imported: 0, skipped: err?.message ?? "sync failed" };
+    // Sync + read guest_inbox_messages for EVERY alias this unit has ever
+    // carried (re-mints leave older emails stored under the old address).
+    const inboxMessages: ArrivalSourceMessage[] = [];
+    for (const alias of aliases) {
+      if (!syncedAliases.has(alias)) {
+        syncedAliases.add(alias);
+        try {
+          const synced = await syncGuestInboxForAlias(alias);
+          result.synced = result.synced
+            ? { imported: result.synced.imported + synced.imported, skipped: result.synced.skipped ?? synced.skipped }
+            : synced;
+        } catch (err: any) {
+          result.synced = result.synced ?? { imported: 0, skipped: err?.message ?? "sync failed" };
+        }
+      }
+      inboxMessages.push(...await storage.getGuestInboxMessages(alias, 100));
     }
 
-    const messages = await storage.getGuestInboxMessages(alias, 100);
-    result.messageCount = messages.length;
+    // This unit's inbound PM/vendor rows (the Email history panel's source).
+    const pmEmails = await db
+      .select()
+      .from(buyInEmails)
+      .where(and(eq(buyInEmails.reservationId, reservationId), eq(buyInEmails.buyInId, buyIn.id)))
+      .orderBy(desc(buyInEmails.sentAt))
+      .limit(100)
+      .catch(() => [] as any[]);
+
+    const messages = mergeArrivalSourceMessages(inboxMessages, pmEmails);
+    result.messageCount = messages.filter((m) => m.direction !== "outbound").length;
     if (!messages.length) continue;
 
     const marketKey = resolveBuyInMarket({ name: buyIn.propertyName, listingTitle: buyIn.unitLabel });
@@ -295,7 +403,7 @@ export async function refreshArrivalDetailsForReservation(reservationId: string)
       extraction = await extractArrivalDetailsWithRegex(messages, buyIn, communityState);
     }
     if (!extraction) continue;
-    extraction.aliasEmail = alias;
+    extraction.aliasEmail = result.aliasEmail ?? undefined;
     result.extraction = extraction;
 
     const patch: Record<string, unknown> = {};
