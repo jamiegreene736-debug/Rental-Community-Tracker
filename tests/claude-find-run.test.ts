@@ -849,8 +849,70 @@ console.log("claude-find-run: checkout-run source wiring");
     "the runner surfaces its Chrome window whenever attention is raised",
     runnerSrc.includes("async function surfaceRunnerChrome")
       && runnerSrc.includes("Browser.setWindowBounds")
-      && /function startAttentionAlarm\(reason\) \{\s*\n[^]*?void surfaceRunnerChrome\(\);/.test(runnerSrc),
+      && runnerSrc.includes("void surfaceRunnerChrome();"),
   );
+
+  // ── The YELLOW card-handoff pop-up (operator directive 2026-07-20) ────────
+  console.log("claude-find-run: yellow card-handoff pop-up");
+  check(
+    // The payment handoff gets the sidecar's yellow challenge treatment ON THE
+    // PREPARED CHECKOUT TAB: near-fullscreen window + tab activation + an
+    // injected top banner and border, in the sidecar's exact yellows.
+    // Behaviorally proven against a real CDP Chrome pre-merge (banner painted
+    // into the vrbo tab only, click-transparent, idempotent).
+    "the payment handoff paints the yellow banner + border into the checkout tab",
+    runnerSrc.includes("export async function surfaceCheckoutHandoff")
+      && runnerSrc.includes("rct-findrun-card-banner")
+      && runnerSrc.includes("rct-findrun-card-border")
+      && runnerSrc.includes("#fde047")
+      && runnerSrc.includes("#facc15")
+      && runnerSrc.includes("ADD THE CREDIT CARD")
+      && runnerSrc.includes("No purchase has been submitted")
+      && runnerSrc.includes("/json/activate/")
+      && runnerSrc.includes("Runtime.evaluate"),
+  );
+  check(
+    // DISPLAY-ONLY is load-bearing: the border must be click-transparent and
+    // nothing may touch the payment form. The card + final click are the
+    // operator's alone.
+    "the injected treatment is display-only (click-transparent border, no form access)",
+    runnerSrc.includes("pointer-events: none")
+      // (\.value\s*=[^=] — a bare assignment; `.value === "painted"` is the
+      // legit CDP result read and must not trip this.)
+      && !/(querySelector\(\s*["']input|\.value\s*=[^=]|\.click\(\)|\.submit\(\))/.test(
+        runnerSrc.slice(runnerSrc.indexOf("surfaceCheckoutHandoff"), runnerSrc.indexOf("let attentionAlarm")),
+      ),
+  );
+  check(
+    "awaiting-payment attention routes to the yellow pop-up; other attention keeps plain surfacing",
+    runnerSrc.includes("/^awaiting payment\\b/i.test(String(reason ?? \"\").trim())")
+      && runnerSrc.includes("void surfaceCheckoutHandoff(reason);"),
+  );
+  // DRIFT-LOCK, behavioral: the headless checkout brief MANDATES the exact
+  // ATTENTION line; after scanMarkers strips the marker, the remaining reason
+  // must match the runner's routing regex — reword either side alone and this
+  // trips before the operator loses the yellow pop-up.
+  {
+    const brief = buildCoworkCheckoutPrompt(
+      {
+        reservationId: "res-1",
+        guestName: "Jacelyn Tsu",
+        propertyName: "Menehune Shores",
+        checkIn: "2026-07-21",
+        checkOut: "2026-07-26",
+        units: [{ buyInId: 538, unitLabel: "Luana Kai C307", listingUrl: "https://www.vrbo.com/1", costPaid: "1968" }],
+        baseUrl: "https://x.example",
+      },
+      { headlessRun: { runId: "r", runToken: "t" } },
+    );
+    const mandated = brief.split("\n").find((l) => l.trim().startsWith("ATTENTION: awaiting payment"));
+    const scanned = mandated ? runnerScanMarkers(mandated.trim()) : { attention: null };
+    check(
+      "the brief's mandated handoff line survives scanMarkers AND matches the routing regex",
+      typeof scanned.attention === "string" && /^awaiting payment\b/i.test(scanned.attention),
+      scanned.attention,
+    );
+  }
 }
 
 console.log(`\nclaude-find-run: ${pass} passed, ${fail} failed`);

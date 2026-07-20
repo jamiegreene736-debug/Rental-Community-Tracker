@@ -318,11 +318,145 @@ async function surfaceRunnerChrome() {
   }
 }
 
+/**
+ * The CARD HANDOFF pop-up (operator directive 2026-07-20: "have it pop up
+ * Chrome so I can see it in like a yellow pop up"). When a checkout run
+ * reaches the payment stage — alias minted, guest name filled, card form
+ * showing — this surfaces the PREPARED CHECKOUT TAB near-fullscreen and
+ * paints the sidecar's yellow challenge treatment onto it (top banner +
+ * yellow border), so the handoff is unmissable. Same visual language as
+ * worker.mjs setVrboChallengeHighlight; injection is via raw CDP
+ * Runtime.evaluate on the page target (no Playwright in this runner).
+ *
+ * DISPLAY-ONLY, and load-bearing that it stays that way: the injected DOM is
+ * a banner + a pointer-events:none border. It must never touch the checkout
+ * form, prefill anything, or intercept clicks — the card and the final
+ * Checkout click are the operator's alone. The banner disappears naturally on
+ * the navigation their Checkout click causes.
+ */
+export async function surfaceCheckoutHandoff(reason) {
+  try {
+    const base = `http://127.0.0.1:${CDP_PORT}`;
+    const targets = await (await fetch(`${base}/json/list`, { signal: AbortSignal.timeout(2_000) })).json();
+    const pages = Array.isArray(targets) ? targets.filter((t) => t?.type === "page") : [];
+    if (!pages.length) return false;
+    // Find the prepared checkout tab: a vrbo.com page, checkout-shaped URL
+    // first. Fall back to any vrbo tab, then the frontmost page.
+    const score = (t) => {
+      const url = String(t?.url ?? "");
+      if (!/(^|\.)vrbo\.com/i.test(url.replace(/^https?:\/\//i, "").split("/")[0] ?? "")) return 0;
+      return /checkout|payment|book/i.test(url) ? 2 : 1;
+    };
+    const target = [...pages].sort((a, b) => score(b) - score(a))[0];
+    if (!target?.id) return false;
+
+    // Front that TAB inside its window (plain HTTP endpoint — no ws needed).
+    await fetch(`${base}/json/activate/${target.id}`, { signal: AbortSignal.timeout(2_000) }).catch(() => {});
+
+    // Surface the WINDOW: un-minimize, then near-fullscreen-ish bounds.
+    const version = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();
+    const browserWs = version?.webSocketDebuggerUrl;
+    if (browserWs && typeof WebSocket === "function") {
+      await new Promise((resolve) => {
+        const ws = new WebSocket(browserWs);
+        const done = () => { try { ws.close(); } catch {} resolve(); };
+        const timer = setTimeout(done, 4_000);
+        let windowId = null;
+        ws.addEventListener("open", () => ws.send(JSON.stringify({ id: 1, method: "Browser.getWindowForTarget", params: { targetId: target.id } })));
+        ws.addEventListener("message", (event) => {
+          let data;
+          try { data = JSON.parse(String(event.data)); } catch { return; }
+          if (data.id === 1) {
+            windowId = data.result?.windowId;
+            if (!windowId) { clearTimeout(timer); return done(); }
+            ws.send(JSON.stringify({ id: 2, method: "Browser.setWindowBounds", params: { windowId, bounds: { windowState: "normal" } } }));
+          } else if (data.id === 2) {
+            ws.send(JSON.stringify({ id: 3, method: "Browser.setWindowBounds", params: { windowId, bounds: { left: 40, top: 30, width: 1500, height: 980 } } }));
+          } else if (data.id === 3) {
+            clearTimeout(timer);
+            done();
+          }
+        });
+        ws.addEventListener("error", () => { clearTimeout(timer); done(); });
+      });
+    }
+
+    // Paint the yellow handoff treatment INTO the checkout tab.
+    if (!target.webSocketDebuggerUrl || typeof WebSocket !== "function") return false;
+    const message = `\u{1F4B3} ADD THE CREDIT CARD — ${String(reason ?? "the checkout is prepared").slice(0, 200)} · Card fields are EMPTY; add the card and click Checkout yourself. No purchase has been submitted.`;
+    // Injected verbatim as a function body via Runtime.evaluate. Idempotent:
+    // re-injection just updates the banner text.
+    const inject = `(() => {
+      const styleId = "rct-findrun-card-style";
+      const bannerId = "rct-findrun-card-banner";
+      const borderId = "rct-findrun-card-border";
+      if (!document.getElementById(styleId)) {
+        const style = document.createElement("style");
+        style.id = styleId;
+        style.textContent = \`
+          #\${bannerId} {
+            position: fixed; z-index: 2147483647; top: 0; left: 0; right: 0;
+            padding: 14px 18px; background: #fde047; color: #111827;
+            border-bottom: 4px solid #f59e0b;
+            font: 700 18px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22); text-align: center;
+          }
+          body { padding-top: 58px !important; }
+          #\${borderId} {
+            position: fixed; z-index: 2147483646; inset: 0;
+            border: 12px solid #facc15; box-shadow: inset 0 0 0 4px #f59e0b;
+            pointer-events: none;
+          }
+        \`;
+        document.documentElement.appendChild(style);
+      }
+      let banner = document.getElementById(bannerId);
+      if (!banner) {
+        banner = document.createElement("div");
+        banner.id = bannerId;
+        document.documentElement.appendChild(banner);
+      }
+      banner.textContent = ${JSON.stringify(message)};
+      if (!document.getElementById(borderId)) {
+        const border = document.createElement("div");
+        border.id = borderId;
+        document.documentElement.appendChild(border);
+      }
+      return "painted";
+    })()`;
+    const painted = await new Promise((resolve) => {
+      const ws = new WebSocket(target.webSocketDebuggerUrl);
+      const done = (ok) => { try { ws.close(); } catch {} resolve(ok); };
+      const timer = setTimeout(() => done(false), 4_000);
+      ws.addEventListener("open", () => ws.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: inject, returnByValue: true } })));
+      ws.addEventListener("message", (event) => {
+        let data;
+        try { data = JSON.parse(String(event.data)); } catch { return; }
+        if (data.id !== 1) return;
+        clearTimeout(timer);
+        done(data.result?.result?.value === "painted");
+      });
+      ws.addEventListener("error", () => { clearTimeout(timer); done(false); });
+    });
+    if (painted) log("card handoff: surfaced the checkout tab with the yellow banner");
+    return painted;
+  } catch {
+    return false;
+  }
+}
+
 let attentionAlarm = null;
 function startAttentionAlarm(reason) {
   // The window surfaces on EVERY attention raise (not just the first) — a
-  // second blocker may be on a different tab. Fire-and-forget.
-  void surfaceRunnerChrome();
+  // second blocker may be on a different tab. The PAYMENT handoff gets the
+  // full yellow pop-up treatment on the prepared checkout tab; every other
+  // attention (bot walls etc.) gets the plain window surfacing. Fire-and-
+  // forget either way.
+  if (/^awaiting payment\b/i.test(String(reason ?? "").trim())) {
+    void surfaceCheckoutHandoff(reason);
+  } else {
+    void surfaceRunnerChrome();
+  }
   if (attentionAlarm || !SOUNDS) return;
   let fires = 0;
   const fire = () => {
