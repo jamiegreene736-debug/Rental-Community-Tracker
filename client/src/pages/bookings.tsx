@@ -14438,7 +14438,7 @@ function BuyInVendorEmailPanel({
           </div>
         </div>
       </details>
-      <details className="rounded-md border bg-background/70 p-2" open={mergedThread.length > 0}>
+      <details className="rounded-md border bg-background/70 p-2">
         <summary className="cursor-pointer text-xs font-medium">Email history ({mergedThread.length})</summary>
         {mergedThread.length === 0 && (
           <div className="mt-2 text-[11px] text-muted-foreground">
