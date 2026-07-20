@@ -36,6 +36,7 @@ import {
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
   MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick, Download,
   ShieldCheck, Paperclip, X, Minimize2, Plus, Send, Ban, Sparkles, Reply, AlertTriangle,
+  PhoneCall,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -5811,7 +5812,7 @@ function isDisplayableArrivalValue(value: string | null | undefined): boolean {
   return true;
 }
 
-function buyInHasArrivalDetails(buyIn: Pick<BuyIn, "unitAddress" | "accessCode" | "wifiName" | "wifiPassword" | "parkingInfo" | "arrivalNotes">): boolean {
+function buyInHasArrivalDetails(buyIn: Pick<BuyIn, "unitAddress" | "accessCode" | "wifiName" | "wifiPassword" | "parkingInfo" | "arrivalNotes" | "managementCompany" | "managementContact">): boolean {
   return !!(
     isDisplayableArrivalValue(buyIn.unitAddress)
     || isDisplayableArrivalValue(buyIn.accessCode)
@@ -5819,6 +5820,11 @@ function buyInHasArrivalDetails(buyIn: Pick<BuyIn, "unitAddress" | "accessCode" 
     || isDisplayableArrivalValue(buyIn.wifiPassword)
     || isDisplayableArrivalValue(buyIn.parkingInfo)
     || isDisplayableArrivalValue(buyIn.arrivalNotes)
+    // A confirmed on-site management contact IS arrival information — the
+    // summary card must render when it's the only thing known (the exact
+    // "no arrival details yet, need someone to call" scenario).
+    || isDisplayableArrivalValue(buyIn.managementCompany)
+    || isDisplayableArrivalValue(buyIn.managementContact)
   );
 }
 
@@ -5837,6 +5843,13 @@ function BuyInArrivalSummary({ buyIn, onEdit }: { buyIn: BuyIn; onEdit: () => vo
         .join(" · "),
     },
     { label: "Parking", value: sanitizeArrivalDisplayValue(buyIn.parkingInfo) },
+    {
+      label: "On-site management",
+      value: [buyIn.managementCompany, buyIn.managementContact]
+        .map((v) => sanitizeArrivalDisplayValue(v))
+        .filter(isDisplayableArrivalValue)
+        .join(" · "),
+    },
     { label: "Gate / elevator / notes", value: sanitizeArrivalDisplayValue(buyIn.arrivalNotes) },
   ].filter((row) => isDisplayableArrivalValue(row.value));
 
@@ -5852,7 +5865,7 @@ function BuyInArrivalSummary({ buyIn, onEdit }: { buyIn: BuyIn; onEdit: () => vo
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
         {rows.map((row) => (
-          <div key={row.label} className={row.label === "Address" || row.label === "Gate / elevator / notes" ? "md:col-span-2" : ""}>
+          <div key={row.label} className={row.label === "Address" || row.label === "Gate / elevator / notes" || row.label === "On-site management" ? "md:col-span-2" : ""}>
             <span className="text-muted-foreground">{row.label}: </span>
             <span className={row.mono ? "font-mono" : ""}>{row.value}</span>
           </div>
@@ -13199,6 +13212,11 @@ export default function Bookings() {
                                     <FileText className="h-3.5 w-3.5 mr-1" />
                                     Unit details
                                   </Button>
+                                  {/* Look up + save the LOCAL on-site management
+                                      team's contact into the arrival info — the
+                                      "confirmation email arrived but no arrival
+                                      details yet" chase path. */}
+                                  <ConfirmManagementContactButton buyIn={slot.buyIn} />
                                   <Button
                                     size="sm"
                                     variant="ghost"
@@ -14980,6 +14998,109 @@ function aliasEmailSnippet(body: string | null | undefined): string {
   return formatEmailBodyForDisplay(String(body ?? "")).replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
+// ─── "Confirm on-site management contact" (operator ask, 2026-07-20) ────────
+// Scenario: buy-in booked, confirmation email arrived, arrival details NOT yet
+// sent — the operator needs the LOCAL on-site management team's phone/email to
+// chase them. One click runs the server lookup (alias-inbox emails → listing
+// page → Claude web search, validated server-side so an invented contact can
+// never persist) and saves the result into the arrival-information columns
+// (buy_ins.managementCompany / managementContact). Mounted on the attached-unit
+// toolbar AND inside the Unit-arrival-details dialog (there `onApplied` fills
+// the form fields in place so the operator sees what landed).
+type ManagementContactLookupResponse = {
+  ok: boolean;
+  contact?: {
+    companyName: string;
+    phone: string | null;
+    email: string | null;
+    sourceKind: string;
+    sourceUrl: string | null;
+    emailSubject: string | null;
+    quote: string | null;
+    confidence: number;
+  };
+  applied?: { managementCompany: string; managementContact: string };
+  emailCount?: number;
+};
+
+function managementContactSourceLabel(contact: NonNullable<ManagementContactLookupResponse["contact"]>): string {
+  if (contact.sourceKind === "email") {
+    return contact.emailSubject ? `from email "${contact.emailSubject}"` : "from the booking-alias inbox";
+  }
+  if (contact.sourceKind === "listing-page") return "from the booked listing page";
+  let host = "";
+  try {
+    host = contact.sourceUrl ? new URL(contact.sourceUrl).hostname.replace(/^www\./, "") : "";
+  } catch { /* keep generic */ }
+  return host ? `found online (${host})` : "found online";
+}
+
+function ConfirmManagementContactButton({
+  buyIn,
+  onApplied,
+}: {
+  buyIn: BuyIn;
+  /** Dialog mount: fill the open form's fields with what was saved. */
+  onApplied?: (applied: { managementCompany: string; managementContact: string }) => void;
+}) {
+  const { toast } = useToast();
+  const [result, setResult] = useState<ManagementContactLookupResponse["contact"] | null>(null);
+
+  const lookup = useMutation({
+    mutationFn: async () => {
+      const r = await apiRequest("POST", `/api/buy-ins/${buyIn.id}/management-contact-lookup`, {});
+      return (await r.json()) as ManagementContactLookupResponse;
+    },
+    onSuccess: (body) => {
+      if (!body.ok || !body.contact || !body.applied) {
+        toast({ title: "No contact confirmed", description: "The lookup returned no verified contact.", variant: "destructive" });
+        return;
+      }
+      setResult(body.contact);
+      onApplied?.(body.applied);
+      queryClient.invalidateQueries({ queryKey: ["/api/bookings/listing"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins"] });
+      invalidateArrivalDetailsQueries();
+      toast({
+        title: "On-site management contact saved",
+        description: `${body.applied.managementCompany}${body.applied.managementContact ? ` — ${body.applied.managementContact}` : ""} (${managementContactSourceLabel(body.contact)})`,
+      });
+    },
+    onError: (e: any) =>
+      toast({
+        title: "Could not confirm management contact",
+        description: e?.message ?? "Lookup failed",
+        variant: "destructive",
+      }),
+  });
+
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      <Button
+        size="sm"
+        variant="ghost"
+        className="text-sky-700 dark:text-sky-300"
+        disabled={lookup.isPending}
+        onClick={(e) => { e.stopPropagation(); lookup.mutate(); }}
+        title="Confirm the local on-site management team's contact details (from the booking emails or a Claude web lookup) and save them into the arrival information"
+        data-testid={`button-confirm-mgmt-contact-${buyIn.id}`}
+      >
+        {lookup.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <PhoneCall className="h-3.5 w-3.5 mr-1" />}
+        {lookup.isPending ? "Looking up mgmt contact…" : "Confirm mgmt contact"}
+      </Button>
+      {result && (
+        <span
+          className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200"
+          title={result.quote ? `Evidence: "${result.quote}"` : result.sourceUrl ?? undefined}
+          data-testid={`mgmt-contact-confirmed-${buyIn.id}`}
+        >
+          ✓ {result.companyName} · {managementContactSourceLabel(result)}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function ArrivalDetailsDialog({
   buyIn,
   isSaving,
@@ -15036,6 +15157,19 @@ function ArrivalDetailsDialog({
           <div className="col-span-2">
             <Label>Management contact</Label>
             <Input value={form.managementContact} onChange={(e) => set("managementContact", e.target.value)} placeholder="Phone, email, after-hours contact" />
+            {/* One-click lookup of the LOCAL on-site management team (booking
+                emails → listing page → Claude web search). The server saves the
+                verified result; onApplied mirrors it into this form so what you
+                see is what's stored. */}
+            <div className="mt-1.5">
+              <ConfirmManagementContactButton
+                buyIn={buyIn}
+                onApplied={(applied) => {
+                  set("managementCompany", applied.managementCompany);
+                  set("managementContact", applied.managementContact);
+                }}
+              />
+            </div>
           </div>
           <div className="col-span-2">
             <Label>Parking info</Label>

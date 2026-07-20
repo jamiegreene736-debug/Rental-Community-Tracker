@@ -35,6 +35,11 @@ export const buyIns = pgTable("buy_ins", {
   parkingInfo: text("parking_info"),
   managementCompany: text("management_company"),
   managementContact: text("management_contact"),
+  // Provenance for the "Confirm on-site management contact" lookup — a
+  // ManagementContactSourceRecord (shared/management-contact-logic.ts): where
+  // the confirmed company/phone/email came from (cited alias email or web page),
+  // quote/URL evidence, confidence, and when it was confirmed.
+  managementContactSource: jsonb("management_contact_source"),
   arrivalNotes: text("arrival_notes"),
   groundFloorStatus: text("ground_floor_status").notNull().default("unknown"),
   groundFloorEvidence: text("ground_floor_evidence"),
