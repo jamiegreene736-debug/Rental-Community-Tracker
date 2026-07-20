@@ -453,11 +453,7 @@ import {
   type PropertyUnitBuilder,
 } from "../client/src/data/unit-builder-data";
 import {
-  aliasPrefixCandidates,
-  createSimpleLoginAlias,
   createSimpleLoginContact,
-  extractSimpleLoginAliasEmail,
-  extractSimpleLoginAliasId,
   extractSimpleLoginContactId,
   extractSimpleLoginReverseAlias,
   extractEmailAddress,
@@ -465,6 +461,11 @@ import {
   isSimpleLoginAliasExistsError,
   SIMPLELOGIN_MAILBOX_EMAIL,
 } from "./simplelogin";
+import {
+  ensureReservationAliasExpiresAt,
+  getOrCreateReservationAlias,
+  reservationAliasIsExpired,
+} from "./reservation-alias";
 import { buyInEmailSendConfigured, isPlausiblePropertyAddressForBuyIn, normalizeBuyInEmailAttachments, parseArrivalDetailsFromText, sendBuyInEmail } from "./buy-in-email";
 import {
   type OtaVisibilityCandidate,
@@ -13409,133 +13410,8 @@ Requirements:
     }
   });
 
-  const ALIAS_EXPIRES_DAYS_AFTER_CHECKOUT = Math.max(
-    1,
-    Number(process.env.SIMPLELOGIN_ALIAS_EXPIRES_DAYS_AFTER_CHECKOUT || 30),
-  );
-  const ALIAS_FALLBACK_ACTIVE_DAYS = Math.max(
-    ALIAS_EXPIRES_DAYS_AFTER_CHECKOUT,
-    Number(process.env.SIMPLELOGIN_ALIAS_FALLBACK_ACTIVE_DAYS || 180),
-  );
-
-  function parseAliasExpiryDate(value: unknown): Date | null {
-    if (!value) return null;
-    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
-    const raw = String(value).trim();
-    if (!raw) return null;
-    const date = new Date(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T12:00:00.000Z` : raw);
-    return Number.isNaN(date.getTime()) ? null : date;
-  }
-
-  function addAliasDays(base: Date, days: number): Date {
-    return new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
-  }
-
-  function computeReservationAliasExpiresAt(buyIns: Array<{ checkOut?: unknown }>, fallbackBase: Date = new Date()): Date {
-    const latestCheckout = buyIns.reduce<Date | null>((latest, buyIn) => {
-      const parsed = parseAliasExpiryDate(buyIn.checkOut);
-      if (!parsed) return latest;
-      return !latest || parsed.getTime() > latest.getTime() ? parsed : latest;
-    }, null);
-    if (latestCheckout) return addAliasDays(latestCheckout, ALIAS_EXPIRES_DAYS_AFTER_CHECKOUT);
-    return addAliasDays(fallbackBase, ALIAS_FALLBACK_ACTIVE_DAYS);
-  }
-
-  async function ensureReservationAliasExpiresAt<T extends { id: number; expiresAt?: Date | string | null; createdAt?: Date | string | null }>(
-    alias: T,
-    buyIns: Array<{ checkOut?: unknown }>,
-  ): Promise<T> {
-    const fallbackBase = parseAliasExpiryDate(alias.createdAt) ?? new Date();
-    const expiresAt = computeReservationAliasExpiresAt(buyIns, fallbackBase);
-    const current = parseAliasExpiryDate(alias.expiresAt);
-    if (current && current.getTime() >= expiresAt.getTime() - 60_000) return alias;
-    const [updated] = await db
-      .update(reservationAliases)
-      .set({ expiresAt, updatedAt: new Date() })
-      .where(eq(reservationAliases.id, alias.id))
-      .returning();
-    return (updated ?? alias) as T;
-  }
-
-  function reservationAliasIsExpired(alias: { expiresAt?: Date | string | null }): boolean {
-    const expiresAt = parseAliasExpiryDate(alias.expiresAt);
-    return !!expiresAt && expiresAt.getTime() < Date.now();
-  }
-
-  async function getOrCreateReservationAlias(input: {
-    reservationId: string;
-    guestName?: string | null;
-    buyIns?: Array<{ checkOut?: unknown }>;
-    // When provided, the alias is scoped to this specific buy-in (unit), so a
-    // combo booking can have a distinct alias per unit. Omitted = legacy
-    // reservation-level lookup (matches the earliest existing alias row).
-    buyInId?: number | null;
-    unitLabel?: string | null;
-  }) {
-    const hasBuyInId = typeof input.buyInId === "number" && Number.isFinite(input.buyInId);
-    const existing = await db
-      .select()
-      .from(reservationAliases)
-      .where(
-        hasBuyInId
-          ? and(
-              eq(reservationAliases.reservationId, input.reservationId),
-              eq(reservationAliases.buyInId, input.buyInId as number),
-            )
-          : eq(reservationAliases.reservationId, input.reservationId),
-      )
-      .limit(1);
-    if (existing[0]) {
-      const alias = await ensureReservationAliasExpiresAt(existing[0], input.buyIns ?? []);
-      return { alias, created: false };
-    }
-
-    // Unit-scoped aliases append the unit token to the prefix — two units on
-    // ONE reservation share the guest+reservation base and SimpleLogin rejects
-    // the second create with "alias ... already exists" (the Unit B failure the
-    // operator hit 2026-07-05). Walk the candidate list, only continuing past a
-    // prefix when SimpleLogin says it's taken.
-    const prefixCandidates = aliasPrefixCandidates({
-      guestName: input.guestName,
-      reservationId: input.reservationId,
-      unitLabel: hasBuyInId ? input.unitLabel : null,
-      buyInId: hasBuyInId ? (input.buyInId as number) : null,
-    });
-    let payload: any = null;
-    let lastAliasError: unknown = null;
-    for (const prefix of prefixCandidates) {
-      try {
-        payload = await createSimpleLoginAlias({
-          prefix,
-          guestName: input.guestName,
-          note: `Buy-in communication alias for Guesty reservation ${input.reservationId}${input.unitLabel ? ` — ${input.unitLabel}` : ""}`,
-        });
-        break;
-      } catch (err) {
-        lastAliasError = err;
-        if (!isSimpleLoginAliasExistsError(err)) throw err;
-      }
-    }
-    if (!payload) throw lastAliasError ?? new Error("SimpleLogin alias creation failed");
-    const aliasEmail = extractSimpleLoginAliasEmail(payload);
-    const simpleloginAliasId = extractSimpleLoginAliasId(payload);
-    if (!aliasEmail) throw new Error("SimpleLogin did not return an alias email");
-
-    const [alias] = await db
-      .insert(reservationAliases)
-      .values({
-        reservationId: input.reservationId,
-        buyInId: hasBuyInId ? (input.buyInId as number) : null,
-        guestName: input.guestName ?? null,
-        aliasEmail,
-        simpleloginAliasId,
-        mailboxEmail: SIMPLELOGIN_MAILBOX_EMAIL,
-        expiresAt: computeReservationAliasExpiresAt(input.buyIns ?? []),
-        rawPayload: JSON.stringify(payload),
-      })
-      .returning();
-    return { alias, created: true };
-  }
+  // Alias expiry helpers + getOrCreateReservationAlias moved to server/reservation-alias.ts
+  // (unified per-unit alias — the same engine now also mints the VRBO traveler email).
 
   async function getOrCreateVendorContact(input: {
     buyInId: number;
