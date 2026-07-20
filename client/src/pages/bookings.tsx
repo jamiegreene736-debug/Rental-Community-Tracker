@@ -36,7 +36,7 @@ import {
   WalletCards, Landmark, Clock3, Loader2, Play, Square, Pause, Mail,
   MapPin, Footprints, MessageSquare, MonitorPlay, MousePointerClick, Download,
   ShieldCheck, Paperclip, X, Minimize2, Plus, Send, Ban, Sparkles, Reply, AlertTriangle,
-  PhoneCall,
+  PhoneCall, Eye, EyeOff,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { BuyIn, GuestyPropertyMap, ReservationCancellationAudit } from "@shared/schema";
@@ -2976,6 +2976,64 @@ function HeadlessCheckoutRunButton({
     >
       {runActive ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <ShoppingCart className="mr-1 h-3.5 w-3.5" />}
       {runActive ? "Run in progress…" : label}
+    </Button>
+  );
+}
+
+// "Show in agent portal" — per-reservation opt-in for the agent's LIMITED
+// buy-in view (operator spec 2026-07-20). Sharing lets the agent open the PM
+// email thread + arrival/unit info for THIS reservation only; the server
+// projects buy-ins through the agentSafeBuyIn whitelist so financial fields
+// (guest payments, costPaid, paid rates) never reach the agent.
+function AgentShareToggleButton({ reservationId }: { reservationId: string }) {
+  const { toast } = useToast();
+  const { data } = useQuery<{ reservationIds: string[] }>({
+    queryKey: ["/api/agent-shares"],
+    queryFn: () => apiRequest("GET", "/api/agent-shares").then((r) => r.json()),
+    staleTime: 60_000,
+  });
+  const shared = (data?.reservationIds ?? []).includes(reservationId);
+  const mutation = useMutation({
+    mutationFn: async () => {
+      const r = await apiRequest("POST", "/api/agent-shares", { reservationId, shared: !shared });
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(errBody.message ?? errBody.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: (result: { shared: boolean }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/agent-shares"] });
+      toast({
+        title: result.shared ? "Shared with agent portal" : "Hidden from agent portal",
+        description: result.shared
+          ? "The agent can now see this reservation's PM emails and unit info (no financial data)."
+          : "The agent can no longer see this reservation.",
+      });
+    },
+    onError: (e: any) => toast({ title: "Agent share failed", description: e.message, variant: "destructive" }),
+  });
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      className={
+        shared
+          ? "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+          : "border-violet-300 bg-violet-50 text-violet-800 hover:bg-violet-100"
+      }
+      disabled={mutation.isPending}
+      onClick={() => mutation.mutate()}
+      data-testid={`button-agent-share-${reservationId}`}
+    >
+      {mutation.isPending ? (
+        <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+      ) : shared ? (
+        <EyeOff className="mr-1 h-3.5 w-3.5" />
+      ) : (
+        <Eye className="mr-1 h-3.5 w-3.5" />
+      )}
+      {shared ? "In agent portal — hide" : "Show in agent portal"}
     </Button>
   );
 }
@@ -12315,6 +12373,10 @@ export default function Bookings() {
                         {manualReservation && <ManualReservationContactPanel reservation={r} />}
                         {!manualReservation && <ReservationCancellationPolicyNotice reservation={r} />}
                         <div className="flex flex-wrap justify-end gap-2">
+                          {/* Per-reservation agent-portal share (operator spec
+                              2026-07-20): one-by-one opt-in for the agent's
+                              limited (no-financials) buy-in view. */}
+                          <AgentShareToggleButton reservationId={r._id} />
                           {/* "Verify community" — Cowork prompt confirming the attached
                               units are in the same building/complex; records confirmed
                               addresses onto the buy-ins (operator spec 2026-07-05). */}
