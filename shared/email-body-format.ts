@@ -152,11 +152,15 @@ export function splitEmailBodyIntoSegments(body: string): EmailBodySegment[] {
   const text = String(body ?? "");
   const segments: EmailBodySegment[] = [];
   let cursor = 0;
-  for (const match of text.matchAll(URL_IN_TEXT_RE)) {
+  // exec loop, not matchAll — the repo's TS target can't iterate matchAll's
+  // RegExpStringIterator (TS2802). Fresh regex so lastIndex never leaks.
+  const re = new RegExp(URL_IN_TEXT_RE.source, "g");
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
     let url = match[0];
     const trimmed = url.replace(/[),.;:!?]+$/, "");
     url = trimmed.length >= "https://x".length ? trimmed : url;
-    const start = match.index ?? 0;
+    const start = match.index;
     if (start > cursor) segments.push({ kind: "text", value: text.slice(cursor, start) });
     segments.push({ kind: "link", value: url, href: url });
     cursor = start + url.length;
