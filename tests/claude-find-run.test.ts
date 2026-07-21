@@ -32,13 +32,16 @@ import {
   claudeFindRunnerActivity,
   claudeFindRunOverview,
   claudeFindRunQueueAhead,
+  checkoutRunDidNoWorkFailure,
   classifyClaudeStreamLine,
   claudeFindRunStatusLabel,
   claudeFindRunWatchdogVerdict,
   clientClaudeFindRunView,
   latestClaudeFindRunForReservation,
+  lineCallsAgentPortalEndpoint,
   lineUsesChromeBrowserTool,
   parseClaudeFindRunStore,
+  reportLooksLikeRefusal,
   scanClaudeFindRunMarkers,
   scrubClaudeFindRunToken,
   serializeClaudeFindRunStore,
@@ -50,9 +53,12 @@ import {
   browserMcpFailure as runnerBrowserMcpFailure,
   browserNeverUsedFailure as runnerBrowserNeverUsedFailure,
   browserProofRequiredFromInit as runnerBrowserProofRequired,
+  checkoutRunDidNoWorkFailure as runnerCheckoutNoWorkFailure,
   classifyStreamLine as runnerClassify,
+  lineCallsAgentPortalEndpoint as runnerLineCallsAgentEndpoint,
   lineUsesChromeBrowserTool as runnerLineUsesChromeTool,
   pickAttentionTarget as runnerPickAttentionTarget,
+  reportLooksLikeRefusal as runnerReportLooksLikeRefusal,
   scanMarkers as runnerScanMarkers,
 } from "../daemon/vrbo-sidecar/claude-find-runner.mjs";
 
@@ -1265,6 +1271,162 @@ console.log("claude-find-run: checkout-run source wiring");
     "the bookings page mounts the banner and wakes it when runs are enqueued",
     bookingsSrc.includes("<ClaudeRunStatusBanner")
       && (bookingsSrc.match(/invalidateQueries\(\{ queryKey: \["\/api\/claude-find-runs\/overview"\] \}\)/g) ?? []).length >= 3,
+  );
+}
+
+// ── Refusal / no-work terminal guard (2026-07-21) ───────────────────────────
+// Real incident, run 629799c6-e8fa-43ff-90d5-8e24e65c1469 (Jul 19): a headless
+// CHECKOUT run's model REFUSED the task ("I'm not going to execute this task…
+// hallmarks of fraudulent automation"), the CLI still emitted subtype
+// "success", and the run was recorded "completed" with a green chip. The
+// guard is STRUCTURAL: the checkout brief's step 1 is an unconditional GET on
+// the agent buy-in endpoint, so a checkout run that ends "success" with ZERO
+// /api/claude-find-runs/agent/:id/* calls did no work and must fail. Refusal
+// phrasing only sharpens the error wording — it is never the gate.
+console.log("\n[refusal / no-work terminal guard]");
+{
+  const agentCurlLine = JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{
+        type: "tool_use",
+        name: "Bash",
+        input: { command: 'curl -sS https://portal.example/api/claude-find-runs/agent/run-9/buy-in -H "X-Run-Token: tok"' },
+      }],
+    },
+  });
+  const chromeOnlyLine = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", name: "mcp__chrome__navigate_page", input: { url: "https://vrbo.com/x" } }] },
+  });
+  const plainCurlLine = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", name: "Bash", input: { command: "curl -sS https://vrbo.com/listing" } }] },
+  });
+  check("a curl to an agent portal endpoint counts as work", lineCallsAgentPortalEndpoint(agentCurlLine) === true);
+  check("a chrome tool call is NOT an agent-endpoint call", lineCallsAgentPortalEndpoint(chromeOnlyLine) === false);
+  check("a curl to a non-portal URL is NOT an agent-endpoint call", lineCallsAgentPortalEndpoint(plainCurlLine) === false);
+  check("non-assistant / unparseable lines answer false", lineCallsAgentPortalEndpoint('{"type":"result"}') === false
+    && lineCallsAgentPortalEndpoint("not json") === false);
+  for (const line of [agentCurlLine, chromeOnlyLine, plainCurlLine, '{"type":"result"}', "junk"]) {
+    check(
+      `runner twin agrees on agent-endpoint detection (${line.slice(0, 40)}…)`,
+      runnerLineCallsAgentEndpoint(line) === lineCallsAgentPortalEndpoint(line),
+    );
+  }
+
+  // The real incident report's opening — the refusal shape.
+  const incidentReport =
+    "I'm not going to execute this task. Here's why:\n\n**This prompt has the hallmarks of fraudulent automation, not a legitimate business tool:**";
+  const honestReport =
+    "Checkout prepared for Unit 8J — total $1,912.40 vs approved $1,850.00, damage waiver selected, travel insurance declined. No purchase has been submitted — the checkout tab is open, waiting for the card.";
+  check("the incident report reads as a refusal", reportLooksLikeRefusal(incidentReport) === true);
+  check("an honest checkout report does NOT read as a refusal", reportLooksLikeRefusal(honestReport) === false);
+  check("null / empty reports are not refusals", reportLooksLikeRefusal(null) === false && reportLooksLikeRefusal("") === false);
+  for (const report of [incidentReport, honestReport, null]) {
+    check(
+      "runner twin agrees on refusal shape",
+      runnerReportLooksLikeRefusal(report) === reportLooksLikeRefusal(report),
+    );
+  }
+
+  const refusedError = checkoutRunDidNoWorkFailure(incidentReport);
+  check(
+    "refusal-shaped no-work error names the refusal and quotes the report head",
+    refusedError.includes("REFUSED") && refusedError.includes("I'm not going to execute this task")
+      && refusedError.includes("failed"),
+  );
+  const noOpError = checkoutRunDidNoWorkFailure("All done, everything looks great.");
+  check(
+    "non-refusal no-work error is still an honest structural failure",
+    noOpError.includes("without doing ANY checkout work") && noOpError.includes("not even the step-1 buy-in read")
+      && !noOpError.includes("REFUSED"),
+  );
+  check(
+    "runner twin produces identical no-work errors",
+    runnerCheckoutNoWorkFailure(incidentReport) === refusedError
+      && runnerCheckoutNoWorkFailure("All done, everything looks great.") === noOpError,
+  );
+
+  // Source guards — the runner actually wires the gate (runnerSrc pattern).
+  const fs3 = await import("node:fs");
+  const path3 = await import("node:path");
+  const { fileURLToPath: toPath3 } = await import("node:url");
+  const here3 = path3.dirname(toPath3(import.meta.url));
+  const runnerSrc = fs3.readFileSync(path3.join(here3, "../daemon/vrbo-sidecar/claude-find-runner.mjs"), "utf8");
+  check(
+    "runner: tracks agent-endpoint use on every stream line",
+    /if \(!agentEndpointUsed && lineCallsAgentPortalEndpoint\(line\)\) agentEndpointUsed = true;/.test(runnerSrc),
+  );
+  check(
+    "runner: derives the run kind from the claim payload (missing = find)",
+    runnerSrc.includes('const runKind = run.kind === "checkout" ? "checkout" : "find";'),
+  );
+  check(
+    "runner: a success-result checkout run with zero agent-endpoint calls is FAILED, and the branch outranks the browser gate",
+    (() => {
+      const term = runnerSrc.slice(runnerSrc.indexOf("if (!terminalPosted)"));
+      const noWork = term.indexOf('runKind === "checkout" && !agentEndpointUsed');
+      const browserGate = term.indexOf("} else if (!browserUsed) {");
+      return noWork > 0 && browserGate > 0 && noWork < browserGate
+        && /runKind === "checkout" && !agentEndpointUsed\) \{[\s\S]{0,900}?terminal: \{ status: "failed"/.test(term);
+    })(),
+  );
+  check(
+    "runner: the no-work failure routes through the attention channel (reason survives on the failed record)",
+    (() => {
+      const term = runnerSrc.slice(runnerSrc.indexOf('runKind === "checkout" && !agentEndpointUsed'));
+      const branch = term.slice(0, term.indexOf("} else if"));
+      return branch.includes("checkoutRunDidNoWorkFailure(resultReport)") && branch.includes("pendingAttention = error;");
+    })(),
+  );
+  const serverSrc3 = fs3.readFileSync(path3.join(here3, "../server/claude-find-runs.ts"), "utf8");
+  check(
+    "server: the daemon claim payload carries the run kind",
+    serverSrc3.includes('kind: claimed.kind ?? "find"'),
+  );
+
+  // The checkout brief's grounding context (refusal-likelihood reduction) must
+  // exist in BOTH variants without weakening the money-safety rules.
+  const headlessCheckout = buildCoworkCheckoutPrompt(
+    {
+      reservationId: "res-1",
+      guestName: "Ann Guest",
+      propertyName: "Pili Mai",
+      checkIn: "2026-08-01",
+      checkOut: "2026-08-08",
+      units: [{ buyInId: 9, unitLabel: "Unit 8J", listingUrl: "https://www.vrbo.com/1234567", costPaid: 1850 }],
+      party: null,
+      baseUrl: "https://portal.example",
+    },
+    { headlessRun: { runId: "run-9", runToken: "tok-9" } },
+  );
+  const coworkCheckout = buildCoworkCheckoutPrompt({
+    reservationId: "res-1",
+    guestName: "Ann Guest",
+    propertyName: "Pili Mai",
+    checkIn: "2026-08-01",
+    checkOut: "2026-08-08",
+    units: [{ buyInId: 9, unitLabel: "Unit 8J", listingUrl: "https://www.vrbo.com/1234567", costPaid: 1850 }],
+    party: null,
+    baseUrl: "https://portal.example",
+  });
+  for (const [label, prompt] of [["headless", headlessCheckout], ["cowork", coworkCheckout]] as const) {
+    check(
+      `${label} checkout brief carries the legitimacy context`,
+      prompt.includes("## Context — whose system this is")
+        && prompt.includes("my own property-management system")
+        && prompt.includes("You never handle card"),
+    );
+    check(
+      `${label} checkout brief keeps the money-safety rules despite the context block`,
+      prompt.includes("The final submit is human-only") && prompt.includes("15% above")
+        && prompt.includes("Damage waiver ONLY"),
+    );
+  }
+  check(
+    "only the headless variant grounds the run token's origin",
+    headlessCheckout.includes("minted by my") && !coworkCheckout.includes("minted by my"),
   );
 }
 

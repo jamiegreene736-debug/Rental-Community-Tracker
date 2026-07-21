@@ -254,6 +254,61 @@ export function browserNeverUsedFailure() {
   );
 }
 
+// TWIN of lineCallsAgentPortalEndpoint in shared/claude-find-run.ts — true
+// when the agent's curl-only Bash hits ANY /api/claude-find-runs/agent/:id/*
+// endpoint. These calls ARE the run's work; a checkout run whose step-1 GET
+// (unconditional in the brief) never happened did nothing.
+export function lineCallsAgentPortalEndpoint(rawLine) {
+  let parsed;
+  try {
+    parsed = JSON.parse(rawLine);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || parsed.type !== "assistant") return false;
+  const content = parsed.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (b) =>
+      b && b.type === "tool_use" && b.name === "Bash"
+      && typeof b.input?.command === "string"
+      && b.input.command.includes("claude-find-runs/agent/"),
+  );
+}
+
+// TWIN of reportLooksLikeRefusal in shared/claude-find-run.ts — supplementary
+// wording signal only; the fail decision is structural (zero endpoint calls).
+export function reportLooksLikeRefusal(report) {
+  const head = String(report ?? "").slice(0, 800).toLowerCase();
+  return /\b(i['’]?m not going to|i am not going to|i (?:will|can) ?not (?:execute|proceed|assist|perform|complete)|i won['’]?t (?:execute|proceed|do|perform)|i refuse|refusing to|declin(?:e|ing) to (?:execute|proceed|perform)|hallmarks of fraud|fraudulent automation)\b/.test(head);
+}
+
+// TWIN of checkoutRunDidNoWorkFailure in shared/claude-find-run.ts.
+// The 2026-07-19 incident (run 629799c6…): a checkout run whose model REFUSED
+// the task ("I'm not going to execute this task… hallmarks of fraudulent
+// automation") still emitted subtype "success" and was recorded "completed"
+// with a green chip. Zero agent-endpoint calls is the structural proof no
+// work happened; refusal phrasing only sharpens the message.
+export function checkoutRunDidNoWorkFailure(report) {
+  const head = String(report ?? "").trim().replace(/\s+/g, " ").slice(0, 200);
+  if (reportLooksLikeRefusal(report)) {
+    return (
+      "The model REFUSED the checkout task — its final report declines to run it"
+      + (head ? ` ("${head}…")` : "")
+      + ". It made ZERO portal calls (not even the step-1 buy-in read), so no "
+      + "checkout was prepared and nothing was claimed. Recorded as failed, not "
+      + "completed. Review the report, then re-run it or prepare the checkout in "
+      + "Cowork/manually."
+    );
+  }
+  return (
+    'The run ended "success" without doing ANY checkout work — it never called '
+    + "a single portal endpoint (not even the step-1 buy-in read), so no checkout "
+    + "was prepared and nothing was claimed. Whatever the report says, it is not "
+    + "a completed checkout. Recorded as failed; review the report and re-run it."
+  );
+}
+
 export function describeToolUse(name, input) {
   const tool = typeof name === "string" ? name : "tool";
   const url = typeof input?.url === "string" ? input.url : null;
@@ -939,6 +994,17 @@ async function handleRun(run) {
   // mcp__chrome__ tool call. A "completed" report without it is refused —
   // the 2026-07-19 wrong-run class, regardless of what the init line said.
   let browserUsed = false;
+  // The run's kind rides in on the claim payload (server stamps it; absent on
+  // pre-2026-07-21 daemons/payloads = "find"). Checkout runs carry the extra
+  // no-work terminal gate below.
+  const runKind = run.kind === "checkout" ? "checkout" : "find";
+  // Flips true on the first curl to any /api/claude-find-runs/agent/:id/*
+  // endpoint — the structural proof the run did its portal work. A checkout
+  // run's brief makes the step-1 buy-in GET unconditional, so a checkout run
+  // that ends "success" with this still false did NOTHING (the 2026-07-19
+  // refusal incident, run 629799c6…, recorded completed off subtype
+  // "success").
+  let agentEndpointUsed = false;
 
   const flush = async (extra = {}) => {
     const events = buffer.splice(0, buffer.length).map((e) => ({ ...e, text: scrubToken(e.text, run.token) }));
@@ -997,6 +1063,7 @@ async function handleRun(run) {
       });
     }
     if (!browserUsed && lineUsesChromeBrowserTool(line)) browserUsed = true;
+    if (!agentEndpointUsed && lineCallsAgentPortalEndpoint(line)) agentEndpointUsed = true;
     // Marker scan on the agent's own words → portal attention + local alarm.
     if (parsed?.type === "assistant") {
       for (const block of parsed.message?.content ?? []) {
@@ -1053,6 +1120,18 @@ async function handleRun(run) {
           },
         });
         terminalChime("failed", "Claude login needed");
+      } else if (runKind === "checkout" && !agentEndpointUsed) {
+        // Refusal / no-op guard, BEFORE the browser gate on purpose: a model
+        // that refused the task used neither the browser nor an endpoint, and
+        // "the browser never attached" would bury the real cause. Structural,
+        // not phrase-matched — the checkout brief's step 1 is an unconditional
+        // agent-endpoint GET, so zero endpoint calls means zero work whatever
+        // the report claims. The error rides the attention channel too so the
+        // failed record keeps the reason for the row's attention surfacing.
+        const error = checkoutRunDidNoWorkFailure(resultReport);
+        pendingAttention = error;
+        await flush({ terminal: { status: "failed", error: scrubToken(error, run.token) } });
+        terminalChime("failed", "Checkout run did no work");
       } else if (!browserUsed) {
         // The deferred half of the browser guard: the CLI reported a
         // "successful" run that never called a single mcp__chrome tool.
