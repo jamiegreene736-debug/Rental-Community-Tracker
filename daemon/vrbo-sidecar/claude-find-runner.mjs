@@ -308,62 +308,222 @@ function playOnce(cmd, args) {
 }
 
 /**
- * Bring the hidden runner Chrome ON-SCREEN when the operator is needed.
+ * Which open tab is the one the operator must look at?
+ *
+ * The runner Chrome accumulates tabs across a run (listings, searches,
+ * records sites), and CDP's /json/list order is NOT "blocked tab first" — on
+ * the 2026-07-21 live incident the challenged qPublic tab sat behind six
+ * others, so plain pages[0] surfacing showed the operator an unrelated page
+ * and the portal's "needs you" looked like a false alarm. The ATTENTION
+ * reason names the blocked site ("bot check on vrbo.com — unit …"), so host
+ * words from the reason outrank everything; challenge-shaped URLs/titles
+ * (captcha/challenge/verify…) break ties; the first listed page stays the
+ * fallback. Pure — exported for tests/claude-find-run.test.ts.
+ */
+export function pickAttentionTarget(targets, reason) {
+  const pages = Array.isArray(targets) ? targets.filter((t) => t?.type === "page") : [];
+  if (!pages.length) return null;
+  const text = String(reason ?? "").toLowerCase();
+  const hints = new Set();
+  for (const m of text.matchAll(/[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+/g)) {
+    const host = m[0].replace(/^www\./, "");
+    hints.add(host);
+    const stem = host.split(".")[0];
+    if (stem.length >= 4) hints.add(stem);
+  }
+  for (const word of ["vrbo", "booking", "zillow", "hotels", "airbnb", "expedia", "qpublic", "redfin", "realtor"]) {
+    if (text.includes(word)) hints.add(word);
+  }
+  const challengeRe = /captcha|challenge|verif|denied|robot|human|px-|bot.?check|cloudflare|just a moment/i;
+  const score = (t) => {
+    const url = String(t?.url ?? "");
+    const title = String(t?.title ?? "");
+    let host = "";
+    try { host = new URL(url).hostname.replace(/^www\./, ""); } catch {}
+    let s = 0;
+    for (const hint of hints) {
+      if (hint && host && (host === hint || host.includes(hint))) { s += 4; break; }
+    }
+    if (challengeRe.test(url) || challengeRe.test(title)) s += 2;
+    return s;
+  };
+  let best = pages[0];
+  let bestScore = score(best);
+  for (const t of pages.slice(1)) {
+    const s = score(t);
+    if (s > bestScore) { best = t; bestScore = s; }
+  }
+  return best;
+}
+
+/** Run one JS expression in a tab over its page-level CDP websocket. Best-effort. */
+async function cdpEvaluateInTab(target, expression) {
+  if (!target?.webSocketDebuggerUrl || typeof WebSocket !== "function") return null;
+  return await new Promise((resolve) => {
+    const ws = new WebSocket(target.webSocketDebuggerUrl);
+    const done = (value) => { try { ws.close(); } catch {} resolve(value); };
+    const timer = setTimeout(() => done(null), 4_000);
+    ws.addEventListener("open", () => ws.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, returnByValue: true } })));
+    ws.addEventListener("message", (event) => {
+      let data;
+      try { data = JSON.parse(String(event.data)); } catch { return; }
+      if (data.id !== 1) return;
+      clearTimeout(timer);
+      done(data.result?.result?.value ?? null);
+    });
+    ws.addEventListener("error", () => { clearTimeout(timer); done(null); });
+  });
+}
+
+/**
+ * Bring the hidden runner Chrome ON-SCREEN when the operator is needed —
+ * with the yellow treatment ON THE BLOCKED TAB.
  *
  * The dedicated Chrome launches minimized and parked at -32000,-32000 — right
- * for unattended runs, useless the moment a human must interact with a page:
- * a bot-check to solve, or (checkout runs, 2026-07-20) the prepared VRBO
- * payment tab waiting for the card. Same CDP websocket technique as
- * chrome-sidecar-manager's challenge surfacing (global WebSocket — no deps):
- * find a page target, resolve its window, normal + on-screen bounds.
+ * for unattended runs, useless the moment a human must interact with a page.
+ * 2026-07-21 operator report: "Cowork keeps saying the buy-in needs my action
+ * but no Chrome window highlighted in yellow is showing" — the old version
+ * only un-minimized the window (no banner, no tab activation), so a bot-wall
+ * attention looked like nothing at all next to the sidecar's yellow challenge
+ * treatment the operator was trained on. Now every non-payment attention:
+ *   1. picks the BLOCKED tab (pickAttentionTarget — reason host + challenge
+ *      shape, not blind pages[0]),
+ *   2. activates that tab (/json/activate) and un-minimizes + places the
+ *      window on-screen,
+ *   3. paints the sidecar-style YELLOW banner + click-transparent border into
+ *      the tab with the attention reason and what to do about it.
+ * DISPLAY-ONLY, same rule as the card handoff: the injected DOM never touches
+ * forms or clicks — the operator solves the challenge; the banner dies on the
+ * navigation solving it causes (and clearAttentionSurface removes it when the
+ * agent prints RESUMED without a navigation).
  * Best-effort: surfacing failures must never break the run; the ATTENTION
  * chime + portal banner still tell the operator, who can dig the window out
  * of the Dock. Never yanked back off-screen — the operator may be mid-use.
  */
-async function surfaceRunnerChrome() {
+export async function surfaceRunnerChrome(reason) {
+  try {
+    const base = `http://127.0.0.1:${CDP_PORT}`;
+    const targets = await (await fetch(`${base}/json/list`, { signal: AbortSignal.timeout(2_000) })).json();
+    const target = pickAttentionTarget(targets, reason);
+    if (!target?.id) return false;
+
+    // Front the blocked TAB inside its window (plain HTTP endpoint).
+    await fetch(`${base}/json/activate/${target.id}`, { signal: AbortSignal.timeout(2_000) }).catch(() => {});
+
+    const version = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();
+    const wsUrl = version?.webSocketDebuggerUrl;
+    if (wsUrl && typeof WebSocket === "function") {
+      const send = (ws, id, method, params) => ws.send(JSON.stringify({ id, method, params }));
+      await new Promise((resolve) => {
+        const ws = new WebSocket(wsUrl);
+        const done = () => { try { ws.close(); } catch {} resolve(); };
+        const timer = setTimeout(done, 4_000);
+        let windowId = null;
+        ws.addEventListener("open", () => send(ws, 1, "Browser.getWindowForTarget", { targetId: target.id }));
+        ws.addEventListener("message", (event) => {
+          let data;
+          try { data = JSON.parse(String(event.data)); } catch { return; }
+          if (data.id === 1) {
+            windowId = data.result?.windowId;
+            if (!windowId) { clearTimeout(timer); return done(); }
+            // Un-minimize FIRST (bounds are ignored while minimized), then place.
+            send(ws, 2, "Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
+          } else if (data.id === 2) {
+            send(ws, 3, "Browser.setWindowBounds", {
+              windowId,
+              bounds: { left: 80, top: 60, width: 1360, height: 900 },
+            });
+          } else if (data.id === 3) {
+            clearTimeout(timer);
+            done();
+          }
+        });
+        ws.addEventListener("error", () => { clearTimeout(timer); done(); });
+      });
+    }
+
+    // Paint the yellow attention treatment INTO the blocked tab so the
+    // operator can tell at a glance WHICH page needs them and WHY.
+    const message = `\u{1F916} NEEDS YOU — ${String(reason ?? "the runner is blocked").slice(0, 200)} · Solve what this page is asking (bot check / sign-in), then leave the tab open — the buy-in runner is watching and continues automatically. If nothing here looks blocked, check the run log in the portal.`;
+    const inject = `(() => {
+      const styleId = "rct-findrun-attn-style";
+      const bannerId = "rct-findrun-attn-banner";
+      const borderId = "rct-findrun-attn-border";
+      if (!document.getElementById(styleId)) {
+        const style = document.createElement("style");
+        style.id = styleId;
+        style.textContent = \`
+          #\${bannerId} {
+            position: fixed; z-index: 2147483647; top: 0; left: 0; right: 0;
+            padding: 14px 18px; background: #fde047; color: #111827;
+            border-bottom: 4px solid #f59e0b;
+            font: 700 18px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22); text-align: center;
+          }
+          body { padding-top: 58px !important; }
+          #\${borderId} {
+            position: fixed; z-index: 2147483646; inset: 0;
+            border: 12px solid #facc15; box-shadow: inset 0 0 0 4px #f59e0b;
+            pointer-events: none;
+          }
+        \`;
+        document.documentElement.appendChild(style);
+      }
+      let banner = document.getElementById(bannerId);
+      if (!banner) {
+        banner = document.createElement("div");
+        banner.id = bannerId;
+        document.documentElement.appendChild(banner);
+      }
+      banner.textContent = ${JSON.stringify(message)};
+      if (!document.getElementById(borderId)) {
+        const border = document.createElement("div");
+        border.id = borderId;
+        document.documentElement.appendChild(border);
+      }
+      return "painted";
+    })()`;
+    const painted = (await cdpEvaluateInTab(target, inject)) === "painted";
+    attentionSurfaced = true;
+    log(
+      painted
+        ? "surfaced the runner Chrome window with the yellow attention banner"
+        : "surfaced the runner Chrome window for the operator",
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove the yellow attention treatment from every tab once the blocker
+ * clears (RESUMED marker / run end). A solved bot check usually navigates —
+ * which kills the injected DOM naturally — but a sign-in solved in another
+ * tab, or an agent that moved on, leaves a stale "NEEDS YOU" banner that
+ * would misdirect the operator on the NEXT look. Flag-guarded so the many
+ * stopAttentionAlarm() call sites cost nothing when nothing was surfaced.
+ * Deliberately leaves the payment handoff's card banner alone — that one must
+ * stay until the operator's own Checkout click navigates.
+ */
+export async function clearAttentionSurface() {
+  if (!attentionSurfaced) return;
+  attentionSurfaced = false;
   try {
     const base = `http://127.0.0.1:${CDP_PORT}`;
     const targets = await (await fetch(`${base}/json/list`, { signal: AbortSignal.timeout(2_000) })).json();
     const pages = Array.isArray(targets) ? targets.filter((t) => t?.type === "page") : [];
-    // Prefer the checkout/challenge tab (most recently active is listed first).
-    const target = pages[0];
-    if (!target?.id) return false;
-    const version = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();
-    const wsUrl = version?.webSocketDebuggerUrl;
-    if (!wsUrl || typeof WebSocket !== "function") return false;
-    const send = (ws, id, method, params) => ws.send(JSON.stringify({ id, method, params }));
-    return await new Promise((resolve) => {
-      const ws = new WebSocket(wsUrl);
-      const done = (ok) => {
-        try { ws.close(); } catch {}
-        resolve(ok);
-      };
-      const timer = setTimeout(() => done(false), 4_000);
-      let windowId = null;
-      ws.addEventListener("open", () => send(ws, 1, "Browser.getWindowForTarget", { targetId: target.id }));
-      ws.addEventListener("message", (event) => {
-        let data;
-        try { data = JSON.parse(String(event.data)); } catch { return; }
-        if (data.id === 1) {
-          windowId = data.result?.windowId;
-          if (!windowId) { clearTimeout(timer); return done(false); }
-          // Un-minimize FIRST (bounds are ignored while minimized), then place.
-          send(ws, 2, "Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
-        } else if (data.id === 2) {
-          send(ws, 3, "Browser.setWindowBounds", {
-            windowId,
-            bounds: { left: 80, top: 60, width: 1360, height: 900 },
-          });
-        } else if (data.id === 3) {
-          clearTimeout(timer);
-          log("surfaced the runner Chrome window for the operator");
-          done(true);
-        }
-      });
-      ws.addEventListener("error", () => { clearTimeout(timer); done(false); });
-    });
+    const remove = `(() => {
+      for (const id of ["rct-findrun-attn-style", "rct-findrun-attn-banner", "rct-findrun-attn-border"]) {
+        document.getElementById(id)?.remove();
+      }
+      return "cleared";
+    })()`;
+    for (const target of pages) {
+      await cdpEvaluateInTab(target, remove).catch(() => {});
+    }
   } catch {
-    return false;
+    /* best-effort */
   }
 }
 
@@ -495,16 +655,17 @@ export async function surfaceCheckoutHandoff(reason) {
 }
 
 let attentionAlarm = null;
+let attentionSurfaced = false;
 function startAttentionAlarm(reason) {
   // The window surfaces on EVERY attention raise (not just the first) — a
   // second blocker may be on a different tab. The PAYMENT handoff gets the
-  // full yellow pop-up treatment on the prepared checkout tab; every other
-  // attention (bot walls etc.) gets the plain window surfacing. Fire-and-
-  // forget either way.
+  // card-specific yellow pop-up on the prepared checkout tab; every other
+  // attention (bot walls etc.) gets the yellow attention treatment on the
+  // BLOCKED tab (reason-targeted). Fire-and-forget either way.
   if (/^awaiting payment\b/i.test(String(reason ?? "").trim())) {
     void surfaceCheckoutHandoff(reason);
   } else {
-    void surfaceRunnerChrome();
+    void surfaceRunnerChrome(reason);
   }
   if (attentionAlarm || !SOUNDS) return;
   let fires = 0;
@@ -521,6 +682,7 @@ function startAttentionAlarm(reason) {
 function stopAttentionAlarm() {
   if (attentionAlarm) clearInterval(attentionAlarm);
   attentionAlarm = null;
+  void clearAttentionSurface();
 }
 
 function terminalChime(status, summary) {

@@ -52,6 +52,7 @@ import {
   browserProofRequiredFromInit as runnerBrowserProofRequired,
   classifyStreamLine as runnerClassify,
   lineUsesChromeBrowserTool as runnerLineUsesChromeTool,
+  pickAttentionTarget as runnerPickAttentionTarget,
   scanMarkers as runnerScanMarkers,
 } from "../daemon/vrbo-sidecar/claude-find-runner.mjs";
 
@@ -1074,11 +1075,39 @@ console.log("claude-find-run: checkout-run source wiring");
   check(
     // The runner Chrome launches minimized/off-screen; a checkout handoff (or
     // a bot wall) needs the window IN FRONT of the operator. Surfacing rides
-    // the ATTENTION path so both cases get it.
+    // the ATTENTION path so both cases get it — and (2026-07-21 operator
+    // report: "no Chrome window highlighted in yellow is showing") the reason
+    // rides along so the BLOCKED tab is the one activated + painted.
     "the runner surfaces its Chrome window whenever attention is raised",
-    runnerSrc.includes("async function surfaceRunnerChrome")
+    runnerSrc.includes("async function surfaceRunnerChrome(reason)")
       && runnerSrc.includes("Browser.setWindowBounds")
-      && runnerSrc.includes("void surfaceRunnerChrome();"),
+      && runnerSrc.includes("void surfaceRunnerChrome(reason);"),
+  );
+  check(
+    // Bot-wall / generic attention gets the SAME yellow treatment as the card
+    // handoff, on the reason-picked blocked tab: tab activation, on-screen
+    // window, yellow banner + border, and cleanup when the blocker clears.
+    "generic attention paints the yellow banner into the reason-picked blocked tab",
+    runnerSrc.includes("pickAttentionTarget(targets, reason)")
+      && runnerSrc.includes("rct-findrun-attn-banner")
+      && runnerSrc.includes("rct-findrun-attn-border")
+      && runnerSrc.includes("NEEDS YOU")
+      && runnerSrc.slice(
+        runnerSrc.indexOf("async function surfaceRunnerChrome"),
+        runnerSrc.indexOf("async function clearAttentionSurface"),
+      ).includes("/json/activate/"),
+  );
+  check(
+    // A stale "NEEDS YOU" banner after the agent resumed would misdirect the
+    // operator on their NEXT look — stopAttentionAlarm clears it (flag-guarded,
+    // and it must never touch the payment handoff's card banner).
+    "clearing attention removes the yellow attention banner (and only that banner)",
+    runnerSrc.includes("async function clearAttentionSurface")
+      && /function stopAttentionAlarm\(\)\s*\{[^}]*clearAttentionSurface\(\)/.test(runnerSrc)
+      && !runnerSrc.slice(
+        runnerSrc.indexOf("async function clearAttentionSurface"),
+        runnerSrc.indexOf("export async function surfaceCheckoutHandoff"),
+      ).includes("rct-findrun-card-"),
   );
 
   // ── The YELLOW card-handoff pop-up (operator directive 2026-07-20) ────────
@@ -1107,9 +1136,10 @@ console.log("claude-find-run: checkout-run source wiring");
     "the injected treatment is display-only (click-transparent border, no form access)",
     runnerSrc.includes("pointer-events: none")
       // (\.value\s*=[^=] — a bare assignment; `.value === "painted"` is the
-      // legit CDP result read and must not trip this.)
+      // legit CDP result read and must not trip this.) The slice starts at the
+      // attention surfacing code so BOTH yellow treatments stay display-only.
       && !/(querySelector\(\s*["']input|\.value\s*=[^=]|\.click\(\)|\.submit\(\))/.test(
-        runnerSrc.slice(runnerSrc.indexOf("surfaceCheckoutHandoff"), runnerSrc.indexOf("let attentionAlarm")),
+        runnerSrc.slice(runnerSrc.indexOf("export function pickAttentionTarget"), runnerSrc.indexOf("let attentionAlarm")),
       ),
   );
   check(
@@ -1141,6 +1171,35 @@ console.log("claude-find-run: checkout-run source wiring");
       typeof scanned.attention === "string" && /^awaiting payment\b/i.test(scanned.attention),
       scanned.attention,
     );
+  }
+
+  // ── pickAttentionTarget (2026-07-21: surface the BLOCKED tab, not tab 0) ──
+  console.log("claude-find-run: attention tab picking");
+  {
+    const tabs = [
+      { type: "page", id: "t1", url: "https://www.hotels.com/?q-destination=Kauai", title: "Hotels" },
+      { type: "page", id: "t2", url: "https://www.vrbo.com/en-ca/search?destination=Kapaa", title: "Vacation rentals" },
+      { type: "page", id: "t3", url: "https://qpublic.schneidercorp.com/Application.aspx", title: "Just a moment..." },
+      { type: "iframe", id: "i1", url: "https://www.google.com/recaptcha/api2/aframe" },
+    ];
+    check(
+      "the reason's site name picks the matching tab over tab 0",
+      runnerPickAttentionTarget(tabs, "ATTENTION was: bot check on vrbo.com — unit 3")?.id === "t2",
+    );
+    check(
+      "a challenge-shaped title (Cloudflare interstitial) wins when the reason names that site",
+      runnerPickAttentionTarget(tabs, "Cloudflare bot challenge on qPublic property records site")?.id === "t3",
+    );
+    check(
+      "an un-hinted reason still surfaces a challenge-shaped tab over tab 0",
+      runnerPickAttentionTarget(tabs, "something unrecognizable")?.id === "t3",
+    );
+    check(
+      "no hints and no challenge shape falls back to the first page (never an iframe)",
+      runnerPickAttentionTarget([tabs[0], tabs[1]], "something unrecognizable")?.id === "t1"
+        && runnerPickAttentionTarget([tabs[3]], "bot check") === null,
+    );
+    check("an empty tab list yields null", runnerPickAttentionTarget([], "bot check on vrbo.com") === null);
   }
 }
 
