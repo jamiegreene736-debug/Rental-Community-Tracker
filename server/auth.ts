@@ -294,6 +294,11 @@ function agentApiMethodAllowed(req: Request): boolean {
   // Reply to the PM from the unit alias — handler 403s unless the buy-in's
   // reservation is shared with the agent portal.
   if (method === "POST" && /^\/api\/buy-ins\/\d+\/vendor-email$/.test(path)) return true;
+  // PM SMS/Text History — read AND send for agents (2026-07-21: "I need the
+  // ability for her to reply and send texts and emails"); both handlers
+  // enforce the reservation share gate.
+  if (method === "GET" && /^\/api\/buy-ins\/\d+\/pm-sms$/.test(path)) return true;
+  if (method === "POST" && /^\/api\/buy-ins\/\d+\/pm-sms$/.test(path)) return true;
 
   return false;
 }
