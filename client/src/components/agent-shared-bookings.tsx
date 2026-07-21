@@ -16,7 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { ChevronDown, ChevronRight, Loader2, Mail, Send } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Mail, Reply, Send } from "lucide-react";
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
 import type { AgentBookingFinancials, AgentSafeBuyIn } from "@shared/agent-buyin-view";
 import type { AgentOpsRowView } from "@shared/agent-ops-view";
@@ -209,6 +209,17 @@ function formatStay(value: string | null): string {
   return parsed.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
+// One-line preview for the sidebar: link markers stripped, whitespace
+// collapsed — mirrors the operator panel's aliasEmailSnippet.
+function emailSnippet(body: string | null | undefined): string {
+  return String(body ?? "")
+    .replace(/\[link:\s*[^\]]+\]/gi, " ")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 90);
+}
+
 function SmsTextWithLinks({ body }: { body: string }) {
   const segments = splitEmailBodyIntoSegments(body);
   return (
@@ -229,14 +240,35 @@ function SmsTextWithLinks({ body }: { body: string }) {
 // SMS/Text History — same per-unit collapsed section the operator sees. Read-
 // only for agents (the send route stays operator-only); lazy-fetched on open.
 function AgentUnitSmsHistory({ unit }: { unit: AgentSafeBuyIn }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  const { data, isLoading } = useQuery<{ messages: Array<{ id: number; direction: string; body: string; sentAt: string | null; mediaUrls?: string | null }> }>({
+  const [smsBody, setSmsBody] = useState("");
+  const { data, isLoading } = useQuery<{ phone?: string; messages: Array<{ id: number; direction: string; body: string; sentAt: string | null; mediaUrls?: string | null }> }>({
     queryKey: ["/api/buy-ins", unit.id, "pm-sms"],
     queryFn: () => apiRequest("GET", `/api/buy-ins/${unit.id}/pm-sms`).then((r) => r.json()),
     enabled: open,
     staleTime: 30_000,
   });
   const messages = data?.messages ?? [];
+  const pmPhone = String(data?.phone ?? "").trim();
+  const sendSms = useMutation({
+    mutationFn: async () => {
+      if (!pmPhone) throw new Error("No PM phone number on file for this unit yet.");
+      const r = await apiRequest("POST", `/api/buy-ins/${unit.id}/pm-sms`, { phone: pmPhone, body: smsBody });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.message ?? err.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      setSmsBody("");
+      queryClient.invalidateQueries({ queryKey: ["/api/buy-ins", unit.id, "pm-sms"] });
+      toast({ title: "Text sent", description: "Your message is on its way to the property manager." });
+    },
+    onError: (e: any) => toast({ title: "Text not sent", description: e.message, variant: "destructive" }),
+  });
   return (
     <div className="rounded-md border" data-testid={`agent-unit-sms-${unit.id}`}>
       <button
@@ -266,6 +298,24 @@ function AgentUnitSmsHistory({ unit }: { unit: AgentSafeBuyIn }) {
               </div>
             </div>
           ))}
+          <div className="flex items-end gap-2 pt-1">
+            <Textarea
+              value={smsBody}
+              onChange={(e) => setSmsBody(e.target.value)}
+              placeholder={pmPhone ? `Text the PM at ${pmPhone}…` : "No PM phone on file yet — save one via the email thread first."}
+              className="min-h-[40px] max-h-32 resize-y text-xs"
+              disabled={!pmPhone}
+              data-testid={`input-agent-sms-body-${unit.id}`}
+            />
+            <Button
+              size="sm"
+              onClick={() => sendSms.mutate()}
+              disabled={sendSms.isPending || !smsBody.trim() || !pmPhone}
+              data-testid={`button-agent-sms-send-${unit.id}`}
+            >
+              {sendSms.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+            </Button>
+          </div>
         </div>
       )}
     </div>
@@ -380,6 +430,10 @@ function AgentUnitCommunications({
   const unitEmails = emails.filter((row) => row.buyInId === unit.id);
   const [showReply, setShowReply] = useState(false);
   const [showEmails, setShowEmails] = useState(false);
+  // Newest email opens by default in the reading pane (unitEmails is
+  // newest-first from the comms endpoint, same as the operator's panel).
+  const [selectedEmailId, setSelectedEmailId] = useState<number | null>(null);
+  const selectedEmail = unitEmails.find((e) => e.id === selectedEmailId) ?? unitEmails[0] ?? null;
   const [vendorEmail, setVendorEmail] = useState(
     () => contact?.vendorEmail ?? firstEmailIn(unit.managementContact ?? ""),
   );
@@ -521,7 +575,10 @@ function AgentUnitCommunications({
       <div className="mt-3 space-y-2">
         <AgentUnitArrivalDetails unit={unit} />
 
-        {/* Email history — collapsed section, same shape as the operator's. */}
+        {/* Email history — the operator's Gmail-style TWO-PANE inbox
+            (2026-07-21: "side column so I can see the previews of the emails
+            and then I click into them"): sidebar previews, click → reading
+            pane, newest open by default. */}
         <div className="rounded-md border">
           <button
             type="button"
@@ -533,34 +590,85 @@ function AgentUnitCommunications({
             Email history — {unit.unitLabel || "Unit"} ({unitEmails.length})
             <ChevronRight className={`ml-auto h-3.5 w-3.5 transition-transform ${showEmails ? "rotate-90" : ""}`} />
           </button>
-          {showEmails && (
-            <div className="space-y-2 border-t p-2">
-              {unitEmails.length === 0 && (
-                <div className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
-                  No emails with the property manager yet.
-                </div>
-              )}
-              {unitEmails.map((email) => (
-                <div key={email.id} className="rounded-md border bg-muted/10 p-2" data-testid={`agent-email-${email.id}`}>
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="min-w-0 text-xs font-medium">{email.subject || "(no subject)"}</div>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      <Badge variant="outline" className="text-[10px]">
-                        {String(email.direction) === "inbound" ? "From PM" : "Sent"}
-                      </Badge>
-                      <span className="text-[10px] text-muted-foreground">
-                        {formatEmailTimestampForDisplay(email.sentAt) ?? ""}
-                      </span>
+          {showEmails && unitEmails.length === 0 && (
+            <div className="border-t p-2">
+              <div className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">
+                No emails with the property manager yet.
+              </div>
+            </div>
+          )}
+          {showEmails && unitEmails.length > 0 && (
+            <div className="grid border-t md:grid-cols-[230px_1fr]" data-testid={`agent-email-twopane-${unit.id}`}>
+              {/* Sidebar previews */}
+              <div className="max-h-[380px] overflow-y-auto border-b md:border-b-0 md:border-r divide-y">
+                {unitEmails.map((email) => {
+                  const active = email.id === (selectedEmail?.id ?? -1);
+                  return (
+                    <button
+                      key={email.id}
+                      type="button"
+                      onClick={() => setSelectedEmailId(email.id)}
+                      className={`block w-full px-2.5 py-2 text-left transition-colors hover:bg-muted/60 ${active ? "bg-sky-50 dark:bg-sky-950/30" : ""}`}
+                      data-testid={`agent-email-row-${email.id}`}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span className={`truncate text-[11px] ${active ? "font-semibold" : "font-medium"}`}>
+                          {String(email.direction) === "inbound"
+                            ? (email.fromEmail ?? "PM")
+                            : "You"}
+                        </span>
+                        {String(email.direction) !== "inbound" && (
+                          <span className="rounded bg-muted px-1 text-[9px] uppercase text-muted-foreground">sent</span>
+                        )}
+                        <span className="ml-auto shrink-0 text-[9px] text-muted-foreground">
+                          {formatEmailTimestampForDisplay(email.sentAt)?.split(",")[0] ?? ""}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 truncate text-[11px] font-medium">{email.subject || "(no subject)"}</div>
+                      <div className="truncate text-[10px] text-muted-foreground">{emailSnippet(email.body)}</div>
+                    </button>
+                  );
+                })}
+              </div>
+              {/* Reading pane */}
+              <div className="min-w-0 p-3" data-testid={`agent-email-reading-${unit.id}`}>
+                {selectedEmail ? (
+                  <>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="min-w-0 text-sm font-semibold">{selectedEmail.subject || "(no subject)"}</div>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <Badge variant="outline" className="text-[10px]">
+                          {String(selectedEmail.direction) === "inbound" ? "From PM" : "Sent"}
+                        </Badge>
+                        <span className="text-[10px] text-muted-foreground">
+                          {formatEmailTimestampForDisplay(selectedEmail.sentAt) ?? ""}
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 px-2 text-[11px]"
+                          onClick={() => {
+                            const subj = selectedEmail.subject ?? "";
+                            setSubject(subj ? (subj.toLowerCase().startsWith("re:") ? subj : `Re: ${subj}`) : subject);
+                            setShowReply(true);
+                          }}
+                          data-testid={`button-agent-email-reply-${unit.id}`}
+                        >
+                          <Reply className="mr-1 h-3 w-3" /> Reply
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                  <div className="mt-1 text-[10px] text-muted-foreground">
-                    {email.fromEmail} → {email.toEmail}
-                  </div>
-                  <div className="mt-1.5 whitespace-pre-wrap break-words text-xs leading-relaxed">
-                    {formatEmailBodyForDisplay(String(email.body ?? ""))}
-                  </div>
-                </div>
-              ))}
+                    <div className="mt-1 text-[10px] text-muted-foreground">
+                      {selectedEmail.fromEmail} → {selectedEmail.toEmail}
+                    </div>
+                    <div className="mt-2 max-h-[300px] overflow-y-auto whitespace-pre-wrap break-words text-xs leading-relaxed">
+                      {formatEmailBodyForDisplay(String(selectedEmail.body ?? ""))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-xs text-muted-foreground">Select an email to read it.</div>
+                )}
+              </div>
             </div>
           )}
         </div>

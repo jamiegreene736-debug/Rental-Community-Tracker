@@ -265,9 +265,11 @@ assert.ok(safeFieldsMatch, "shared-bookings safeFields missing");
 assert.equal(/\bmoney\b/.test(safeFieldsMatch![1]), true, "shared-bookings Guesty fields must include money (2026-07-21 directive)");
 assert.ok(routes.includes("agentBookingFinancials(reservationMoney, units)"), "shared-bookings must emit the financial roll-up");
 assert.ok(routes.includes("agentOpsRowView(reservationRaw, units, Date.now())"), "shared-bookings must emit the ops-row view");
-// pm-sms GET is agent-reachable but SHARE-GATED in the handler (the send
-// route stays operator-only).
-assert.ok(/pm-sms[\s\S]{0,1200}isAgentSmsSession[\s\S]{0,600}not shared with the agent portal/.test(routes), "pm-sms agent share gate missing");
+// pm-sms GET and POST are both agent-reachable and SHARE-GATED in their
+// handlers (2026-07-21: "I need the ability for her to reply and send texts
+// and emails").
+assert.ok(/pm-sms[\s\S]{0,1200}isAgentSmsSession[\s\S]{0,600}not shared with the agent portal/.test(routes), "pm-sms GET agent share gate missing");
+assert.ok(/isAgentSmsSendSession[\s\S]{0,600}not shared with the agent portal/.test(routes), "pm-sms POST agent share gate missing");
 assert.ok(/safeFields = encodeURIComponent\([\s\S]{0,400}payments cancellationPolicy/.test(routes), "shared-bookings fields must include payments + cancellation policy");
 assert.ok(routes.includes('app.get("/api/agent/shared-bookings"'), "shared-bookings route missing");
 assert.ok(routes.includes('app.post("/api/agent-shares"'), "agent-shares toggle route missing");
@@ -279,7 +281,8 @@ assert.ok(schemaMaintenance.includes("CREATE TABLE IF NOT EXISTS reservation_age
 const auth = read("../server/auth.ts");
 assert.ok(auth.includes('path === "/api/agent/shared-bookings"'), "auth allowlist missing shared-bookings");
 assert.ok(auth.includes("\\/vendor-email$"), "auth allowlist missing vendor-email");
-assert.ok(auth.includes("\\/pm-sms$"), "auth allowlist missing agent pm-sms read");
+assert.ok(/method === "GET" && \/\^\\\/api\\\/buy-ins\\\/\\d\+\\\/pm-sms\$\//.test(auth), "auth allowlist missing agent pm-sms read");
+assert.ok(/method === "POST" && \/\^\\\/api\\\/buy-ins\\\/\\d\+\\\/pm-sms\$\//.test(auth), "auth allowlist missing agent pm-sms send");
 
 const homePage = read("../client/src/pages/home.tsx");
 assert.ok(homePage.includes("<AgentSharedBookings />"), "agent portal must render AgentSharedBookings");
@@ -302,7 +305,11 @@ assert.ok(agentPanel.includes('data-testid="agent-cancellation-policy"'), "agent
 assert.ok(agentPanel.includes("unitCommunityVerdictBadge") && agentPanel.includes("unitGuestHappyBadge") && agentPanel.includes("unitHostFrictionBadge"), "agent unit badges must use the shared badge helpers");
 assert.ok(agentPanel.includes("agent-unit-arrival-"), "agent panel must render the arrival-details block");
 assert.ok(agentPanel.includes("SMS/Text History") && agentPanel.includes("/pm-sms"), "agent panel must render the SMS history section");
-assert.ok(agentPanel.includes("Email history —"), "agent panel must render the collapsed email-history section");
+assert.ok(agentPanel.includes("button-agent-sms-send-"), "agent panel must have the SMS send composer");
+assert.ok(agentPanel.includes("Email history —"), "agent panel must render the email-history section");
+// Two-pane email inbox (2026-07-21: sidebar previews → click into the email).
+assert.ok(agentPanel.includes("agent-email-twopane-") && agentPanel.includes("agent-email-row-") && agentPanel.includes("agent-email-reading-"), "agent email history must be the two-pane inbox");
+assert.ok(agentPanel.includes("button-agent-email-reply-"), "reading pane must offer Reply");
 assert.ok(agentPanel.includes("agent-unit-alias-"), "agent panel must render the unit alias chip");
 console.log("  ✓ source guards: share gate, projection, field-limited Guesty read, and UI wiring intact");
 
