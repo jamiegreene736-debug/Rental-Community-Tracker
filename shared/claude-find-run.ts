@@ -646,6 +646,85 @@ export function browserNeverUsedFailure(): string {
   );
 }
 
+/**
+ * True when a stream line shows the agent calling ANY of the run's portal
+ * agent endpoints (/api/claude-find-runs/agent/:id/*) through its curl-only
+ * Bash tool. These calls are the run's WORK — for a checkout run the brief's
+ * step 1 is an unconditional GET on the agent buy-in endpoint, so a checkout
+ * run that ends "success" having made ZERO of these calls structurally did
+ * nothing (see checkoutRunDidNoWorkFailure). Endpoint-presence in the command
+ * string is the same signal describeClaudeToolUse already keys on.
+ *
+ * TWIN of lineCallsAgentPortalEndpoint() in
+ * daemon/vrbo-sidecar/claude-find-runner.mjs — equivalence-locked in
+ * tests/claude-find-run.test.ts; change both together.
+ */
+export function lineCallsAgentPortalEndpoint(rawLine: string): boolean {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(rawLine);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || parsed.type !== "assistant") return false;
+  const content = parsed.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (b: any) =>
+      b && b.type === "tool_use" && b.name === "Bash"
+      && typeof b.input?.command === "string"
+      && b.input.command.includes("claude-find-runs/agent/"),
+  );
+}
+
+/**
+ * SUPPLEMENTARY signal only — never the gate. Does the terminal report read
+ * like the model declining the task outright? The 2026-07-19 incident report
+ * began "I'm not going to execute this task… hallmarks of fraudulent
+ * automation". This only sharpens the WORDING of the no-work failure; the
+ * decision to fail is structural (zero agent-endpoint calls), because refusal
+ * phrasing varies and string-matching alone would both miss refusals and
+ * false-positive on reports that merely QUOTE one.
+ */
+export function reportLooksLikeRefusal(report: string | null | undefined): boolean {
+  const head = String(report ?? "").slice(0, 800).toLowerCase();
+  return /\b(i['’]?m not going to|i am not going to|i (?:will|can) ?not (?:execute|proceed|assist|perform|complete)|i won['’]?t (?:execute|proceed|do|perform)|i refuse|refusing to|declin(?:e|ing) to (?:execute|proceed|perform)|hallmarks of fraud|fraudulent automation)\b/.test(head);
+}
+
+/**
+ * Terminal error for a CHECKOUT run whose CLI result was "success" but which
+ * called ZERO agent portal endpoints. The checkout brief's step 1 is an
+ * unconditional GET on the agent buy-in endpoint (even the legitimate
+ * "already booked — skip" path performs it), so zero calls means the run did
+ * no checkout work at all — the refusal shape of the 2026-07-19 incident
+ * (run 629799c6…, recorded "completed" with a green chip off subtype
+ * "success"). Recording that as completed is the lie this guard exists to
+ * stop.
+ *
+ * TWIN of checkoutRunDidNoWorkFailure() in
+ * daemon/vrbo-sidecar/claude-find-runner.mjs — equivalence-locked in
+ * tests/claude-find-run.test.ts; change both together.
+ */
+export function checkoutRunDidNoWorkFailure(report: string | null | undefined): string {
+  const head = String(report ?? "").trim().replace(/\s+/g, " ").slice(0, 200);
+  if (reportLooksLikeRefusal(report)) {
+    return (
+      "The model REFUSED the checkout task — its final report declines to run it"
+      + (head ? ` ("${head}…")` : "")
+      + ". It made ZERO portal calls (not even the step-1 buy-in read), so no "
+      + "checkout was prepared and nothing was claimed. Recorded as failed, not "
+      + "completed. Review the report, then re-run it or prepare the checkout in "
+      + "Cowork/manually."
+    );
+  }
+  return (
+    'The run ended "success" without doing ANY checkout work — it never called '
+    + "a single portal endpoint (not even the step-1 buy-in read), so no checkout "
+    + "was prepared and nothing was claimed. Whatever the report says, it is not "
+    + "a completed checkout. Recorded as failed; review the report and re-run it."
+  );
+}
+
 export function classifyClaudeStreamLine(rawLine: string, nowIso: string): ClaudeFindRunEvent | null {
   let parsed: any;
   try {

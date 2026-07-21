@@ -43,6 +43,30 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-21 (headless checkout run REFUSED by the model but recorded "completed" — refusal/no-work
+  terminal guard): Run 629799c6… (Jul 19, reservation 6a357e7c60363d0014ae9958) refused the checkout
+  brief ("I'm not going to execute this task… hallmarks of fraudulent automation"); the CLI emitted
+  subtype:"success" and the runner's terminal classifier recorded status "completed" with a green
+  chip. SHIPPED (`claude/findrun-refusal-guard`): STRUCTURAL gate, never phrase-matched — the
+  checkout brief's step 1 is an unconditional GET on the run's agent buy-in endpoint (even the legit
+  already-booked skip performs it), so a kind-"checkout" run ending "success" with ZERO
+  /api/claude-find-runs/agent/:id/* curl calls (`lineCallsAgentPortalEndpoint`, TS + runner twins,
+  equivalence-locked) did no work → terminal FAILED with `checkoutRunDidNoWorkFailure(report)`;
+  refusal-shaped reports (`reportLooksLikeRefusal` — supplementary wording signal only) get an error
+  naming the refusal + quoting the report head. Branch outranks the browser-never-used gate (a
+  refusal used neither; "chrome never attached" would bury the cause) and rides the attention
+  channel so the reason survives on the failed record. Claim payload now carries `kind` (absent =
+  "find"); FIND runs deliberately ungated (an honest "no qualifying units" find makes zero endpoint
+  calls — its refusal class is covered by the browser proof-of-use gate). The checkout brief (both
+  variants) gained a "## Context — whose system this is" legitimacy block (operator-owned portal,
+  real paid booking, no card data reaches the agent) to reduce refusal likelihood — context only,
+  money rules unchanged + test-locked. Verified: claude-find-run 230/0, cowork-buyin-prompt 284/0,
+  cowork-launch 61/0, cowork-bulk-split 50/0, full `npm test` REAL exit 0, build clean (context
+  block bundle-grepped BOTH bundles; claim kind in dist minified), `npm run check` 335 = baseline
+  (stash A/B identical). LIVE daemon runner copied (~/.vrbo-sidecar-daemon/claude-find-runner.mjs,
+  backup .bak-refusalguard-*) + launchctl kickstart — runner up clean on the new copy. See AGENTS.md
+  "REFUSAL / NO-WORK terminal guard" bullet + the 2026-07-21 Decision Log line.
+
 - 2026-07-20 (HOST FRICTION — "are they a tough host?" research + ledger): Operator: some VRBO
   hosts just email arrival instructions, others demand photo-ID verification + signed contracts —
   know at find time. SHIPPED (`claude/vrbo-host-verification-research-adb055`): (1) the Cowork

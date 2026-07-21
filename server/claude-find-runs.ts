@@ -424,6 +424,10 @@ export function registerClaudeFindRunRoutes(app: Express): void {
         prompt: claimed.prompt,
         reservationId: claimed.reservationId,
         propertyName: claimed.propertyName,
+        // The runner's terminal classifier is kind-aware (a checkout run that
+        // ends "success" with zero agent-endpoint calls did no work — the
+        // 2026-07-19 refusal incident). Absent on old records = "find".
+        kind: claimed.kind ?? "find",
       },
     });
   }));

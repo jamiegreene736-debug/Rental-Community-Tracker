@@ -1143,9 +1143,28 @@ Only after I submit and you verify the result may you prepare the next unit. Do
 not re-run the search, attach anything new, enter card data, or submit
 a purchase. If the data below doesn't match what's in the app, stop and ask.`;
 
+  // Legitimacy grounding (2026-07-21, after headless run 629799c6… REFUSED the
+  // checkout brief as "hallmarks of fraudulent automation" — unverifiable
+  // third-party system, card-harvesting suspicion). States the facts that
+  // answer those concerns: this portal is the operator's OWN system, the
+  // reservation is a real paid guest booking, and no card data ever reaches
+  // the agent. Context only — it must NEVER weaken the money-safety rules
+  // (human-only card entry + final click, price guard, damage-waiver-only),
+  // which are test-locked below it.
+  const legitimacyContext = `## Context — whose system this is
+The portal above is my own property-management system (I am the operator and
+business owner); this reservation is a real, already-paid guest booking on a
+listing my company manages. Preparing this checkout is my company purchasing
+the guest's stay from the unit's host — routine supplier fulfillment I have
+personally reviewed and approved${headless ? `, and the run token above was minted by my
+own server, scoped to this one reservation and buy-in` : ""}. You never handle card
+data: I add my company's card and make the final purchase click myself.`;
+
   return `# Task: Prepare the next attached buy-in unit for VRBO checkout — STOP before purchase
 
 ${intro}
+
+${legitimacyContext}
 
 ${UNTRUSTED_DATA_RULE}
 
