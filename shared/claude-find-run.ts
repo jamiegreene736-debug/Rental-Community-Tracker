@@ -364,6 +364,7 @@ export interface ClaudeFindRunClientView {
   id: string;
   reservationId: string;
   propertyName: string;
+  guestName: string | null;
   kind: ClaudeFindRunKind;
   status: ClaudeFindRunStatus;
   createdAt: string;
@@ -421,6 +422,7 @@ export function clientClaudeFindRunView(
     id: run.id,
     reservationId: run.reservationId,
     propertyName: run.propertyName,
+    guestName: run.guestName ?? null,
     kind: run.kind ?? "find",
     status: run.status,
     createdAt: run.createdAt,
@@ -432,6 +434,59 @@ export function clientClaudeFindRunView(
     events: run.events.slice(-CLAUDE_FIND_RUN_CLIENT_EVENTS),
     droppedEvents: run.droppedEvents + Math.max(0, run.events.length - CLAUDE_FIND_RUN_CLIENT_EVENTS),
   };
+}
+
+/** Terminal runs stay on the page-level status banner this long after ending. */
+export const CLAUDE_FIND_RUN_OVERVIEW_RECENT_MS = 60 * 60 * 1_000;
+
+export interface ClaudeFindRunOverview {
+  /** Live runs in queue order (the runner drains the store front-to-back). */
+  active: ClaudeFindRunClientView[];
+  /** Terminal runs that ended within the recent window, newest first. */
+  recent: ClaudeFindRunClientView[];
+  counts: {
+    queued: number;
+    /** claimed + running — "the runner is on it". */
+    working: number;
+    attention: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+  };
+}
+
+/**
+ * Page-level roll-up for the All Reservations status banner (operator ask
+ * 2026-07-21: "when I do a bulk run I need the UI on the all reservations
+ * page to show me like a status"). Pure over already-stripped client views so
+ * the server route and tests share it. Active runs keep STORE ORDER — that is
+ * the sequential runner's actual drain order, so "position in line" reads
+ * true; terminal runs outside the recent window drop off the banner (the
+ * per-row panels remain their durable home).
+ */
+export function claudeFindRunOverview(views: ClaudeFindRunClientView[], nowMs: number): ClaudeFindRunOverview {
+  const active: ClaudeFindRunClientView[] = [];
+  const recent: ClaudeFindRunClientView[] = [];
+  const counts = { queued: 0, working: 0, attention: 0, completed: 0, failed: 0, cancelled: 0 };
+  for (const view of views ?? []) {
+    if (!view) continue;
+    if (ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(view.status)) {
+      active.push(view);
+      if (view.status === "queued") counts.queued += 1;
+      else if (view.status === "attention") counts.attention += 1;
+      else counts.working += 1;
+      continue;
+    }
+    const ended = Date.parse(view.endedAt ?? view.createdAt);
+    if (Number.isFinite(ended) && nowMs - ended <= CLAUDE_FIND_RUN_OVERVIEW_RECENT_MS) {
+      recent.push(view);
+      if (view.status === "completed") counts.completed += 1;
+      else if (view.status === "failed") counts.failed += 1;
+      else if (view.status === "cancelled") counts.cancelled += 1;
+    }
+  }
+  recent.sort((a, b) => String(b.endedAt ?? b.createdAt).localeCompare(String(a.endedAt ?? a.createdAt)));
+  return { active, recent, counts };
 }
 
 /**

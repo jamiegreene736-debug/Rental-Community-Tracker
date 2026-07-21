@@ -112,6 +112,7 @@ import { unitHostFrictionBadge, type HostFrictionLedger } from "@shared/host-fri
 import { comboSplitLabels, hasAlternativeSplit } from "@shared/combo-splits";
 import type { CityVrboCoverage } from "@shared/city-vrbo-coverage";
 import { getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
+import { ClaudeRunStatusBanner } from "@/components/claude-run-status-banner";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -2572,6 +2573,7 @@ function HeadlessFindRunButton({
       // the slot probe the same way the Cowork buttons do.
       armCoworkRunWindow();
       void queryClient.invalidateQueries({ queryKey: claudeFindRunStatusKey(reservation._id) });
+      void queryClient.invalidateQueries({ queryKey: ["/api/claude-find-runs/overview"] });
       toast({
         title: "Find-run started on your Mac",
         description: "No window will open — watch the live log on this row. You'll hear a chime if it needs you, and when it finishes.",
@@ -2949,6 +2951,7 @@ function HeadlessCheckoutRunButton({
       // other Cowork/headless starts.
       armCoworkRunWindow();
       void queryClient.invalidateQueries({ queryKey: claudeFindRunStatusKey(reservation._id) });
+      void queryClient.invalidateQueries({ queryKey: ["/api/claude-find-runs/overview"] });
       toast({
         title: `Checkout run started · ${unitLabel}`,
         description:
@@ -10089,6 +10092,7 @@ export default function Bookings() {
         void queryClient.invalidateQueries({ queryKey: claudeFindRunStatusKey(run.reservationId) });
       }
       void queryClient.invalidateQueries({ queryKey: ["/api/claude-find-runs/status", "bulk-gate"] });
+      void queryClient.invalidateQueries({ queryKey: ["/api/claude-find-runs/overview"] });
       if (skipped.length > 0) {
         notes.push(`${skipped.length} not queued: ${skipped.map((s) => s.error).slice(0, 3).join("; ")}${skipped.length > 3 ? "; …" : ""}`);
       }
@@ -10894,6 +10898,15 @@ export default function Bookings() {
             </div>
           </CardContent>
         </Card>
+
+        {/* Headless-run roll-up: bulk/per-row find + checkout runs at a glance
+            (operator 2026-07-21). Self-fetching; renders null when idle. */}
+        <ClaudeRunStatusBanner
+          onJumpToReservation={(reservationId) => {
+            const el = document.querySelector(`[data-reservation-id="${reservationId}"]`);
+            if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+          }}
+        />
 
         {isGlobalView && !bookingsLoading && !bookingsError && activeGuestyCount === 0 && !stats && (
           <Card>

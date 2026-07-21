@@ -28,6 +28,7 @@ import {
   checkoutRunEligibility,
   claimNextClaudeFindRun,
   claudeFindRunnerActivity,
+  claudeFindRunOverview,
   claudeFindRunQueueAhead,
   claudeFindRunWatchdogVerdict,
   claudeFindRunHistoryForReservation,
@@ -447,6 +448,23 @@ export function registerClaudeFindRunRoutes(app: Express): void {
       if (prior.length) history[reservationId] = prior;
     }
     return res.json({ runs, history, disabled: claudeFindRunsDisabled() });
+  }));
+
+  // Operator: page-level roll-up for the All Reservations status banner —
+  // EVERY run in the store (not just the visible rows' reservationIds), so a
+  // bulk batch stays visible even when its rows are filtered off the page.
+  // Events are stripped to keep the poll payload small; the per-row panels
+  // own the live logs.
+  app.get("/api/claude-find-runs/overview", guarded(async (_req, res) => {
+    if (!requireOperator(res)) return;
+    const store = await readStore();
+    const views = store.runs.map((run) => {
+      const view = clientClaudeFindRunView(run, {
+        queueAhead: run.status === "queued" ? claudeFindRunQueueAhead(store.runs, run.id) : undefined,
+      });
+      return { ...view, events: view.events.slice(-1) };
+    });
+    return res.json({ overview: claudeFindRunOverview(views, Date.now()), disabled: claudeFindRunsDisabled() });
   }));
 
   // Operator: cancel. Status flips immediately; the runner sees cancelled on

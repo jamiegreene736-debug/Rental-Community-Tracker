@@ -18,16 +18,20 @@ function check(name: string, cond: boolean) {
 async function run() {
   console.log("app-nav-history: behavioral (stubbed window)");
 
-  // Minimal window stub the tracker touches: history.pushState, popstate
-  // listener registration, sessionStorage.
+  // Minimal window stub the tracker touches: history.pushState/replaceState,
+  // popstate listener registration, sessionStorage. pushedStates captures what
+  // the tracker actually hands the browser so the per-entry stamp is provable.
   const store = new Map<string, string>();
-  let popstateHandler: (() => void) | null = null;
+  let popstateHandler: ((event: { state: unknown }) => void) | null = null;
   let pushCalls = 0;
+  const pushedStates: unknown[] = [];
   (globalThis as any).window = {
     history: {
-      pushState: (..._args: unknown[]) => { pushCalls++; },
+      state: null,
+      pushState: (state: unknown, ..._rest: unknown[]) => { pushCalls++; pushedStates.push(state); },
+      replaceState: (_state: unknown, ..._rest: unknown[]) => {},
     },
-    addEventListener: (event: string, handler: () => void) => {
+    addEventListener: (event: string, handler: (e: { state: unknown }) => void) => {
       if (event === "popstate") popstateHandler = handler;
     },
     sessionStorage: {
@@ -46,17 +50,36 @@ async function run() {
   (globalThis as any).window.history.pushState(null, "", "/bookings");
   check("a pushState navigation makes back-in-app available", nav.canGoBackInApp());
   check("the original pushState still ran (navigation not swallowed)", pushCalls === 1);
+  check("the entry carries its own depth stamp",
+    (pushedStates[0] as any)?.__vreNavIdx === 1);
 
-  popstateHandler?.();
-  check("browser back (popstate) consumes the depth", !nav.canGoBackInApp());
+  popstateHandler?.({ state: null });
+  check("browser back (popstate to the unstamped first entry) consumes the depth", !nav.canGoBackInApp());
 
-  popstateHandler?.();
+  // THE 2026-07-21 BUG: browser FORWARD also fires popstate, and the old
+  // counter decremented on it too — a back+forward pair (iPhone swipe
+  // gestures) drained the depth and the Back button fell to the dashboard
+  // with a valid in-app entry right behind it. The per-entry stamp restores
+  // the exact depth on forward re-entry.
+  popstateHandler?.({ state: pushedStates[0] });
+  check("browser FORWARD back onto a stamped entry RESTORES the depth (the dashboard-fallback bug)",
+    nav.canGoBackInApp());
+
+  popstateHandler?.({ state: null });
+  popstateHandler?.({ state: null });
   check("extra popstate never goes negative", !nav.canGoBackInApp());
 
   (globalThis as any).window.history.pushState(null, "", "/inbox");
   (globalThis as any).window.history.pushState(null, "", "/bookings");
   check("depth persists to sessionStorage for same-tab reloads",
     Number(store.get("vre_app_nav_depth_v1")) === 2);
+  check("nested navigations stamp increasing depths",
+    (pushedStates[1] as any)?.__vreNavIdx === 1 && (pushedStates[2] as any)?.__vreNavIdx === 2);
+
+  console.log("source guards: warning popups navigate in-tab");
+  const homeSrc = readFileSync("client/src/pages/home.tsx", "utf8");
+  check("dashboard popup actions no longer open in-app pages in NEW TABS (no history = Back falls to dashboard)",
+    !/window\.open\((`\/inbox|"\/bookings)/.test(homeSrc) && homeSrc.includes("navigateInApp("));
 
   console.log("source guards: shared back button + page wiring");
 
