@@ -1601,11 +1601,12 @@ exists because those two endpoints each paginated Guesty live on every cold load
 serialized through the single global Guesty request gate — the operator's slow
 dropdown (Decision Log 2026-06-23). Load-bearing invariants:
 
-1. **Cache the listing ROW set only.** `/api/bookings/guesty-all` still runs its
-   own reservation fetch, the `includeCanceled` second-pass merge, and per-listing
-   buy-in enrichment LIVE. Account-wide coverage + the canceled-merge are
-   load-bearing (Decision Log 2026-06-06 "missing Makahuena"); do NOT cache the
-   assembled reservation payload.
+1. **Cache the listing ROW set only** in THIS module. (2026-07-21 UPDATE: the
+   reservation PULL is now also cached — but in its own module,
+   `server/guesty-reservations-cache.ts`, storing RAW pre-filter rows; see the
+   next Load-Bearing section. The rule that stands: never cache the ASSEMBLED
+   guesty-all payload — the committed/canceled filtering and buy-in slot
+   enrichment run live on every request.)
 2. **Distinct field sets are distinct keys** (normalized `limit|maxPages|sorted
    fields`). `OPERATIONS_LISTING_FIELDS` is a superset of the dropdown set
    (adds name/bathrooms/terms/cancellationPolicy* that cancellation-policy +
@@ -1627,6 +1628,54 @@ dropdown (Decision Log 2026-06-23). Load-bearing invariants:
    re-navigation, NOT the fix; do not add list virtualization or flip
    `refetchOnWindowFocus` (neither was the bottleneck). Locked by
    `tests/guesty-listings-cache.test.ts`.
+
+### Guesty reservation pull SWR cache + dashboard SWR payloads (Load-Bearing, 2026-07-21)
+
+`server/guesty-reservations-cache.ts` is the reservations twin of the listing
+cache above (same SWR semantics, same test shape —
+`tests/guesty-reservations-cache.test.ts`). It exists because live edge logs
+showed `/api/bookings/guesty-all` at ~87s and the dashboard coverage endpoints
+at 120-136s per request: every one re-paginated `/reservations` through the
+serialized Guesty gate (500ms min gap + shared up-to-120s 429 pause), and they
+fire concurrently on a dashboard/operations load so their costs were additive.
+Load-bearing invariants:
+
+1. **The cache stores RAW reservation rows, BEFORE renderable/committed
+   filtering.** Both `guesty-all` passes (main + canceled) and
+   `/api/bookings/listing/:listingId` filter per request against the cached
+   rows — that's what lets includeCanceled toggles share one pull and keeps
+   the account-wide coverage rule (2026-06-06 "missing Makahuena") intact.
+2. **Buy-in slot enrichment is NEVER cached.** Attach/detach must reflect
+   instantly (the client invalidates guesty-all right after attaching), so
+   enrichment re-runs on every request — but as ONE batched
+   `storage.getBuyInsByReservationIds` query (Guesty + `manual:` ids
+   together), not the old per-reservation N+1. Deliberately NOT fail-soft: a
+   DB failure 500s rather than rendering every slot unattached.
+3. **Only a COMPLETE non-empty pull is cached** (natural pagination end; a
+   maxRows-truncated or empty result is returned but never stored). Stale
+   entries serve last-good instantly + ONE deduped backoff-bounded background
+   refresh; failed/empty/truncated refreshes keep last-good. TTL
+   `GUESTY_RESERVATIONS_CACHE_TTL_MS` (default 60s — matches the client's
+   staleTime); key cap 24 with oldest-first eviction (filter queries embed
+   dates so keys roll daily).
+4. **`OPERATIONS_RESERVATION_FIELDS` lives in the cache module** and both
+   bookings endpoints import it, so the boot warm
+   (`warmOperationsReservationsCache` in `server/index.ts`) primes the exact
+   key the Operations page reads. Don't re-inline the fields string.
+5. **Dashboard SWR payload caches** (routes.ts): `revenue-30-days` (the
+   funds-collected tiles; `computeDashboardRevenue30Days` +
+   `revenue30dCache`, TTL `DASHBOARD_REVENUE_CACHE_TTL_MS` default 120s) and
+   `payment-failures` (`computePaymentFailures` + `paymentFailuresCache`, TTL
+   `DASHBOARD_PAYMENT_FAILURES_CACHE_TTL_MS` default 5min) serve last-good
+   instantly and recompute in the background; `?fresh=1` forces a blocking
+   recompute; a background failure keeps last-good and a cold failure 500s
+   honestly. `channel-status` + `minimum-stays` read `getCachedGuestyListings`
+   instead of live `/listings` calls. `buyin-coverage` +
+   `arrival-details-coverage` need no own cache — their loopback guesty-all
+   calls hit the reservations cache.
+6. Client (`bookings.tsx`): both reservation queries keep previous rows while
+   refetching (`placeholderData: (prev) => prev`) so listing switches and
+   includePast/includeCanceled toggles never blank the table.
 
 ### Guest issues tracker — inbox + agent portal (Load-Bearing, 2026-07-08)
 
@@ -6282,3 +6331,4 @@ Welcome. When in doubt, ask the human.
 2026-07-21 · Jamie (3rd same-day agent-portal directive, screenshots of the EXPANDED ops row): "I meant that I want the agent portal to show the reservation as if I am clicking into it" · ACCEPTED (`claude/agent-expanded-row`) · The agent's shared-booking unit cards now mirror the operator's EXPANDED row: ops-style unit header (unitLabel · $cost · "paid $X" red-when-exceeds · dates · Bought-in chip), badge row through the SAME shared helpers the operator slot cards use (unitCommunityVerdictBadge / unitGuestHappyBadge / unitHostFrictionBadge notes-mode + ground-floor status) + view-listing link, unit email alias chip, ARRIVAL DETAILS block (address / door code / Wi-Fi / parking / on-site management / gate-elevator notes), collapsed "Email history — Unit X (N)" and "SMS/Text History — Unit X" sections. agentSafeBuyIn gained the badge fields (groundFloorStatus/Evidence, communityVerdict/Source/At, guestHappyVerdict/Feedback/Source/At). GET /api/buy-ins/:id/pm-sms is now agent-allowlisted READ-ONLY with the reservation share gate enforced in the handler (the SMS SEND route stays operator-only — deliberately not allowlisted). Deliberately NOT mirrored (operator-action tooling, not booking info): attach/detach/Alternative-Unit/Message-AD/checkout buttons, the walking-distance estimator, headless-run panels. Locked in tests/agent-buyin-view.test.ts (whitelist keys, pm-sms gate + allowlist guards, badge/arrival/SMS-section client guards).
 2026-07-21 · Jamie (4th same-day agent-portal directive): "the email history needs to have the side column so I can see the previews … Also, I need the ability for her to reply and send texts and emails" · ACCEPTED (`claude/agent-email-twopane-sms`) — SUPERSEDES the previous entry's "SMS SEND route stays operator-only" line · Agent email history is now the Gmail-style TWO-PANE inbox (sidebar previews: sender/"You"+sent chip, compact date, subject, link-stripped snippet; click → reading pane; newest open by default; Reply button prefills the composer with "Re: <subject>"). POST /api/buy-ins/:id/pm-sms is agent-allowlisted with the SAME reservation share gate as the GET (isAgentSmsSendSession block) and the agent SMS section gained a composer (sends to the GET-reported PM phone; disabled with honest copy when no phone is on file). Email reply was already live via vendor-email. Locked in tests/agent-buyin-view.test.ts (two-pane/composer client guards, POST gate + allowlist regex guards).
 2026-07-21 · Refusal recorded as "completed" (run 629799c6…, Jul 19 checkout run for reservation 6a357e7c60363d0014ae9958): the model REFUSED the headless checkout brief ("I'm not going to execute this task… hallmarks of fraudulent automation"), the CLI still emitted `subtype:"success"`, and the terminal classifier recorded status "completed" with a green chip · SHIPPED (`claude/findrun-refusal-guard`) · STRUCTURAL no-work terminal gate, never phrase-matched: the checkout brief's step 1 is an unconditional GET on the run's agent buy-in endpoint, so a kind-"checkout" run ending "success" with ZERO `/api/claude-find-runs/agent/:id/*` curl calls did no work → terminal FAILED with `checkoutRunDidNoWorkFailure(report)` (refusal-shaped reports get an error naming the refusal + quoting the report head via `reportLooksLikeRefusal` — supplementary WORDING only). Ordered BEFORE the browser-never-used gate (a refusal used neither; "chrome never attached" would bury the cause) and routed through the attention channel so the reason survives on the failed record. Claim payload now carries `kind` (absent = "find"); FIND runs deliberately ungated (an honest "no qualifying units" find makes zero endpoint calls). The checkout brief (BOTH variants) gained a "## Context — whose system this is" legitimacy block to reduce refusal likelihood — context only, money-safety rules unchanged + test-locked. TS twins + runner twins equivalence-locked in tests/claude-find-run.test.ts (230/0); live daemon runner copied + kickstarted. See the "REFUSAL / NO-WORK terminal guard" bullet under Headless Claude find-runs.
+2026-07-21 · Jamie: "increase the load speed of the information on the dashboard like the statistics of funds collected etc, and most importantly improve the speed of the loading of reservations in the operations tab" · ACCEPTED (`claude/dashboard-reservations-performance-a5462d`) · Diagnosed from LIVE Railway edge logs first (not code-guessing): /api/bookings/guesty-all ~87s, /api/bookings/listing/:id ~82s, and payment-failures / buyin-coverage / arrival-details-coverage / minimum-stays / channel-status at 120-136s per request — every one re-paginated Guesty reservations (or listings) live through the serialized global gate (500ms min gap + shared up-to-120s 429 pause; a live 429 was in the same log window), and they fire concurrently on load so the costs were additive. FIX = new `server/guesty-reservations-cache.ts` (SWR twin of the 2026-06-23 listings cache: raw pre-filter rows only, complete+non-empty trustworthy gate, stale-serves last-good + one backoff-bounded background refresh, TTL `GUESTY_RESERVATIONS_CACHE_TTL_MS` default 60s, key cap 24, boot-warmed) wired into BOTH guesty-all passes + the per-listing endpoint; buy-in slot enrichment stays fully live but is now ONE batched `getBuyInsByReservationIds` query (the old per-reservation N+1 was hundreds of parallel SELECTs); revenue-30-days + payment-failures serve SWR-cached payloads (TTLs 120s/5min, `?fresh=1` blocking recompute, background failure keeps last-good); channel-status + minimum-stays read the cached listing set; bookings client keeps previous rows while refetching (`placeholderData`). buyin-coverage + arrival-details-coverage inherit the fix through their loopback guesty-all calls. This AMENDS listings-cache invariant #1 ("cache the listing row set only") — the reservation PULL is now cached, but the assembled payload/filtering/enrichment still are not. Locked by tests/guesty-reservations-cache.test.ts (SWR matrix + source guards on every wiring seam). Verified: new suite green, full `npm test` REAL exit 0, build clean (cache bundle-grepped), `npm run check` 335 = baseline. See the "Guesty reservation pull SWR cache" Load-Bearing section.

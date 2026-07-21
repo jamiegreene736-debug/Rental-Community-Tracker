@@ -20,6 +20,7 @@ import { startMarketRateScheduler } from "./market-rate-scheduler";
 import { startGuestInboxSyncScheduler } from "./guest-inbox-sync";
 import { startBuyInVendorEmailSyncScheduler } from "./buy-in-email-sync";
 import { warmGuestyListingsCache } from "./guesty-listings-cache";
+import { warmOperationsReservationsCache } from "./guesty-reservations-cache";
 import { sanitizeForChatText, sanitizeForChatValue } from "@shared/safe-log";
 import { ensureRuntimeSchema } from "./schema-maintenance";
 import { ensureTopMarketScanCacheLogicVersion, refreshTopMarketScanCacheComboFlags } from "./top-market-scan-cache";
@@ -251,6 +252,12 @@ app.get("/api/auth/session", (_req, res) => {
       void warmGuestyListingsCache().catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err ?? "");
         console.warn("[guesty-listings-cache] boot warm failed:", message);
+      });
+      // Same for the default Operations RESERVATION pull (the guesty-all main
+      // pass) — the heaviest single interactive Guesty pagination.
+      void warmOperationsReservationsCache().catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err ?? "");
+        console.warn("[guesty-reservations-cache] boot warm failed:", message);
       });
       const startTopMarketCacheRefresh = app.get("startTopMarketCacheRefresh") as
         | (() => Promise<unknown>)

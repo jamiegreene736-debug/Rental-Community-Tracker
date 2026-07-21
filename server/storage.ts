@@ -175,6 +175,9 @@ export interface IStorage {
   // so a single reservation can have multiple attached buy-ins (one per unitId).
   getBuyInCandidates(params: { propertyId: number; unitId: string; checkIn: string; checkOut: string }): Promise<BuyIn[]>;
   getBuyInsByReservation(reservationId: string): Promise<BuyIn[]>;
+  // Batched full-row variant for /api/bookings/guesty-all enrichment — ONE
+  // query for the whole reservation set instead of a per-reservation N+1.
+  getBuyInsByReservationIds(reservationIds: string[]): Promise<Record<string, BuyIn[]>>;
   // Cheap batch slot fingerprint for the out-of-band Cowork attach probe.
   getBuyInSlotStatusByReservationIds(reservationIds: string[]): Promise<Record<string, {
     unitId: string;
@@ -497,6 +500,21 @@ export class DatabaseStorage implements IStorage {
 
   async getBuyInsByReservation(reservationId: string): Promise<BuyIn[]> {
     return db.select().from(buyIns).where(eq(buyIns.guestyReservationId, reservationId));
+  }
+
+  async getBuyInsByReservationIds(reservationIds: string[]): Promise<Record<string, BuyIn[]>> {
+    const out: Record<string, BuyIn[]> = {};
+    if (!reservationIds.length) return out;
+    const rows = await db
+      .select()
+      .from(buyIns)
+      .where(inArray(buyIns.guestyReservationId, reservationIds));
+    for (const row of rows) {
+      const key = row.guestyReservationId;
+      if (!key) continue;
+      (out[key] ??= []).push(row);
+    }
+    return out;
   }
 
   /**

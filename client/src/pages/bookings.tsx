@@ -8431,6 +8431,9 @@ export default function Bookings() {
     },
     enabled: !!selectedListingId,
     refetchInterval: 120_000,
+    // Keep the previous rows on screen while a listing switch / filter toggle
+    // refetches — a blank table + spinner reads as "broken" during the fetch.
+    placeholderData: (prev: any) => prev,
   });
 
   const globalBookingsQuery = useQuery<{
@@ -8445,6 +8448,9 @@ export default function Bookings() {
     enabled: isGlobalView,
     staleTime: 60_000,
     refetchInterval: 120_000,
+    // Keep the previous rows on screen while includePast/includeCanceled
+    // toggles refetch, instead of blanking to the loading state.
+    placeholderData: (prev: any) => prev,
   });
 
   const refreshBookingsAfterBuyInChange = () => {
