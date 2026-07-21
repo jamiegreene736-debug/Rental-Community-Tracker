@@ -1,15 +1,18 @@
-// Agent-portal LIMITED buy-in view (operator spec 2026-07-20): the remote
-// agent may see the back-and-forth email communication with the property
-// management company for reservations the operator explicitly shared, but
-// NEVER financial information (what the guest paid, what we paid for the
-// unit, extracted paid rates, profit).
+// Agent-portal buy-in view for SHARED reservations.
 //
-// LOAD-BEARING: this is a WHITELIST projection, not a blacklist. Any column
-// added to buy_ins in the future is invisible to agents until it is
-// deliberately listed here — so a new financial field can never leak by
-// default. `notes` is deliberately EXCLUDED even though it looks harmless:
-// Cowork attach notes carry " · $<total>" price segments and instant-book
-// backup prices (see titleFromBuyInNoteText in server/routes.ts).
+// HISTORY: the 2026-07-20 spec was a LIMITED view — financials (costPaid,
+// paid rates, notes with $ totals, guest money) were whitelisted away.
+// 2026-07-21 the operator reversed that half: "When I show the agent the
+// booking have it show the agent everything as I see it, including the
+// financials." The SHARE GATE is unchanged and still load-bearing — agents
+// see ONLY reservations the operator shared one by one via "Show in agent
+// portal" (reservation_agent_shares); everything else still 403s.
+//
+// STILL LOAD-BEARING: this remains a WHITELIST projection, not a raw row.
+// Any column added to buy_ins in the future stays invisible to agents until
+// it is deliberately listed here — the leak-by-default posture survives even
+// though the financial set is now deliberately included. The remaining
+// blocked fields are internal diagnostics/provenance blobs, not booking data.
 import type { BuyIn } from "./schema";
 
 export type AgentSafeBuyIn = {
@@ -32,17 +35,20 @@ export type AgentSafeBuyIn = {
   managementCompany: string | null;
   managementContact: string | null;
   arrivalNotes: string | null;
+  // Financials + operator context (operator directive 2026-07-21: the agent
+  // sees the shared booking "as I see it").
+  costPaid: string | null;
+  paidRate: string | null;
+  notes: string | null;
+  bookingConfirmation: string | null;
+  airbnbConfirmation: string | null;
 };
 
-// The financial / operator-only columns the projection must never emit.
-// Enumerated for the test suite's leak lock (tests/agent-buyin-view.test.ts).
+// Internal plumbing the projection still withholds — diagnostics and raw
+// provenance blobs, not booking or financial data. Enumerated for the test
+// suite's leak lock (tests/agent-buyin-view.test.ts).
 export const AGENT_BLOCKED_BUYIN_FIELDS = [
-  "costPaid",
-  "paidRate",
   "paidRateSource",
-  "notes",
-  "airbnbConfirmation",
-  "bookingConfirmation",
   "bookingError",
   "vrboLookupNote",
   "arrivalExtraction",
@@ -50,6 +56,11 @@ export const AGENT_BLOCKED_BUYIN_FIELDS = [
 ] as const;
 
 export function agentSafeBuyIn(buyIn: BuyIn): AgentSafeBuyIn {
+  const extras = buyIn as unknown as {
+    paidRate?: unknown;
+    bookingConfirmation?: string | null;
+    airbnbConfirmation?: string | null;
+  };
   return {
     id: buyIn.id,
     guestyReservationId: buyIn.guestyReservationId ?? null,
@@ -70,5 +81,56 @@ export function agentSafeBuyIn(buyIn: BuyIn): AgentSafeBuyIn {
     managementCompany: buyIn.managementCompany ?? null,
     managementContact: buyIn.managementContact ?? null,
     arrivalNotes: buyIn.arrivalNotes ?? null,
+    costPaid: buyIn.costPaid != null ? String(buyIn.costPaid) : null,
+    paidRate: extras.paidRate != null ? String(extras.paidRate) : null,
+    notes: buyIn.notes ?? null,
+    bookingConfirmation: extras.bookingConfirmation ?? null,
+    airbnbConfirmation: extras.airbnbConfirmation ?? null,
   };
+}
+
+/**
+ * Per-booking money roll-up for the agent card header — mirrors what the
+ * operator reads off a bookings row: what the guest paid, our payout, what
+ * the units cost, and the resulting margin (profit = hostPayout − Σ costPaid,
+ * the canonical basis from shared/buy-in-profit.ts). Null-safe: absent money
+ * or costs render as unknown, never as $0.
+ */
+export interface AgentBookingFinancials {
+  guestTotal: number | null;
+  guestPaid: number | null;
+  hostPayout: number | null;
+  currency: string | null;
+  /** Sum of recorded unit costs; null when NO unit has a recorded cost. */
+  unitCostTotal: number | null;
+  /** hostPayout − unitCostTotal, only when both sides are known. */
+  profit: number | null;
+}
+
+function finite(value: unknown): number | null {
+  // null/undefined/"" must stay UNKNOWN — Number(null) is 0, and a $0 cost
+  // reads as "we got the unit free", not "no cost recorded".
+  if (value == null || value === "") return null;
+  const n = typeof value === "string" ? Number(value.replace(/[$,]/g, "")) : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function agentBookingFinancials(
+  money: unknown,
+  units: Array<Pick<AgentSafeBuyIn, "costPaid" | "status">>,
+): AgentBookingFinancials {
+  const m = (money && typeof money === "object" ? money : {}) as Record<string, unknown>;
+  const guestTotal = finite(m.totalPrice ?? m.netAmount);
+  const guestPaid = finite(m.totalPaid);
+  const hostPayout = finite(m.hostPayout);
+  const currency = typeof m.currency === "string" && m.currency ? m.currency : null;
+  let unitCostTotal: number | null = null;
+  for (const unit of units ?? []) {
+    if (!unit || unit.status === "cancelled") continue;
+    const cost = finite(unit.costPaid);
+    if (cost == null) continue;
+    unitCostTotal = (unitCostTotal ?? 0) + cost;
+  }
+  const profit = hostPayout != null && unitCostTotal != null ? hostPayout - unitCostTotal : null;
+  return { guestTotal, guestPaid, hostPayout, currency, unitCostTotal, profit };
 }

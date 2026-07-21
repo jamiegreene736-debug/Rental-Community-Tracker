@@ -1722,23 +1722,33 @@ The panel AND the tab render for BOTH roles (agents use them in the portal);
 `canDelete={isAdmin}` hides the trash button for agents. Pure status/severity rules +
 labels live in `shared/guest-issue-logic.ts` so server and client never drift.
 
-### Agent-limited buy-in view — per-reservation shares (Load-Bearing, 2026-07-20)
+### Agent buy-in view — per-reservation shares (Load-Bearing, 2026-07-20; financials INCLUDED since 2026-07-21)
 
 The operator shares reservations with the agent portal ONE BY ONE ("Show in
 agent portal" toggle in the bookings expanded-row action strip →
 `POST /api/agent-shares` → `reservation_agent_shares` table); the agent then
 sees, on the Agent Portal home ("Shared bookings · PM communications",
-`client/src/components/agent-shared-bookings.tsx`), the attached units'
-non-financial info + the PM email back-and-forth, and can reply from the unit
-alias. Locked by `tests/agent-buyin-view.test.ts`. Don't "simplify" these:
+`client/src/components/agent-shared-bookings.tsx`), the attached units + the
+PM email back-and-forth, and can reply from the unit alias. Since 2026-07-21
+(operator: "show the agent everything as I see it, including the financials")
+a SHARED booking also carries the money picture — guest total/paid/payout
+(`money` on the shared-bookings Guesty read), per-unit `costPaid`/`paidRate`/
+`notes`/confirmations, and the derived margin (`agentBookingFinancials`,
+payout − Σ unit costs). Locked by `tests/agent-buyin-view.test.ts`. Don't
+"simplify" these:
 
-1. **`agentSafeBuyIn` (shared/agent-buyin-view.ts) is a WHITELIST, not a
-   blacklist.** A new `buy_ins` column is invisible to agents until it is
-   deliberately added to the projection — a future financial field can never
-   leak by default. `notes` is deliberately excluded (Cowork attach notes
-   carry " · $<total>" price segments); so are `costPaid`, `paidRate`,
-   `paidRateSource`, `vrboLookupNote` (has "$" totals), confirmations, and
-   provenance jsonb.
+1. **`agentSafeBuyIn` (shared/agent-buyin-view.ts) is STILL a WHITELIST, not
+   a blacklist and not a raw row.** A new `buy_ins` column stays invisible to
+   agents until deliberately listed. The financial set is now deliberately
+   INCLUDED by the 2026-07-21 directive (this REPLACES the original
+   "financials never reach agents" rule — don't re-strip them without a new
+   operator directive); internal diagnostics/provenance blobs
+   (`paidRateSource`, `bookingError`, `vrboLookupNote`, `arrivalExtraction`,
+   `managementContactSource`) stay blocked. The SHARE GATE is unchanged:
+   unshared reservations 403 for agent sessions on every surface, and the
+   money REPORTS (`/api/reports/buy-in-paid-rates`, `/api/bookings/guesty-all`)
+   stay OFF the agent allowlist — the agent sees money per shared booking,
+   never portfolio-wide.
 2. **The leak this closed: `GET /api/bookings/:id/buy-in-communications` was
    ALREADY agent-allowlisted** (server/auth.ts) but returned full buy_ins rows
    incl. `costPaid`/`paidRate`. The handler now, for agent sessions
@@ -6236,3 +6246,5 @@ Welcome. When in doubt, ask the human.
 2026-07-21 · Jamie: headless buy-in run failed "Claude login needed" then, after `/login`, "Browser did not attach" · DIAGNOSED + FIXED (`claude/find-run-browser-pending`) · Two stacked causes: (1) the CLI's stored subscription OAuth had expired and its refresh was dead — the one-time `/login` on the Mac fixed auth (the runner's friendly guidance fired correctly); (2) the interactive `/login` AUTO-UPDATED the CLI 2.1.63 → 2.1.216, which now emits its system/init line BEFORE MCP servers finish connecting — chrome legitimately reads "pending" at startup, and the 2026-07-19 browser guard (kill on anything ≠ "connected") false-killed every subsequent run in ~4s. FIX (both twins — shared/claude-find-run.ts + daemon/vrbo-sidecar/claude-find-runner.mjs — equivalence-locked): init kills only on chrome MISSING or status "failed"; "pending"/other in-flight statuses are INDETERMINATE and arm a DEFERRED proof-of-use gate — `lineUsesChromeBrowserTool` flips `browserUsed` on the first real `mcp__chrome__` tool call, and a "completed" report with ZERO chrome calls is refused via `browserNeverUsedFailure()` (the 2026-07-19 wrong-run class stays closed on every CLI version; auth-problem detection still outranks it). Live daemon updated (bak-clipending-*) + kickstarted; end-to-end probe on CLI 2.1.216 confirmed init "pending" → chrome tool call succeeds → run accepted. Locked in tests/claude-find-run.test.ts (pending matrix, proof-gate twins equivalence, deferred-gate source guards).
 
 2026-07-21 · Jamie: "The back button just takes me back to the dashboard, not back to the previous page" + "when I do a bulk run I need the UI on the all reservations page to show me like a status" · ACCEPTED (`claude/back-nav-and-bulk-status`) · (1) BACK NAV: the app-nav-history depth COUNTER decremented on every popstate — browser FORWARD fires popstate too, so a back+forward pair (iPhone swipe gestures) drained it one step too far and AppBackButton fell back to the dashboard with a valid in-app entry right behind it (reproduced on the built bundle: bookings→inbox→back→forward→Back landed on "/"). REWRITE: each pushState stamps its in-app depth INTO the entry's own history.state (__vreNavIdx); popstate reads the exact depth off the entry it lands on (back AND forward correct, drift impossible); replaceState preserves its entry's stamp; unstamped entries read depth 0. ALSO: the dashboard warning-popup actions (Message guest / Find & attach units / Send arrival details) opened in-app pages via window.open("_blank") — a new tab has no in-app history, so Back could only ever fall to the dashboard; they navigate IN-TAB now (wouter navigate). Locked in tests/app-back-navigation.test.ts (stamp assertions + the forward-restore regression + popup source guard). (2) BULK STATUS: new "Headless buy-in runs" banner at the top of the bookings page (client/src/components/claude-run-status-banner.tsx) — GET /api/claude-find-runs/overview returns EVERY run in the store (events stripped to the latest line; token/prompt never present) rolled up by pure claudeFindRunOverview (active in store order = the sequential runner's true drain order; terminal runs shown for CLAUDE_FIND_RUN_OVERVIEW_RECENT_MS = 1h). Rows: status chip (queued shows "N ahead"), find/checkout kind, property · guest (guestName added to clientClaudeFindRunView), latest activity/report/error snippet, age, Cancel on live runs; click a row name → scrolls to the booking row; 10s poll while active, 60s idle; run-start mutations invalidate the overview so the banner appears on click. Locked in tests/claude-find-run.test.ts (overview matrix + route/banner/mount source guards).
+
+2026-07-21 · Jamie (agent-portal screenshot): "When I show the agent the booking have it show the agent everything as I see it, including the financials" · ACCEPTED — REVERSES the financial half of the 2026-07-20 agent-limited-view entry (the per-reservation SHARE GATE itself is unchanged and still load-bearing) · (`claude/agent-full-financials`) `agentSafeBuyIn` now includes costPaid/paidRate/notes/bookingConfirmation/airbnbConfirmation (still a whitelist — future columns still can't leak by default; paidRateSource/bookingError/vrboLookupNote/arrivalExtraction/managementContactSource stay blocked as internal plumbing); `GET /api/agent/shared-bookings` reads Guesty WITH `money` and emits `financials` per booking via pure `agentBookingFinancials` (guest total/paid, hostPayout, Σ unit costs excluding cancelled, margin = payout − costs; unknowns stay null, never $0); the agent card renders a financial strip + per-unit cost/charged/notes lines. Portfolio-wide money surfaces (guesty-all, paid-rate reports, agent-shares toggle) remain OFF the agent allowlist. tests/agent-buyin-view.test.ts rewritten to lock the NEW contract (financials present, money in fields=, roll-up matrix, blocked internals).
