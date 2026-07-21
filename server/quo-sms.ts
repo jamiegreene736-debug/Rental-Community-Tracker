@@ -481,6 +481,65 @@ export async function backfillQuoMissedCalls(options: { hours?: number; force?: 
   }
 }
 
+// ── message backfill (2026-07-21) ───────────────────────────────────────────
+// Recovers texts lost while the webhook was 401ing (Jul 10 → the signature
+// fix): walks recent OpenPhone conversations → /v1/messages per participant →
+// feeds each through recordQuoWebhook's own payload shape, so matching,
+// merging, and dedupe (providerMessageId upsert) are identical to live events.
+export type QuoMessageBackfillResult = {
+  ok: true;
+  hours: number;
+  since: string;
+  conversationsScanned: number;
+  messagesScanned: number;
+  imported: number;
+  errors: string[];
+};
+
+export async function backfillQuoMessages(options: { hours?: number } = {}): Promise<QuoMessageBackfillResult> {
+  const hours = Math.min(24 * 45, Math.max(1, Math.round(Number(options.hours ?? 72) || 72)));
+  const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  const fromNumber = getQuoFromNumber();
+  const conversationParams = new URLSearchParams({ updatedAfter: since, maxResults: "100" });
+  conversationParams.append("phoneNumbers", fromNumber);
+
+  const conversations = await listQuoPages("/conversations", conversationParams, 5);
+  const errors: string[] = [];
+  let messagesScanned = 0;
+  let imported = 0;
+
+  for (const conversation of conversations) {
+    const phoneNumberId = String(conversation?.phoneNumberId ?? "").trim();
+    const participant = normalizePhone(Array.isArray(conversation?.participants) ? conversation.participants[0] : "");
+    if (!phoneNumberId || !phoneLast10(participant)) continue;
+    const messageParams = new URLSearchParams({ phoneNumberId, createdAfter: since, maxResults: "100" });
+    messageParams.append("participants", participant);
+    try {
+      const messages = await listQuoPages("/messages", messageParams, 5);
+      for (const message of messages) {
+        messagesScanned++;
+        const id = String(message?.id ?? "").trim();
+        if (!id) continue;
+        try {
+          // Same payload shape the live webhook delivers ({data:{object}}), so
+          // recordQuoWebhook applies identical direction/matching/merge rules.
+          await recordQuoWebhook({ type: "message.backfill", data: { object: message } });
+          imported++;
+        } catch (err: any) {
+          // text-less/media-less rows (reactions etc.) are expected skips
+          if (!/did not include/.test(String(err?.message ?? ""))) {
+            errors.push(`${participant} ${id}: ${err?.message ?? err}`);
+          }
+        }
+      }
+    } catch (err: any) {
+      errors.push(`${participant}: ${err?.message ?? err}`);
+    }
+  }
+
+  return { ok: true, hours, since, conversationsScanned: conversations.length, messagesScanned, imported, errors };
+}
+
 export async function sendQuoSms(input: {
   // Null when no Guesty conversation exists yet (e.g. a refund receipt texted
   // before the OTA conversation appears) — the mirror row still records the send.
@@ -595,6 +654,44 @@ export function extractQuoMediaUrls(object: any): QuoSmsMedia[] {
   return out;
 }
 
+// ── OpenPhone webhook signature verification (2026-07-21) ───────────────────
+// WHY: the 2026-07-11 hardening made the webhook secret header-only, but
+// OpenPhone cannot send custom headers — every webhook (inbound guest texts,
+// app-sent outbound mirrors, missed calls) 401'd silently from Jul 10 on.
+// OpenPhone DOES sign every delivery: `openphone-signature: hmac;1;<ts>;<sig>`
+// where sig = base64(HMAC-SHA256(base64decode(webhook.key), `${ts}.${rawBody}`)).
+// We already hold QUO_API_KEY, so the signing keys are fetched from
+// GET /v1/webhooks and cached — no new env var, keys follow webhook recreation
+// automatically. The header-secret path stays as the secondary (curl/tests);
+// the query-string secret stays dead (the Jul-11 log-leak rationale holds).
+let signingKeysCache: { keys: string[]; fetchedAt: number } | null = null;
+const SIGNING_KEYS_TTL_MS = 60 * 60 * 1000;
+
+export async function getQuoWebhookSigningKeys(): Promise<string[]> {
+  const apiKey = process.env.QUO_API_KEY;
+  if (!apiKey) return [];
+  if (signingKeysCache && Date.now() - signingKeysCache.fetchedAt < SIGNING_KEYS_TTL_MS) {
+    return signingKeysCache.keys;
+  }
+  try {
+    const resp = await fetch(`${QUO_API_BASE}/webhooks`, { headers: { Authorization: apiKey } });
+    const data = await resp.json().catch(() => ({}));
+    const keys = (Array.isArray(data?.data) ? data.data : [])
+      .map((w: any) => String(w?.key ?? "").trim())
+      .filter(Boolean);
+    if (resp.ok && keys.length > 0) {
+      signingKeysCache = { keys, fetchedAt: Date.now() };
+      return keys;
+    }
+  } catch (err: any) {
+    console.warn(`[quo-webhook] signing-key fetch failed: ${err?.message ?? err}`);
+  }
+  // Stale keys beat no keys — a transient API blip must not bounce webhooks.
+  return signingKeysCache?.keys ?? [];
+}
+
+export { verifyOpenPhoneSignature } from "@shared/quo-webhook-signature";
+
 export async function recordQuoWebhook(payload: any): Promise<{ message: QuoSmsMessage; matched: boolean }> {
   const object = payload?.data?.object ?? payload?.object ?? payload?.message ?? payload;
   const direction = String(object?.direction ?? payload?.type ?? "").toLowerCase().includes("out")
@@ -612,12 +709,20 @@ export async function recordQuoWebhook(payload: any): Promise<{ message: QuoSmsM
   // it must still be recorded, otherwise the guest's photo reply is lost.
   if (!body && media.length === 0) throw new Error("Webhook payload did not include message text or media");
 
-  const match = direction === "inbound" ? await findGuestyConversationByPhone(guestPhone) : null;
+  // Conversation match runs for BOTH directions (2026-07-21: texts the
+  // operator sends manually from the Quo APP arrive as outgoing webhook
+  // events — guestPhone is the recipient there, and without a match the row
+  // sat conversation-less and invisible in the inbox thread).
+  const match = await findGuestyConversationByPhone(guestPhone).catch(() => null);
+  // A delivery event for a PORTAL-sent message shares its providerMessageId
+  // with the row sendQuoSms already wrote — merge, never clobber: a null
+  // webhook match must not strip the existing row's thread attribution.
+  const existing = await storage.getQuoSmsMessageByProviderId(providerMessageId).catch(() => undefined);
   const row: InsertQuoSmsMessage = {
     providerMessageId,
-    conversationId: match?.conversationId ?? null,
-    reservationId: match?.reservationId ?? null,
-    guestName: match?.guestName ?? null,
+    conversationId: match?.conversationId ?? existing?.conversationId ?? null,
+    reservationId: match?.reservationId ?? existing?.reservationId ?? null,
+    guestName: match?.guestName ?? existing?.guestName ?? null,
     guestPhone,
     fromNumber: from || getQuoFromNumber(),
     toNumber: to || getQuoFromNumber(),

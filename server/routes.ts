@@ -228,7 +228,7 @@ import {
   isSidecarLaneCancellationRequested,
   isSidecarLaneOwner,
 } from "./sidecar-lane";
-import { backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigStatus, normalizePhone, phoneLast10, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms } from "./quo-sms";
+import { backfillQuoMessages, backfillQuoMissedCalls, findGuestyConversationByPhone, getQuoSmsConfigStatus, getQuoWebhookSigningKeys, normalizePhone, phoneLast10, recordQuoCallWebhook, recordQuoWebhook, sendQuoSms, verifyOpenPhoneSignature } from "./quo-sms";
 import { getAutoApproveStatus, setAutoApproveEnabled, runAutoApprove } from "./auto-approve";
 import { getAutoReplyStatus, setAutoReplyEnabled, runAutoReply, sendDraftedReply, saveDraftedReply, analyzeAndSaveDraftedReply, dismissReply, redoDraftedReply, dismissHandledAutoReplyDrafts, setAutoSendConfig, runAutoSendQueue } from "./auto-reply";
 import { loopbackRequestHeaders, resolvePortalSession, isLoopback } from "./auth";
@@ -14053,6 +14053,21 @@ Requirements:
     } catch (err: any) {
       console.error("[pm-sms] send failed:", err?.message ?? err);
       res.status(500).json({ error: "Failed to send PM text", message: err.message });
+    }
+  });
+
+  // Recover texts lost while the webhook was rejecting deliveries (or any
+  // other gap): re-pulls recent OpenPhone messages through the same recording
+  // path as live webhooks. Admin-only; providerMessageId upsert = idempotent.
+  app.post("/api/inbox/sms/backfill", async (req, res) => {
+    try {
+      const session = res.locals.portalSession as { role?: string } | undefined;
+      if (session && session.role !== "admin") return res.status(403).json({ error: "Admin only" });
+      const hours = Number(req.body?.hours ?? req.query.hours ?? 72);
+      const result = await backfillQuoMessages({ hours });
+      return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({ error: "SMS backfill failed", message: err.message });
     }
   });
 
@@ -54101,17 +54116,38 @@ ${SLEEPING_CAPACITY_RULE}
     }
   }
 
+  // Webhook acceptance ladder (2026-07-21 — the Jul-11 header-only change
+  // silently 401'd EVERY OpenPhone delivery from Jul 10 on, because OpenPhone
+  // cannot send custom headers; guest texts + app-sent mirrors + missed calls
+  // all stopped):
+  //   1. openphone-signature verifies against the signing keys fetched from
+  //      the OpenPhone API (cryptographic, no secret in the URL) — the path
+  //      real deliveries take;
+  //   2. x-quo-webhook-secret header — curl/tests/other senders.
+  // The query-string secret stays dead (Jul-11 log-leak rationale holds).
+  // Rejections log loudly — a silent 401 is how this outage went unnoticed
+  // for 11 days.
+  async function quoWebhookAccepted(req: Request, label: string): Promise<boolean> {
+    const signatureHeader = req.headers["openphone-signature"];
+    if (signatureHeader) {
+      const keys = await getQuoWebhookSigningKeys();
+      if (verifyOpenPhoneSignature((req as any).rawBody ?? null, signatureHeader, keys)) return true;
+    }
+    const secret = process.env.QUO_WEBHOOK_SECRET ?? "";
+    if (secret) {
+      const supplied = req.headers["x-quo-webhook-secret"] ?? req.headers["x-webhook-secret"];
+      if (quoWebhookSecretMatches(supplied, secret)) return true;
+    }
+    console.error(
+      `[quo-webhook] REJECTED ${label} delivery — signature ${signatureHeader ? "present but did not verify" : "absent"}, header secret ${secret ? "did not match" : "not configured"}. Guest texts/calls will NOT mirror until this is fixed.`,
+    );
+    return false;
+  }
+
   app.post("/api/quo/webhooks/messages", async (req, res) => {
     try {
-      const secret = process.env.QUO_WEBHOOK_SECRET ?? "";
-      if (!secret && process.env.NODE_ENV === "production") {
-        return res.status(500).json({ error: "QUO_WEBHOOK_SECRET is required in production" });
-      }
-      if (secret) {
-        const supplied = req.headers["x-quo-webhook-secret"] ?? req.headers["x-webhook-secret"];
-        if (!quoWebhookSecretMatches(supplied, secret)) {
-          return res.status(401).json({ error: "Invalid webhook secret" });
-        }
+      if (!(await quoWebhookAccepted(req, "message"))) {
+        return res.status(401).json({ error: "Invalid webhook signature/secret" });
       }
       const result = await recordQuoWebhook(req.body);
       return res.json({ ok: true, matched: result.matched, conversationId: result.message.conversationId });
@@ -54123,15 +54159,8 @@ ${SLEEPING_CAPACITY_RULE}
 
   app.post("/api/quo/webhooks/calls", async (req, res) => {
     try {
-      const secret = process.env.QUO_WEBHOOK_SECRET ?? "";
-      if (!secret && process.env.NODE_ENV === "production") {
-        return res.status(500).json({ error: "QUO_WEBHOOK_SECRET is required in production" });
-      }
-      if (secret) {
-        const supplied = req.headers["x-quo-webhook-secret"] ?? req.headers["x-webhook-secret"];
-        if (!quoWebhookSecretMatches(supplied, secret)) {
-          return res.status(401).json({ error: "Invalid webhook secret" });
-        }
+      if (!(await quoWebhookAccepted(req, "call"))) {
+        return res.status(401).json({ error: "Invalid webhook signature/secret" });
       }
       const result = await recordQuoCallWebhook(req.body);
       return res.json({
