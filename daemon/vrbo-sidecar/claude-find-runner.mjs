@@ -194,13 +194,62 @@ export function browserMcpFailure(rawLine) {
   if (parsed.type !== "system" || parsed.subtype !== "init") return null;
   const servers = Array.isArray(parsed.mcp_servers) ? parsed.mcp_servers : [];
   const chrome = servers.find((s) => s && s.name === "chrome");
-  if (chrome && chrome.status === "connected") return null;
+  // CLI ≥2.1.216 emits init BEFORE MCP connect finishes — "pending" is the
+  // healthy startup shape there (2026-07-20 incident: the old
+  // any-status-but-connected kill failed every run instantly). Only an
+  // explicit "failed" or a missing chrome entry is fatal at init; "pending"
+  // arms the deferred proof-of-use gate instead.
+  if (chrome && chrome.status !== "failed") return null;
   const state = !chrome ? "was not started at all" : `reported status "${String(chrome.status)}"`;
   return (
     `The runner's browser did not attach — chrome-devtools-mcp ${state}. `
     + "Without it this run can only web-search, so it cannot open listings, "
     + "check live availability, or verify photos. Stopped rather than attach "
     + "units it could not verify. Re-run it; if this repeats, check that the "
+    + "dedicated Chrome is up and that chrome-devtools-mcp is installed."
+  );
+}
+
+// TWIN of browserProofRequiredFromInit in shared/claude-find-run.ts — true
+// when init shows chrome in an in-flight (non-connected, non-failed) state.
+export function browserProofRequiredFromInit(rawLine) {
+  let parsed;
+  try {
+    parsed = JSON.parse(rawLine);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object") return false;
+  if (parsed.type !== "system" || parsed.subtype !== "init") return false;
+  const servers = Array.isArray(parsed.mcp_servers) ? parsed.mcp_servers : [];
+  const chrome = servers.find((s) => s && s.name === "chrome");
+  return Boolean(chrome) && chrome.status !== "connected" && chrome.status !== "failed";
+}
+
+// TWIN of lineUsesChromeBrowserTool in shared/claude-find-run.ts — positive
+// proof the browser attached: the agent CALLED an mcp__chrome__ tool.
+export function lineUsesChromeBrowserTool(rawLine) {
+  let parsed;
+  try {
+    parsed = JSON.parse(rawLine);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || parsed.type !== "assistant") return false;
+  const content = parsed.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (b) => b && b.type === "tool_use" && typeof b.name === "string" && b.name.startsWith("mcp__chrome__"),
+  );
+}
+
+// TWIN of browserNeverUsedFailure in shared/claude-find-run.ts.
+export function browserNeverUsedFailure() {
+  return (
+    "The run finished without ever using its browser — chrome-devtools-mcp "
+    + "never attached (or the agent never opened a page), so nothing it "
+    + "reported was verified against a live listing. Refused rather than "
+    + "record unverified findings. Re-run it; if this repeats, check that the "
     + "dedicated Chrome is up and that chrome-devtools-mcp is installed."
   );
 }
@@ -724,6 +773,10 @@ async function handleRun(run) {
   // "exited without a result" fallback below, which would otherwise bury the
   // real cause behind a generic message.
   let browserFailure = null;
+  // Deferred browser proof (CLI ≥2.1.216): flips true on the first
+  // mcp__chrome__ tool call. A "completed" report without it is refused —
+  // the 2026-07-19 wrong-run class, regardless of what the init line said.
+  let browserUsed = false;
 
   const flush = async (extra = {}) => {
     const events = buffer.splice(0, buffer.length).map((e) => ({ ...e, text: scrubToken(e.text, run.token) }));
@@ -771,6 +824,17 @@ async function handleRun(run) {
         } catch {}
       }
     }
+    // CLI ≥2.1.216: init fires while chrome is still "pending" — note it, and
+    // prove attachment by USE instead (any mcp__chrome__ tool call). A
+    // completed report with zero chrome calls is refused at the terminal.
+    if (browserProofRequiredFromInit(line)) {
+      buffer.push({
+        at: new Date().toISOString(),
+        kind: "status",
+        text: "Browser MCP still connecting at startup — the run will be accepted only if it actually uses the browser.",
+      });
+    }
+    if (!browserUsed && lineUsesChromeBrowserTool(line)) browserUsed = true;
     // Marker scan on the agent's own words → portal attention + local alarm.
     if (parsed?.type === "assistant") {
       for (const block of parsed.message?.content ?? []) {
@@ -827,6 +891,12 @@ async function handleRun(run) {
           },
         });
         terminalChime("failed", "Claude login needed");
+      } else if (!browserUsed) {
+        // The deferred half of the browser guard: the CLI reported a
+        // "successful" run that never called a single mcp__chrome tool.
+        // Whatever it reported was web-searched, not verified — refuse it.
+        await flush({ terminal: { status: "failed", error: browserNeverUsedFailure() } });
+        terminalChime("failed", "Browser was never used");
       } else {
         await flush({ terminal: { status: "completed", report: scrubToken(resultReport, run.token) } });
         terminalChime("completed");

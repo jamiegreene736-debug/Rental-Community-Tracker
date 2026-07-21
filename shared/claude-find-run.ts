@@ -498,6 +498,16 @@ export function scanClaudeFindRunMarkers(text: string): ClaudeFindRunMarkerScan 
  * and the operator both see. This guard covers the silent case — the tools
  * never existing at all.
  *
+ * CLI ≥2.1.216 (2026-07-20 incident): the init line is now emitted BEFORE MCP
+ * servers finish connecting, so a healthy run reports chrome "pending" at
+ * startup — the old any-status-but-connected kill produced an instant false
+ * "Browser did not attach" on every run. "pending" (and any other unknown
+ * in-flight status) is therefore INDETERMINATE, not fatal: the runner arms
+ * the deferred proof-of-use gate instead (browserProofRequiredFromInit +
+ * lineUsesChromeBrowserTool) and a completed report that never called a
+ * single mcp__chrome tool is refused with browserNeverUsedFailure(). Only an
+ * explicit "failed" status or a missing chrome entry still kills at init.
+ *
  * TWIN of browserMcpFailure() in daemon/vrbo-sidecar/claude-find-runner.mjs —
  * the daemon is plain node and cannot import TS. Equivalence-locked in
  * tests/claude-find-run.test.ts; change both together.
@@ -513,13 +523,70 @@ export function browserMcpFailureFromInit(rawLine: string): string | null {
   if (parsed.type !== "system" || parsed.subtype !== "init") return null;
   const servers = Array.isArray(parsed.mcp_servers) ? parsed.mcp_servers : [];
   const chrome = servers.find((s: any) => s && s.name === "chrome");
-  if (chrome && chrome.status === "connected") return null;
+  if (chrome && chrome.status !== "failed") return null;
   const state = !chrome ? "was not started at all" : `reported status "${String(chrome.status)}"`;
   return (
     `The runner's browser did not attach — chrome-devtools-mcp ${state}. `
     + "Without it this run can only web-search, so it cannot open listings, "
     + "check live availability, or verify photos. Stopped rather than attach "
     + "units it could not verify. Re-run it; if this repeats, check that the "
+    + "dedicated Chrome is up and that chrome-devtools-mcp is installed."
+  );
+}
+
+/**
+ * True when the init line reports chrome in an in-flight (non-"connected",
+ * non-"failed") state — CLI ≥2.1.216 emits init before MCP connect finishes,
+ * so "pending" is the NORMAL healthy startup shape there. The runner must not
+ * kill on it; it arms the deferred proof-of-use gate instead. Non-init lines
+ * return false.
+ */
+export function browserProofRequiredFromInit(rawLine: string): boolean {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(rawLine);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object") return false;
+  if (parsed.type !== "system" || parsed.subtype !== "init") return false;
+  const servers = Array.isArray(parsed.mcp_servers) ? parsed.mcp_servers : [];
+  const chrome = servers.find((s: any) => s && s.name === "chrome");
+  return Boolean(chrome) && chrome.status !== "connected" && chrome.status !== "failed";
+}
+
+/**
+ * True when a stream line shows the agent actually CALLING a chrome browser
+ * tool — the positive proof that the browser attached. Assistant messages
+ * carry tool_use blocks whose names are prefixed "mcp__chrome__".
+ */
+export function lineUsesChromeBrowserTool(rawLine: string): boolean {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(rawLine);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || parsed.type !== "assistant") return false;
+  const content = parsed.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (b: any) => b && b.type === "tool_use" && typeof b.name === "string" && b.name.startsWith("mcp__chrome__"),
+  );
+}
+
+/**
+ * Terminal error for a run whose report arrived with ZERO chrome tool calls —
+ * the deferred twin of browserMcpFailureFromInit for the CLI-2.1.216 "pending"
+ * init shape. A find that never opened the browser is the 2026-07-19
+ * wrong-run class regardless of what the init line claimed.
+ */
+export function browserNeverUsedFailure(): string {
+  return (
+    "The run finished without ever using its browser — chrome-devtools-mcp "
+    + "never attached (or the agent never opened a page), so nothing it "
+    + "reported was verified against a live listing. Refused rather than "
+    + "record unverified findings. Re-run it; if this repeats, check that the "
     + "dedicated Chrome is up and that chrome-devtools-mcp is installed."
   );
 }

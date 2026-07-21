@@ -26,6 +26,8 @@ import {
   appendClaudeFindRunEvents,
   applyClaudeFindRunUpdate,
   browserMcpFailureFromInit,
+  browserNeverUsedFailure,
+  browserProofRequiredFromInit,
   claimNextClaudeFindRun,
   claudeFindRunnerActivity,
   claudeFindRunQueueAhead,
@@ -34,6 +36,7 @@ import {
   claudeFindRunWatchdogVerdict,
   clientClaudeFindRunView,
   latestClaudeFindRunForReservation,
+  lineUsesChromeBrowserTool,
   parseClaudeFindRunStore,
   scanClaudeFindRunMarkers,
   scrubClaudeFindRunToken,
@@ -44,7 +47,10 @@ import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt, type CoworkBuyInProm
 // The daemon runner is plain node .mjs — import its twins directly.
 import {
   browserMcpFailure as runnerBrowserMcpFailure,
+  browserNeverUsedFailure as runnerBrowserNeverUsedFailure,
+  browserProofRequiredFromInit as runnerBrowserProofRequired,
   classifyStreamLine as runnerClassify,
+  lineUsesChromeBrowserTool as runnerLineUsesChromeTool,
   scanMarkers as runnerScanMarkers,
 } from "../daemon/vrbo-sidecar/claude-find-runner.mjs";
 
@@ -465,6 +471,40 @@ const FIXTURE_LINES = [
     typeof browserMcpFailureFromInit(init([{ name: "railway-mcp-server", status: "connected" }])) === "string",
   );
   check(
+    // CLI ≥2.1.216 emits init BEFORE MCP connect finishes — a healthy run
+    // reports "pending" at startup (2026-07-20 live incident: the old
+    // kill-on-anything-but-connected failed every run instantly). Pending is
+    // INDETERMINATE: no init kill, deferred proof-of-use gate armed instead.
+    "chrome pending → NOT an init failure (CLI 2.1.216 healthy startup shape)",
+    browserMcpFailureFromInit(init([{ name: "chrome", status: "pending" }])) === null,
+  );
+  check(
+    "pending (and unknown in-flight statuses) arm the deferred proof gate",
+    browserProofRequiredFromInit(init([{ name: "chrome", status: "pending" }])) === true
+      && browserProofRequiredFromInit(init([{ name: "chrome", status: "connecting" }])) === true
+      && browserProofRequiredFromInit(init([{ name: "chrome", status: "connected" }])) === false
+      && browserProofRequiredFromInit(init([{ name: "chrome", status: "failed" }])) === false
+      && browserProofRequiredFromInit("not json") === false,
+  );
+  const chromeToolLine = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", name: "mcp__chrome__navigate_page", input: { url: "https://vrbo.com" } }] },
+  });
+  check(
+    "an mcp__chrome__ tool call is the positive browser proof",
+    lineUsesChromeBrowserTool(chromeToolLine) === true
+      && lineUsesChromeBrowserTool(JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", name: "WebSearch", input: {} }] },
+      })) === false
+      && lineUsesChromeBrowserTool(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "mcp__chrome__ mentioned in prose" }] } })) === false
+      && lineUsesChromeBrowserTool("not json") === false,
+  );
+  check(
+    "the never-used failure names the refusal",
+    /never attached|never opened a page/.test(browserNeverUsedFailure()) && /Refused/.test(browserNeverUsedFailure()),
+  );
+  check(
     "no mcp_servers field at all → failure, never assumed healthy",
     typeof browserMcpFailureFromInit(JSON.stringify({ type: "system", subtype: "init", model: "m", tools: [] })) === "string",
   );
@@ -488,16 +528,26 @@ const FIXTURE_LINES = [
   // one implementation would leave the live Mac silently unguarded.
   const CASES = [
     init([{ name: "chrome", status: "connected" }]),
+    init([{ name: "chrome", status: "pending" }]),
     init([{ name: "chrome", status: "failed" }]),
     init([{ name: "railway-mcp-server", status: "failed" }, { name: "chrome", status: "failed" }]),
     init([]),
     JSON.stringify({ type: "system", subtype: "init" }),
     JSON.stringify({ type: "assistant", message: { content: [] } }),
+    chromeToolLine,
     "not json",
   ];
   check(
     "runner .mjs and shared TS browser guard are behaviorally identical",
     CASES.every((l) => runnerBrowserMcpFailure(l) === browserMcpFailureFromInit(l)),
+  );
+  check(
+    "runner .mjs and shared TS proof-gate twins are behaviorally identical",
+    CASES.every(
+      (l) =>
+        runnerBrowserProofRequired(l) === browserProofRequiredFromInit(l)
+        && runnerLineUsesChromeTool(l) === lineUsesChromeBrowserTool(l),
+    ) && runnerBrowserNeverUsedFailure() === browserNeverUsedFailure(),
   );
 }
 
@@ -529,6 +579,21 @@ const FIXTURE_LINES = [
   check(
     "the browser failure is reported as FAILED, never completed",
     /browserFailure[\s\S]{0,400}?terminal: \{ status: "failed"/.test(runnerSrc),
+  );
+  check(
+    // CLI ≥2.1.216 deferred gate: proof-of-use is tracked per line and a
+    // "completed" report without a single chrome call is refused BEFORE the
+    // completed branch. Removing either half reopens the 2026-07-19
+    // browser-less-run hole on new CLIs.
+    "the deferred proof gate tracks chrome tool use and refuses unproven completions",
+    /if \(!browserUsed && lineUsesChromeBrowserTool\(line\)\) browserUsed = true;/.test(runnerSrc)
+      && (() => {
+        const term = runnerSrc.slice(runnerSrc.indexOf("const authProblem"));
+        const gate = term.indexOf('} else if (!browserUsed) {');
+        const completed = term.indexOf('status: "completed"');
+        return gate > -1 && completed > -1 && gate < completed
+          && /!browserUsed\) \{[\s\S]{0,400}?browserNeverUsedFailure\(\)/.test(term);
+      })(),
   );
   check(
     // "@latest" forces a registry round-trip on EVERY run; that is what blew
