@@ -219,6 +219,10 @@ import {
   getCachedGuestyListings,
   OPERATIONS_LISTING_FIELDS,
 } from "./guesty-listings-cache";
+import {
+  getCachedGuestyReservations,
+  OPERATIONS_RESERVATION_FIELDS,
+} from "./guesty-reservations-cache";
 import { findGuestyConversationById, findGuestyConversationForReservation, sendGuestyConversationMessage, checkOtaDeliveryStatus } from "./guesty-ota-messaging";
 import { lookupHawaiiComplianceField, lookupHawaiiPublicListingLicenses, lookupKauaiTmkFromAddress, lookupHawaiiStatewideTmkFromAddress } from "./hawaii-compliance-lookup";
 import {
@@ -8252,13 +8256,15 @@ export async function registerRoutes(
     try {
       const map = await storage.getGuestyPropertyMap();
       if (map.length === 0) return res.json({});
-      // Single Guesty read across all mapped listings. fields= limits
-      // payload so we don't ship full listing bodies back.
-      const resp = await guestyRequest(
-        "GET",
-        `/listings?limit=200&fields=_id%20integrations%20isListed`,
-      ) as { results?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
-      const listings = Array.isArray(resp) ? resp : (resp.results ?? []);
+      // SWR-cached listing read (guesty-listings-cache.ts) — this was a live
+      // Guesty call that queued behind the global request gate on every
+      // dashboard load. fields= limits payload so we don't ship full listing
+      // bodies back.
+      const { results: listings } = await getCachedGuestyListings({
+        fields: "_id integrations isListed",
+        limit: 100,
+        maxPages: 5,
+      });
       const byId = new Map<string, Record<string, unknown>>(
         listings.map((l) => [l._id as string, l]),
       );
@@ -8323,11 +8329,13 @@ export async function registerRoutes(
       const map = await storage.getGuestyPropertyMap();
       if (map.length === 0) return res.json({});
 
-      const resp = await guestyRequest(
-        "GET",
-        `/listings?limit=200&fields=_id%20terms%20title%20nickname`,
-      ) as { results?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
-      const listings = Array.isArray(resp) ? resp : (resp.results ?? []);
+      // SWR-cached listing read (guesty-listings-cache.ts) — same rationale
+      // as channel-status above.
+      const { results: listings } = await getCachedGuestyListings({
+        fields: "_id terms title nickname",
+        limit: 100,
+        maxPages: 5,
+      });
       const byId = new Map<string, Record<string, unknown>>(
         listings.map((l) => [l._id as string, l]),
       );
@@ -8372,7 +8380,11 @@ export async function registerRoutes(
     }
   });
 
-  const dashboardRevenue30DayHandler = async (_req: any, res: any) => {
+  // Full recompute of the dashboard revenue/statistics payload ("funds
+  // collected" tiles + feeds). Up to ~20 serialized Guesty pages, so it is
+  // NEVER run bare on the request path any more — the SWR-cached
+  // dashboardRevenue30DayHandler below owns when this executes.
+  const computeDashboardRevenue30Days = async (): Promise<Record<string, unknown>> => {
     const now = new Date();
     const windowDays = 30;
     const start = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000);
@@ -9010,7 +9022,7 @@ export async function registerRoutes(
         if (!missingTable) console.error(`[dashboard/revenue] guest receipts feed error: ${receiptErr?.message ?? receiptErr}`);
       }
 
-      res.json({
+      return {
         windowDays,
         revenue,
         fundsCollected30Days,
@@ -9067,7 +9079,49 @@ export async function registerRoutes(
         // guest"). Sorted newest-first.
         guestRefundReceiptIssues: guestRefundReceiptIssues.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
         guestRefundReceiptIssueCount: guestRefundReceiptIssues.length,
+      };
+    } catch (err: any) {
+      // Bubbles to the SWR handler below: a cold request 500s honestly, a
+      // background refresh keeps serving last-good.
+      throw err;
+    }
+  };
+
+  // SWR cache for the revenue tiles (2026-07-21 dashboard speed fix): serve
+  // the last computed payload instantly and recompute in the background once
+  // it goes stale. The compute above is the single heaviest dashboard call
+  // (paginated Guesty pull), and the tiles tolerate ~2 min of staleness —
+  // the client already treats them as fresh for 5 min. ?fresh=1 forces a
+  // blocking recompute.
+  const REVENUE_30D_CACHE_TTL_MS = (() => {
+    const raw = Number(process.env.DASHBOARD_REVENUE_CACHE_TTL_MS ?? 120_000);
+    return Number.isFinite(raw) ? Math.max(0, raw) : 120_000;
+  })();
+  let revenue30dCache: { at: number; payload: Record<string, unknown> } | null = null;
+  let revenue30dRefreshing: Promise<void> | null = null;
+  const kickRevenue30dRefresh = () => {
+    if (revenue30dRefreshing) return;
+    revenue30dRefreshing = computeDashboardRevenue30Days()
+      .then((payload) => {
+        revenue30dCache = { at: Date.now(), payload };
+      })
+      .catch((err: any) => {
+        console.warn(`[dashboard/revenue] background refresh failed (serving last-good): ${err?.message ?? err}`);
+      })
+      .finally(() => {
+        revenue30dRefreshing = null;
       });
+  };
+  const dashboardRevenue30DayHandler = async (req: any, res: any) => {
+    try {
+      const fresh = req?.query?.fresh === "1";
+      if (!fresh && revenue30dCache && REVENUE_30D_CACHE_TTL_MS > 0) {
+        if (Date.now() - revenue30dCache.at >= REVENUE_30D_CACHE_TTL_MS) kickRevenue30dRefresh();
+        return res.json(revenue30dCache.payload);
+      }
+      const payload = await computeDashboardRevenue30Days();
+      revenue30dCache = { at: Date.now(), payload };
+      res.json(payload);
     } catch (err: any) {
       res.status(500).json({ error: "Failed to fetch 30-day revenue", message: err.message });
     }
@@ -9089,8 +9143,10 @@ export async function registerRoutes(
   //      every attempted charge).
   // Cancelled bookings never warn (collectReservationPaymentIssues excludes
   // them — the operator can't take a payment on a cancelled booking).
-  app.get("/api/dashboard/payment-failures", async (_req, res) => {
-    try {
+  // Full recompute (two paginated Guesty passes) — request path serves the
+  // SWR cache below; this only runs cold / in the background.
+  const computePaymentFailures = async (): Promise<Record<string, unknown>> => {
+    {
       const nowMs = Date.now();
       const windowStartMs = nowMs - PAYMENT_WARNING_WINDOW_MS;
       const limit = 100;
@@ -9175,7 +9231,43 @@ export async function registerRoutes(
         Math.max(0, ...w.issues.map((i) => (i.dateIso ? new Date(i.dateIso).getTime() : 0)));
       warnings.sort((a, b) => newestIssueMs(b) - newestIssueMs(a));
 
-      res.json({ warnings, windowDays: PAYMENT_WARNING_WINDOW_DAYS, checkedAt: new Date(nowMs).toISOString() });
+      return { warnings, windowDays: PAYMENT_WARNING_WINDOW_DAYS, checkedAt: new Date(nowMs).toISOString() };
+    }
+  };
+
+  // SWR cache (2026-07-21 dashboard speed fix): the popup tolerates minutes
+  // of staleness (the client refetches every 10 min anyway); serve last-good
+  // instantly and recompute in the background once stale. ?fresh=1 forces a
+  // blocking recompute.
+  const PAYMENT_FAILURES_CACHE_TTL_MS = (() => {
+    const raw = Number(process.env.DASHBOARD_PAYMENT_FAILURES_CACHE_TTL_MS ?? 300_000);
+    return Number.isFinite(raw) ? Math.max(0, raw) : 300_000;
+  })();
+  let paymentFailuresCache: { at: number; payload: Record<string, unknown> } | null = null;
+  let paymentFailuresRefreshing: Promise<void> | null = null;
+  const kickPaymentFailuresRefresh = () => {
+    if (paymentFailuresRefreshing) return;
+    paymentFailuresRefreshing = computePaymentFailures()
+      .then((payload) => {
+        paymentFailuresCache = { at: Date.now(), payload };
+      })
+      .catch((err: any) => {
+        console.warn(`[payment-failures] background refresh failed (serving last-good): ${err?.message ?? err}`);
+      })
+      .finally(() => {
+        paymentFailuresRefreshing = null;
+      });
+  };
+  app.get("/api/dashboard/payment-failures", async (req, res) => {
+    try {
+      const fresh = req?.query?.fresh === "1";
+      if (!fresh && paymentFailuresCache && PAYMENT_FAILURES_CACHE_TTL_MS > 0) {
+        if (Date.now() - paymentFailuresCache.at >= PAYMENT_FAILURES_CACHE_TTL_MS) kickPaymentFailuresRefresh();
+        return res.json(paymentFailuresCache.payload);
+      }
+      const payload = await computePaymentFailures();
+      paymentFailuresCache = { at: Date.now(), payload };
+      res.json(payload);
     } catch (err: any) {
       res.status(500).json({ error: "Payment-failure check failed", message: err?.message ?? String(err) });
     }
@@ -22783,10 +22875,16 @@ Requirements:
   const enrichGuestyReservationForOperations = async (
     reservation: any,
     target: OperationsListingTarget,
+    // Pre-batched buy-ins keyed by reservation id (ONE query for the whole
+    // set) — the per-reservation fallback survives only for callers that
+    // enrich a single reservation.
+    attachedByReservation?: Record<string, any[]>,
   ) => {
     const reservationId = String(reservation?._id ?? reservation?.id ?? "");
     const attached = target.unitSlots.length > 0 && reservationId
-      ? await storage.getBuyInsByReservation(reservationId)
+      ? (attachedByReservation
+          ? (attachedByReservation[reservationId] ?? [])
+          : await storage.getBuyInsByReservation(reservationId))
       : [];
     const slots = target.unitSlots.map((slot) => {
       const buyIn = attached.find((b) => b.unitId === slot.unitId) ?? null;
@@ -22842,8 +22940,9 @@ Requirements:
       // guestsCount + numberOfGuests: the party size the guest entered on the
       // channel (VRBO/Booking/Airbnb). numberOfGuests is either a plain number
       // or the {numberOfAdults, numberOfChildren, ...} breakdown — the client
-      // parses both via shared/guest-party.ts.
-      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest guestsCount numberOfGuests money payments source integration confirmationCode preApproveState listing listingId terms cancellationPolicy cancellationPolicies cancellationPolicyText cancellationPolicyDescription cancellationPolicyName cancelationPolicy");
+      // parses both via shared/guest-party.ts. The raw fields string lives in
+      // guesty-reservations-cache.ts so the boot warm primes this exact key.
+      const fields = OPERATIONS_RESERVATION_FIELDS;
       const limit = 100;
       const maxRows = Math.min(Math.max(parseInt((req.query.maxRows as string) ?? "5000", 10) || 5000, 100), 10000);
       const filterArr: Array<Record<string, unknown>> = [];
@@ -22881,20 +22980,28 @@ Requirements:
       const filterQuery = filterArr.length > 0
         ? `filters=${encodeURIComponent(JSON.stringify(filterArr))}&`
         : "";
+      // SWR-cached reservation pull (server/guesty-reservations-cache.ts —
+      // the 2026-07-21 speed fix; guesty-all was ~87s live because every load
+      // re-paginated /reservations through the serialized Guesty gate). The
+      // cache stores RAW rows; renderable/committed filtering stays HERE so
+      // the includeCanceled toggle shares one cached pull, and the buy-in
+      // slot enrichment below stays fully live (attach/detach must reflect
+      // instantly — the client invalidates this query right after attaching).
+      const mainPull = await getCachedGuestyReservations({
+        filterQuery,
+        fields,
+        sort: "checkIn",
+        limit,
+        maxRows,
+      });
       const seenReservations = new Map<string, any>();
-      for (let skip = 0; skip < maxRows; skip += limit) {
-        const data = await guestyRequest("GET", `/reservations?${filterQuery}limit=${limit}&skip=${skip}&sort=checkIn&fields=${fields}`) as any;
-        const rows = unwrapGuestyListResponse(data);
-        for (const row of rows) {
-          if (!isRenderableGuestyReservation(row)) continue;
-          // Committed-only by default; "Include canceled" lets canceled/
-          // declined/inquiry/expired rows through (client badges them).
-          if (!includeCanceled && !isCommittedGuestyReservation(row)) continue;
-          const id = String(row?._id ?? row?.id ?? "").trim();
-          if (id) seenReservations.set(id, row);
-        }
-        const total = guestyListTotal(data);
-        if (rows.length < limit || (total && skip + rows.length >= total)) break;
+      for (const row of mainPull.rows) {
+        if (!isRenderableGuestyReservation(row)) continue;
+        // Committed-only by default; "Include canceled" lets canceled/
+        // declined/inquiry/expired rows through (client badges them).
+        if (!includeCanceled && !isCommittedGuestyReservation(row)) continue;
+        const id = String(row?._id ?? row?.id ?? "").trim();
+        if (id) seenReservations.set(id, row);
       }
 
       // Guesty's account-wide /reservations list omits canceled/declined/
@@ -22909,18 +23016,30 @@ Requirements:
           { field: "status", operator: "$in", value: ["canceled", "cancelled", "declined", "expired", "inquiry", "closed", "draft"] },
         ];
         const canceledQuery = `filters=${encodeURIComponent(JSON.stringify(canceledStatusFilter))}&`;
-        for (let skip = 0; skip < maxRows; skip += limit) {
-          const data = await guestyRequest("GET", `/reservations?${canceledQuery}limit=${limit}&skip=${skip}&sort=checkIn&fields=${fields}`) as any;
-          const rows = unwrapGuestyListResponse(data);
-          for (const row of rows) {
-            if (!isRenderableGuestyReservation(row)) continue;
-            const id = String(row?._id ?? row?.id ?? "").trim();
-            if (id) seenReservations.set(id, row);
-          }
-          const total = guestyListTotal(data);
-          if (rows.length < limit || (total && skip + rows.length >= total)) break;
+        const canceledPull = await getCachedGuestyReservations({
+          filterQuery: canceledQuery,
+          fields,
+          sort: "checkIn",
+          limit,
+          maxRows,
+        });
+        for (const row of canceledPull.rows) {
+          if (!isRenderableGuestyReservation(row)) continue;
+          const id = String(row?._id ?? row?.id ?? "").trim();
+          if (id) seenReservations.set(id, row);
         }
       }
+
+      // ONE batched buy-ins query for the whole set (Guesty + manual rows)
+      // instead of the old per-reservation SELECT — that N+1 was hundreds of
+      // parallel DB round-trips per load. Deliberately NOT fail-soft: a DB
+      // failure must 500 (like any storage failure), never render every slot
+      // as unattached.
+      const manualRows = await storage.getManualReservations({ includePast }).catch(() => []);
+      const attachedByReservation = await storage.getBuyInsByReservationIds([
+        ...Array.from(seenReservations.keys()),
+        ...manualRows.map((row) => `manual:${row.id}`),
+      ]);
 
       const missingListingIds = new Set<string>();
       const enrichmentPromises = Array.from(seenReservations.values()).map(async (reservation) => {
@@ -22939,7 +23058,7 @@ Requirements:
             missingListingIds.add(firstNonEmptyString(reservation?.listingId, reservation?.listing?._id, reservation?.listing?.id, "unknown"));
             return null;
           }
-          return await enrichGuestyReservationForOperations(reservation, target);
+          return await enrichGuestyReservationForOperations(reservation, target, attachedByReservation);
         } catch (e: any) {
           console.warn("[guesty-all] reservation enrich failed:", e?.message ?? e);
           return null;
@@ -22956,13 +23075,13 @@ Requirements:
       // reservationPropertyMeta loop — which skips rows with no listingId — includes
       // them, + createdAt for the "Date Added" column). includePast is honored by the
       // storage filter; committed-only by default (a cancelled manual row only shows
-      // when includeCanceled is on), mirroring the Guesty path.
-      const manualRows = await storage.getManualReservations({ includePast }).catch(() => []);
+      // when includeCanceled is on), mirroring the Guesty path. manualRows was
+      // fetched above so its ids joined the ONE batched buy-ins query.
       const manualEnriched = await Promise.all(
         manualRows.map(async (row) => {
           const reservationId = `manual:${row.id}`;
           const unitSlots = getPropertyUnits(row.propertyId) as OperationsListingTarget["unitSlots"];
-          const attached = unitSlots.length > 0 ? await storage.getBuyInsByReservation(reservationId) : [];
+          const attached = unitSlots.length > 0 ? (attachedByReservation[reservationId] ?? []) : [];
           const slots = unitSlots.map((slot) => {
             const buyIn = attached.find((b) => b.unitId === slot.unitId) ?? null;
             return { ...slot, buyIn };
@@ -23243,8 +23362,9 @@ Requirements:
 
       const today = new Date().toISOString().slice(0, 10);
       // guestsCount + numberOfGuests: party size for the bookings rows (see
-      // the guesty-all fields note above).
-      const fields = encodeURIComponent("_id status createdAt checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest guestsCount numberOfGuests money payments source integration confirmationCode preApproveState listing listingId terms cancellationPolicy cancellationPolicies cancellationPolicyText cancellationPolicyDescription cancellationPolicyName cancelationPolicy");
+      // the guesty-all fields note above). Same shared fields constant so the
+      // per-listing pull rides the same reservations cache.
+      const fields = OPERATIONS_RESERVATION_FIELDS;
       // Guesty Open API requires the JSON `filters=[...]` syntax for
       // listingId — the simple `listingId=X` query param is silently
       // ignored, so the account-wide reservation list comes back
@@ -23261,27 +23381,35 @@ Requirements:
         filterArr.push({ field: "checkOut", operator: "$gte", value: today });
       }
       const filtersParam = encodeURIComponent(JSON.stringify(filterArr));
+      // SWR-cached pull (guesty-reservations-cache.ts) — raw rows keyed by the
+      // listingId filter; the committed filter stays here per request.
+      const listingPull = await getCachedGuestyReservations({
+        filterQuery: `filters=${filtersParam}&`,
+        fields,
+        sort: "checkIn",
+        limit,
+        maxRows,
+      });
       const seenReservations = new Map<string, any>();
-      for (let skip = 0; skip < maxRows; skip += limit) {
-        const url = `/reservations?filters=${filtersParam}&limit=${limit}&skip=${skip}&sort=checkIn&fields=${fields}`;
-        const data = await guestyRequest("GET", url) as any;
-        const rows = unwrapGuestyListResponse(data);
-        for (const row of rows) {
-          if (!isRenderableGuestyReservation(row)) continue;
-          // Committed-only by default; "Include canceled" lets canceled/
-          // declined/inquiry/expired rows through (client badges them).
-          if (!includeCanceled && !isCommittedGuestyReservation(row)) continue;
-          const id = String(row?._id ?? row?.id ?? "").trim();
-          if (id) seenReservations.set(id, row);
-        }
-        const total = guestyListTotal(data);
-        if (rows.length < limit || (total && skip + rows.length >= total)) break;
+      for (const row of listingPull.rows) {
+        if (!isRenderableGuestyReservation(row)) continue;
+        // Committed-only by default; "Include canceled" lets canceled/
+        // declined/inquiry/expired rows through (client badges them).
+        if (!includeCanceled && !isCommittedGuestyReservation(row)) continue;
+        const id = String(row?._id ?? row?.id ?? "").trim();
+        if (id) seenReservations.set(id, row);
       }
       const reservations = Array.from(seenReservations.values());
 
-      // For each reservation build per-slot attachment info
+      // For each reservation build per-slot attachment info — one batched
+      // buy-ins query for the whole listing (mirrors guesty-all).
+      const listingAttached = await storage.getBuyInsByReservationIds(
+        reservations
+          .map((r) => String(r?._id ?? r?.id ?? "").trim())
+          .filter(Boolean),
+      );
       const enriched = await Promise.all(
-        reservations.map((r) => enrichGuestyReservationForOperations(r, target)),
+        reservations.map((r) => enrichGuestyReservationForOperations(r, target, listingAttached)),
       );
 
       const manualRows = propertyId && unitSlots.length > 0
