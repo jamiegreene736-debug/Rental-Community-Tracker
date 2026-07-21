@@ -13968,6 +13968,17 @@ Requirements:
       const buyInId = Number(req.params.id);
       const buyIn = await storage.getBuyIn(buyInId);
       if (!buyIn) return res.status(404).json({ error: "Buy-in not found" });
+      // Agent share gate (2026-07-21 "as if I am clicking into it"): the agent
+      // portal renders the SMS/Text History section, but only for buy-ins on
+      // a reservation the operator shared via "Show in agent portal".
+      const isAgentSmsSession = (res.locals.portalSession as { role?: string } | undefined)?.role === "agent";
+      if (isAgentSmsSession) {
+        const rid = String(buyIn.guestyReservationId ?? "").trim();
+        const [share] = rid
+          ? await db.select().from(reservationAgentShares).where(eq(reservationAgentShares.reservationId, rid)).limit(1)
+          : [];
+        if (!share) return res.status(403).json({ error: "This reservation is not shared with the agent portal" });
+      }
       const { extractPhoneForSms, pmSmsPhoneKey } = await import("@shared/pm-sms");
       const phone = normalizePhone(String(req.query.phone ?? "").trim() || extractPhoneForSms(buyIn.managementContact));
       const key = pmSmsPhoneKey(phone);

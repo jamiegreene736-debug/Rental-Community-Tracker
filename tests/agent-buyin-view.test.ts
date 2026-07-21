@@ -78,7 +78,16 @@ assert.deepEqual(
     "bookingStatus",
     "checkIn",
     "checkOut",
+    "communityVerdict",
+    "communityVerdictAt",
+    "communityVerdictSource",
     "costPaid",
+    "groundFloorEvidence",
+    "groundFloorStatus",
+    "guestHappyAt",
+    "guestHappyFeedback",
+    "guestHappySource",
+    "guestHappyVerdict",
     "guestyReservationId",
     "id",
     "listingUrl",
@@ -97,6 +106,10 @@ assert.deepEqual(
     "wifiPassword",
   ],
 );
+// Expanded-row badge fields ride through for the shared badge helpers
+// (2026-07-21 "as if I am clicking into it").
+assert.equal((safe as any).communityVerdict, (fullBuyIn as any).communityVerdict ?? null);
+assert.equal((safe as any).guestHappyVerdict, (fullBuyIn as any).guestHappyVerdict ?? null);
 for (const blocked of AGENT_BLOCKED_BUYIN_FIELDS) {
   assert.equal(blocked in (safe as unknown as Record<string, unknown>), false, `blocked field leaked: ${blocked}`);
 }
@@ -252,6 +265,9 @@ assert.ok(safeFieldsMatch, "shared-bookings safeFields missing");
 assert.equal(/\bmoney\b/.test(safeFieldsMatch![1]), true, "shared-bookings Guesty fields must include money (2026-07-21 directive)");
 assert.ok(routes.includes("agentBookingFinancials(reservationMoney, units)"), "shared-bookings must emit the financial roll-up");
 assert.ok(routes.includes("agentOpsRowView(reservationRaw, units, Date.now())"), "shared-bookings must emit the ops-row view");
+// pm-sms GET is agent-reachable but SHARE-GATED in the handler (the send
+// route stays operator-only).
+assert.ok(/pm-sms[\s\S]{0,1200}isAgentSmsSession[\s\S]{0,600}not shared with the agent portal/.test(routes), "pm-sms agent share gate missing");
 assert.ok(/safeFields = encodeURIComponent\([\s\S]{0,400}payments cancellationPolicy/.test(routes), "shared-bookings fields must include payments + cancellation policy");
 assert.ok(routes.includes('app.get("/api/agent/shared-bookings"'), "shared-bookings route missing");
 assert.ok(routes.includes('app.post("/api/agent-shares"'), "agent-shares toggle route missing");
@@ -263,6 +279,7 @@ assert.ok(schemaMaintenance.includes("CREATE TABLE IF NOT EXISTS reservation_age
 const auth = read("../server/auth.ts");
 assert.ok(auth.includes('path === "/api/agent/shared-bookings"'), "auth allowlist missing shared-bookings");
 assert.ok(auth.includes("\\/vendor-email$"), "auth allowlist missing vendor-email");
+assert.ok(auth.includes("\\/pm-sms$"), "auth allowlist missing agent pm-sms read");
 
 const homePage = read("../client/src/pages/home.tsx");
 assert.ok(homePage.includes("<AgentSharedBookings />"), "agent portal must render AgentSharedBookings");
@@ -275,10 +292,18 @@ const agentPanel = read("../client/src/components/agent-shared-bookings.tsx");
 assert.ok(agentPanel.includes("/vendor-email"), "agent panel must reply via vendor-email");
 assert.ok(agentPanel.includes("buy-in-communications"), "agent panel must read the comms endpoint");
 assert.ok(agentPanel.includes("BookingFinancialsStrip"), "agent panel must keep the financials fallback strip");
-assert.ok(agentPanel.includes("agent-unit-financials-"), "agent panel must render per-unit cost/paid lines");
+assert.ok(agentPanel.includes("agent-unit-paid-rate-"), "agent panel must render the per-unit cost/paid header line");
 assert.ok(agentPanel.includes('data-testid="agent-ops-summary"'), "agent panel must render the ops-style summary row");
 assert.ok(agentPanel.includes("Payment next due"), "agent panel must render the ops column labels");
 assert.ok(agentPanel.includes('data-testid="agent-cancellation-policy"'), "agent panel must render the cancellation-policy card");
+// Expanded-row parity (2026-07-21 follow-up): unit badges via the SAME shared
+// helpers the operator's slot cards use, arrival-details block, collapsed
+// Email history + SMS/Text History sections, alias chip.
+assert.ok(agentPanel.includes("unitCommunityVerdictBadge") && agentPanel.includes("unitGuestHappyBadge") && agentPanel.includes("unitHostFrictionBadge"), "agent unit badges must use the shared badge helpers");
+assert.ok(agentPanel.includes("agent-unit-arrival-"), "agent panel must render the arrival-details block");
+assert.ok(agentPanel.includes("SMS/Text History") && agentPanel.includes("/pm-sms"), "agent panel must render the SMS history section");
+assert.ok(agentPanel.includes("Email history —"), "agent panel must render the collapsed email-history section");
+assert.ok(agentPanel.includes("agent-unit-alias-"), "agent panel must render the unit alias chip");
 console.log("  ✓ source guards: share gate, projection, field-limited Guesty read, and UI wiring intact");
 
 console.log("agent buy-in view suite passed");
