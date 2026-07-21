@@ -42,6 +42,18 @@ export type AgentSafeBuyIn = {
   notes: string | null;
   bookingConfirmation: string | null;
   airbnbConfirmation: string | null;
+  // Expanded-row badges (2026-07-21 follow-up: "show the reservation as if I
+  // am clicking into it") — feed the SAME shared badge helpers the operator's
+  // slot cards use (community-verdict-badge / guest-happy-badge / host-friction).
+  groundFloorStatus: string | null;
+  groundFloorEvidence: string | null;
+  communityVerdict: string | null;
+  communityVerdictSource: string | null;
+  communityVerdictAt: string | null;
+  guestHappyVerdict: string | null;
+  guestHappyFeedback: string | null;
+  guestHappySource: string | null;
+  guestHappyAt: string | null;
 };
 
 // Internal plumbing the projection still withholds — diagnostics and raw
@@ -86,7 +98,27 @@ export function agentSafeBuyIn(buyIn: BuyIn): AgentSafeBuyIn {
     notes: buyIn.notes ?? null,
     bookingConfirmation: extras.bookingConfirmation ?? null,
     airbnbConfirmation: extras.airbnbConfirmation ?? null,
+    groundFloorStatus: loose(buyIn, "groundFloorStatus"),
+    groundFloorEvidence: loose(buyIn, "groundFloorEvidence"),
+    communityVerdict: loose(buyIn, "communityVerdict"),
+    communityVerdictSource: loose(buyIn, "communityVerdictSource"),
+    communityVerdictAt: looseIso(buyIn, "communityVerdictAt"),
+    guestHappyVerdict: loose(buyIn, "guestHappyVerdict"),
+    guestHappyFeedback: loose(buyIn, "guestHappyFeedback"),
+    guestHappySource: loose(buyIn, "guestHappySource"),
+    guestHappyAt: looseIso(buyIn, "guestHappyAt"),
   };
+}
+
+function loose(row: unknown, key: string): string | null {
+  const value = (row as Record<string, unknown>)[key];
+  return typeof value === "string" && value ? value : null;
+}
+
+function looseIso(row: unknown, key: string): string | null {
+  const value = (row as Record<string, unknown>)[key];
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  return typeof value === "string" && value ? value : null;
 }
 
 /**
