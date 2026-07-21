@@ -136,6 +136,88 @@ const { agentBookingFinancials } = await import("../shared/agent-buyin-view");
 }
 console.log("  ✓ agentBookingFinancials: payout − unit costs, cancelled excluded, unknowns stay null");
 
+// ── ops-row view ("show just as if I am on the operations page", 2026-07-21) ──
+const { agentOpsRowView, agentNetRevenue, agentPaidToDate, agentCancellationPolicy } = await import("../shared/agent-ops-view");
+{
+  const reservation = {
+    source: "homeaway2",
+    integration: { platform: "homeaway" },
+    nightsCount: 5,
+    guestsCount: 12,
+    numberOfGuests: { numberOfAdults: 10, numberOfChildren: 2 },
+    money: {
+      hostPayout: 3480,
+      totalPaid: 3480,
+      balanceDue: 0,
+      isFullyPaid: true,
+      currency: "USD",
+      payments: [{ status: "SUCCEEDED", amount: 3480, paidAt: "2026-07-01T00:00:00Z" }],
+    },
+  };
+  const units = [
+    { costPaid: "1405.00", status: "active" },
+    { costPaid: "1837.00", status: "active" },
+  ];
+  const ops = agentOpsRowView(reservation, units as any, Date.parse("2026-07-21T00:00:00Z"));
+  assert.equal(ops.channelKind, "vrbo");
+  assert.equal(ops.channelLabel, "homeaway2");
+  assert.equal(ops.nights, 5);
+  assert.ok(String(ops.partyLabel).includes("12 guests"), `party label: ${ops.partyLabel}`);
+  assert.equal(ops.payout, 3480);
+  assert.equal(ops.paidToDate, 3480);
+  assert.equal(ops.paidInFull, true);
+  assert.equal(ops.buyInCost, 3242);
+  assert.equal(ops.profit, 238);
+  assert.ok(ops.cancellationPolicy, "VRBO channel must yield the assumed policy card");
+  assert.equal(ops.cancellationPolicy!.assumed, true);
+  assert.ok(/VRBO cancellation policy configured in Guesty/.test(ops.cancellationPolicy!.label));
+  // Scheduled balance → next-due date surfaces
+  const scheduled = {
+    ...reservation,
+    money: {
+      ...reservation.money,
+      isFullyPaid: false,
+      balanceDue: 1740,
+      totalPaid: 1740,
+      payments: [
+        { status: "SUCCEEDED", amount: 1740, paidAt: "2026-07-01T00:00:00Z" },
+        { status: "PENDING", amount: 1740, shouldBePaidAt: "2026-09-01T00:00:00Z" },
+      ],
+    },
+  };
+  const ops2 = agentOpsRowView(scheduled, units as any, Date.parse("2026-07-21T00:00:00Z"));
+  assert.equal(ops2.paidInFull, false);
+  assert.ok(String(ops2.nextPaymentDueIso).startsWith("2026-09-01"), `next due: ${ops2.nextPaymentDueIso}`);
+  // No money (manual) → unknowns stay null, unit costs still roll up
+  const manual = agentOpsRowView(null, units as any, Date.now());
+  assert.equal(manual.payout, null);
+  assert.equal(manual.profit, null);
+  assert.equal(manual.buyInCost, 3242);
+}
+console.log("  ✓ agentOpsRowView mirrors the ops table: payout/paid/next-due/profit/policy");
+
+// DRIFT LOCK: the shared mirrors and the operator page must keep the same
+// money + channel rules. If bookings.tsx changes these, update
+// shared/agent-ops-view.ts in the same PR (and vice versa).
+{
+  const bookingsSrc = readFileSync(fileURLToPath(new URL("../client/src/pages/bookings.tsx", import.meta.url)), "utf8");
+  const opsViewSrc = readFileSync(fileURLToPath(new URL("../shared/agent-ops-view.ts", import.meta.url)), "utf8");
+  for (const rule of [
+    'raw.includes("vrbo") || raw.includes("homeaway")', // channel kind
+    "asMoneyNumber(r?.money?.hostPayout) || asMoneyNumber(r?.money?.netIncome)".replace("r?.money", "r.money"), // net revenue chain (bookings shape)
+  ]) {
+    void rule;
+  }
+  assert.ok(bookingsSrc.includes('raw.includes("vrbo") || raw.includes("homeaway")'), "bookings channel rule moved — re-sync agent-ops-view");
+  assert.ok(opsViewSrc.includes('raw.includes("vrbo") || raw.includes("homeaway")'), "agent-ops-view channel rule drifted");
+  assert.ok(bookingsSrc.includes("asMoneyNumber(r.money?.hostPayout) || asMoneyNumber(r.money?.netIncome)"), "bookings net-revenue chain moved — re-sync agent-ops-view");
+  assert.ok(opsViewSrc.includes("asMoneyNumber(r?.money?.hostPayout) || asMoneyNumber(r?.money?.netIncome)"), "agent-ops-view net-revenue chain drifted");
+  assert.ok(bookingsSrc.includes("Assumed from the policy Guesty pushed to VRBO"), "bookings VRBO assumed-policy copy moved — re-sync agent-ops-view");
+  assert.ok(opsViewSrc.includes("Assumed from the policy Guesty pushed to VRBO"), "agent-ops-view VRBO assumed-policy copy drifted");
+}
+console.log("  ✓ drift locks: agent ops view stays in sync with the operator page rules");
+void agentNetRevenue; void agentPaidToDate; void agentCancellationPolicy;
+
 // ── 2. Auth allowlist rows ──────────────────────────────────────────────────
 process.env.AGENT_LOGINS ||= "testagent:test-pass-123";
 const { isAgentAllowedPath } = await import("../server/auth");
@@ -169,6 +251,8 @@ const safeFieldsMatch = routes.match(/const safeFields = encodeURIComponent\(\s*
 assert.ok(safeFieldsMatch, "shared-bookings safeFields missing");
 assert.equal(/\bmoney\b/.test(safeFieldsMatch![1]), true, "shared-bookings Guesty fields must include money (2026-07-21 directive)");
 assert.ok(routes.includes("agentBookingFinancials(reservationMoney, units)"), "shared-bookings must emit the financial roll-up");
+assert.ok(routes.includes("agentOpsRowView(reservationRaw, units, Date.now())"), "shared-bookings must emit the ops-row view");
+assert.ok(/safeFields = encodeURIComponent\([\s\S]{0,400}payments cancellationPolicy/.test(routes), "shared-bookings fields must include payments + cancellation policy");
 assert.ok(routes.includes('app.get("/api/agent/shared-bookings"'), "shared-bookings route missing");
 assert.ok(routes.includes('app.post("/api/agent-shares"'), "agent-shares toggle route missing");
 assert.ok(routes.includes(".map(agentSafeBuyIn)"), "routes must project via agentSafeBuyIn");
@@ -190,8 +274,11 @@ assert.ok(bookingsPage.includes('"/api/agent-shares"'), "share toggle must call 
 const agentPanel = read("../client/src/components/agent-shared-bookings.tsx");
 assert.ok(agentPanel.includes("/vendor-email"), "agent panel must reply via vendor-email");
 assert.ok(agentPanel.includes("buy-in-communications"), "agent panel must read the comms endpoint");
-assert.ok(agentPanel.includes("BookingFinancialsStrip"), "agent panel must render the booking financials strip");
+assert.ok(agentPanel.includes("BookingFinancialsStrip"), "agent panel must keep the financials fallback strip");
 assert.ok(agentPanel.includes("agent-unit-financials-"), "agent panel must render per-unit cost/paid lines");
+assert.ok(agentPanel.includes('data-testid="agent-ops-summary"'), "agent panel must render the ops-style summary row");
+assert.ok(agentPanel.includes("Payment next due"), "agent panel must render the ops column labels");
+assert.ok(agentPanel.includes('data-testid="agent-cancellation-policy"'), "agent panel must render the cancellation-policy card");
 console.log("  ✓ source guards: share gate, projection, field-limited Guesty read, and UI wiring intact");
 
 console.log("agent buy-in view suite passed");

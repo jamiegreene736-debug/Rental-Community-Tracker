@@ -145,6 +145,7 @@ import {
 import { isHostPost, isSystemPost } from "@shared/guesty-post-classify";
 import { AGENT_REPLY_SIGNOFF_NAME } from "@shared/agent-identity";
 import { agentBookingFinancials, agentSafeBuyIn } from "@shared/agent-buyin-view";
+import { agentOpsRowView } from "@shared/agent-ops-view";
 import { guestThreadAliasesForBuyIn } from "@shared/unified-buyin-alias";
 import path from "path";
 import fs from "fs";
@@ -13878,10 +13879,11 @@ Requirements:
       const manualRows = shares.some((s) => s.reservationId.startsWith("manual:"))
         ? await storage.getManualReservations({ includePast: true })
         : [];
-      // `money` included since 2026-07-21 (operator: the agent sees shared
-      // bookings "as I see it, including the financials").
+      // `money`/payments/party/policy included since 2026-07-21 (operator: the
+      // agent sees shared bookings "as I see it" — the ops-row view needs the
+      // same reservation facts the operator's reservations table reads).
       const safeFields = encodeURIComponent(
-        "_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest listing listingId confirmationCode integration source money",
+        "_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest guestsCount numberOfGuests listing listingId confirmationCode integration source money payments cancellationPolicy cancellationPolicies cancellationPolicyText cancellationPolicyDescription cancellationPolicyName cancelationPolicy",
       );
       const bookings = await Promise.all(
         shares.map(async (share) => {
@@ -13898,6 +13900,7 @@ Requirements:
           let listingName = units[0]?.propertyName ?? "";
           let confirmationCode = "";
           let reservationMoney: unknown = null;
+          let reservationRaw: Record<string, unknown> | null = null;
           if (reservationId.startsWith("manual:")) {
             const row = manualRows.find((m) => `manual:${m.id}` === reservationId);
             if (row) {
@@ -13912,6 +13915,7 @@ Requirements:
             try {
               const reservation = (await guestyRequest("GET", `/reservations/${reservationId}?fields=${safeFields}`)) as any;
               reservationMoney = reservation?.money ?? null;
+              reservationRaw = reservation ?? null;
               const guest = reservation?.guest ?? {};
               guestName = firstNonEmptyString(guest?.fullName, guest?.name, guest?.firstName, "Guest");
               checkIn = reservation?.checkInDateLocalized ?? reservation?.checkIn ?? checkIn;
@@ -13938,6 +13942,11 @@ Requirements:
             // derived. Manual reservations have no Guesty money — the unit
             // costs still roll up; unknown sides stay null, never $0.
             financials: agentBookingFinancials(reservationMoney, units),
+            // Ops-row view (2026-07-21 follow-up: "show just as if I am on the
+            // operations page") — same payout/paid-to-date/next-due/profit and
+            // cancellation-policy summary the operator's reservations table
+            // renders, computed by the shared mirror helpers.
+            ops: agentOpsRowView(reservationRaw, units, Date.now()),
           };
         }),
       );

@@ -19,6 +19,8 @@ import { useToast } from "@/hooks/use-toast";
 import { ChevronDown, ChevronRight, Loader2, Mail, Send } from "lucide-react";
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
 import type { AgentBookingFinancials, AgentSafeBuyIn } from "@shared/agent-buyin-view";
+import type { AgentOpsRowView } from "@shared/agent-ops-view";
+import { MessageSquare, ShieldCheck } from "lucide-react";
 
 type AgentSharedBooking = {
   reservationId: string;
@@ -31,6 +33,7 @@ type AgentSharedBooking = {
   confirmationCode: string;
   units: AgentSafeBuyIn[];
   financials?: AgentBookingFinancials | null;
+  ops?: AgentOpsRowView | null;
 };
 
 type AgentBuyInEmail = {
@@ -98,6 +101,99 @@ function BookingFinancialsStrip({ financials }: { financials?: AgentBookingFinan
           {bit.label}: <span className={`font-medium ${bit.tone ?? "text-foreground"}`}>{bit.value}</span>
         </span>
       ))}
+    </div>
+  );
+}
+
+function formatDueDate(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+}
+
+// The ops-table columns, exactly as the operator's reservations table labels
+// them (Payout / Paid to date / Payment next due / Buy-in cost / Profit).
+function OpsStyleSummary({ booking }: { booking: AgentSharedBooking }) {
+  const ops = booking.ops;
+  if (!ops) return <BookingFinancialsStrip financials={booking.financials} />;
+  const payout = formatMoney(ops.payout);
+  const paidToDate = formatMoney(ops.paidToDate);
+  const buyIn = formatMoney(ops.buyInCost);
+  const profit = formatMoney(ops.profit);
+  const nextDue = formatDueDate(ops.nextPaymentDueIso);
+  const cell = "min-w-[110px]";
+  const label = "text-[10px] uppercase tracking-wider text-muted-foreground";
+  return (
+    <div className="mt-2 flex flex-wrap items-start gap-x-6 gap-y-2" data-testid="agent-ops-summary">
+      <div className={cell}>
+        <div className={label}>Payout</div>
+        <div className="text-sm font-semibold">{payout ?? "—"}</div>
+        {ops.paidInFull && (
+          <div className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400">✓ Paid in full</div>
+        )}
+      </div>
+      <div className={cell}>
+        <div className={label}>Paid to date</div>
+        <div className="text-sm font-semibold">{paidToDate ?? "—"}</div>
+        <div className="text-[10px] text-muted-foreground">paid to date</div>
+      </div>
+      <div className={cell}>
+        <div className={label}>Payment next due</div>
+        <div className="text-sm font-semibold">{nextDue ?? (ops.paidInFull ? "Paid in full" : "—")}</div>
+      </div>
+      <div className={cell}>
+        <div className={label}>Buy-in</div>
+        <div className="text-sm font-semibold">{buyIn ?? "—"}</div>
+        <div className="text-[10px] text-muted-foreground">buy-in cost</div>
+      </div>
+      <div className={cell}>
+        <div className={label}>Profit</div>
+        <div
+          className={`text-sm font-semibold ${(ops.profit ?? 0) >= 0 ? "text-emerald-700 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}
+          data-testid="agent-ops-profit"
+        >
+          {profit ?? "—"}
+        </div>
+        <div className="text-[10px] text-muted-foreground">profit</div>
+      </div>
+      <Badge className="mt-1 bg-emerald-600 text-white" data-testid="agent-ops-units-badge">
+        ✓ {booking.units.length} unit{booking.units.length === 1 ? "" : "s"} attached
+      </Badge>
+    </div>
+  );
+}
+
+// Same sky policy card the operator sees on the expanded ops row.
+function AgentCancellationPolicyCard({ ops }: { ops?: AgentOpsRowView | null }) {
+  const policy = ops?.cancellationPolicy;
+  if (!policy) return null;
+  return (
+    <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-950" data-testid="agent-cancellation-policy">
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 items-start gap-2">
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-sky-700" />
+          <div className="min-w-0">
+            <p className="font-semibold">Cancellation policy</p>
+            <p className="break-words">{policy.label}</p>
+            <p className="mt-1 break-words text-[11px] leading-relaxed text-sky-900">
+              <span className="font-semibold">Policy summary:</span> {policy.summary}
+            </p>
+            <dl className="mt-2 grid gap-1 text-[11px] leading-relaxed sm:grid-cols-[150px_1fr]">
+              <dt className="font-semibold text-sky-900">Free until penalty:</dt>
+              <dd className="break-words">{policy.freeCancellationUntil}</dd>
+              <dt className="font-semibold text-sky-900">Penalty:</dt>
+              <dd className="break-words">{policy.penalty}</dd>
+            </dl>
+          </div>
+        </div>
+        {policy.assumed && (
+          <Badge variant="outline" className="w-fit border-sky-300 bg-white/70 text-[10px] text-sky-900">
+            Assumed from Guesty
+          </Badge>
+        )}
+      </div>
+      {policy.source && <p className="mt-1 pl-6 text-[11px] text-sky-800">{policy.source}</p>}
     </div>
   );
 }
@@ -305,9 +401,21 @@ function AgentSharedBookingCard({ booking }: { booking: AgentSharedBooking }) {
         <div className="min-w-0">
           <div className="text-sm font-semibold">{booking.guestName || "Guest"}</div>
           <div className="mt-0.5 text-xs text-muted-foreground">
-            {formatStay(booking.checkIn)} - {formatStay(booking.checkOut)} · {booking.listingName || "Listing"}
+            {formatStay(booking.checkIn)} → {formatStay(booking.checkOut)}
+            {booking.ops?.nights ? ` · ${booking.ops.nights} night${booking.ops.nights === 1 ? "" : "s"}` : ""}
+            {booking.ops?.channelLabel ? ` · ` : ""}
+            {booking.ops?.channelLabel && (
+              <Badge variant="outline" className="align-middle text-[10px]">{booking.ops.channelLabel}</Badge>
+            )}
+            {" · "}{booking.listingName || "Listing"}
           </div>
-          <BookingFinancialsStrip financials={booking.financials} />
+          {booking.ops?.partyLabel && (
+            <div className="mt-0.5 text-xs text-muted-foreground" data-testid="agent-ops-party">
+              👥 {booking.ops.partyLabel}
+            </div>
+          )}
+          <div className="mt-0.5 text-[11px] text-muted-foreground">{booking.confirmationCode}</div>
+          <OpsStyleSummary booking={booking} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Badge variant="outline" className="text-[10px]">
@@ -318,6 +426,16 @@ function AgentSharedBookingCard({ booking }: { booking: AgentSharedBooking }) {
       </button>
       {open && (
         <div className="space-y-3 border-t p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <AgentCancellationPolicyCard ops={booking.ops} />
+          </div>
+          <a
+            href={`/inbox?reservationId=${encodeURIComponent(booking.reservationId)}`}
+            className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium hover:bg-muted"
+            data-testid={`link-agent-guest-inbox-${booking.reservationId}`}
+          >
+            <MessageSquare className="h-3.5 w-3.5" /> Guest Inbox
+          </a>
           {isLoading && (
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
