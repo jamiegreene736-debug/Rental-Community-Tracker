@@ -72,15 +72,20 @@ assert.deepEqual(
   Object.keys(safe).sort(),
   [
     "accessCode",
+    "airbnbConfirmation",
     "arrivalNotes",
+    "bookingConfirmation",
     "bookingStatus",
     "checkIn",
     "checkOut",
+    "costPaid",
     "guestyReservationId",
     "id",
     "listingUrl",
     "managementCompany",
     "managementContact",
+    "notes",
+    "paidRate",
     "parkingInfo",
     "propertyName",
     "status",
@@ -95,16 +100,41 @@ assert.deepEqual(
 for (const blocked of AGENT_BLOCKED_BUYIN_FIELDS) {
   assert.equal(blocked in (safe as unknown as Record<string, unknown>), false, `blocked field leaked: ${blocked}`);
 }
-// The serialized payload carries none of the money strings.
-const serialized = JSON.stringify(safe);
-for (const moneyMarker of ["1405", "1522", "1,405", "1,522", "1,690"]) {
-  assert.equal(serialized.includes(moneyMarker), false, `money value leaked: ${moneyMarker}`);
-}
+// 2026-07-21 REVERSAL (operator: "show the agent everything as I see it,
+// including the financials"): the financial fields are now DELIBERATELY
+// included for shared reservations. The whitelist posture survives for
+// future columns; internal provenance blobs stay blocked.
+assert.equal(safe.costPaid, "1405.00");
+assert.equal(safe.paidRate, "1522.50");
+assert.ok(String(safe.notes ?? "").length > 0, "notes must reach the agent now");
 assert.equal(safe.unitLabel, "Unit 106");
 assert.equal(safe.managementCompany, "Alii Resorts");
 assert.equal(safe.accessCode, "6509"); // arrival info IS the point of the view
 assert.equal(safe.listingUrl, "https://www.vrbo.com/1234567");
-console.log("  ✓ agentSafeBuyIn is an exact whitelist — costPaid/paidRate/notes never leak");
+console.log("  ✓ agentSafeBuyIn whitelist now carries the financials (2026-07-21 directive); provenance blobs still blocked");
+
+// ── financial roll-up ──
+const { agentBookingFinancials } = await import("../shared/agent-buyin-view");
+{
+  const fin = agentBookingFinancials(
+    { totalPrice: 6711, totalPaid: 3355.5, hostPayout: 5900, currency: "USD" },
+    [
+      { costPaid: "1405.00", status: "active" },
+      { costPaid: "1837.00", status: "active" },
+      { costPaid: "999.00", status: "cancelled" }, // cancelled never counts
+    ],
+  );
+  assert.equal(fin.guestTotal, 6711);
+  assert.equal(fin.guestPaid, 3355.5);
+  assert.equal(fin.hostPayout, 5900);
+  assert.equal(fin.unitCostTotal, 3242);
+  assert.equal(fin.profit, 5900 - 3242);
+  const empty = agentBookingFinancials(null, [{ costPaid: null, status: "active" }]);
+  assert.equal(empty.guestTotal, null);
+  assert.equal(empty.unitCostTotal, null, "no recorded costs must be unknown, never $0");
+  assert.equal(empty.profit, null);
+}
+console.log("  ✓ agentBookingFinancials: payout − unit costs, cancelled excluded, unknowns stay null");
 
 // ── 2. Auth allowlist rows ──────────────────────────────────────────────────
 process.env.AGENT_LOGINS ||= "testagent:test-pass-123";
@@ -131,10 +161,14 @@ assert.ok(routes.includes("isAgentSession ? responseBuyIns.map(agentSafeBuyIn) :
 // vendor-email send: agents may only send for a shared reservation AND a
 // buy-in that belongs to it.
 assert.ok(routes.includes("reservationBuyIns.some((b) => b.id === buyInId)"), "vendor-email agent gate missing");
-// shared-bookings summary must stay a field-limited Guesty read — no `money`.
+// shared-bookings summary is still a field-limited Guesty read, and since
+// 2026-07-21 it MUST include `money` — the agent card's financial strip
+// reads it. (This reverses the 2026-07-20 no-money lock by operator
+// directive.)
 const safeFieldsMatch = routes.match(/const safeFields = encodeURIComponent\(\s*"([^"]+)"/);
 assert.ok(safeFieldsMatch, "shared-bookings safeFields missing");
-assert.equal(/\bmoney\b/.test(safeFieldsMatch![1]), false, "shared-bookings Guesty fields must not include money");
+assert.equal(/\bmoney\b/.test(safeFieldsMatch![1]), true, "shared-bookings Guesty fields must include money (2026-07-21 directive)");
+assert.ok(routes.includes("agentBookingFinancials(reservationMoney, units)"), "shared-bookings must emit the financial roll-up");
 assert.ok(routes.includes('app.get("/api/agent/shared-bookings"'), "shared-bookings route missing");
 assert.ok(routes.includes('app.post("/api/agent-shares"'), "agent-shares toggle route missing");
 assert.ok(routes.includes(".map(agentSafeBuyIn)"), "routes must project via agentSafeBuyIn");
@@ -156,6 +190,8 @@ assert.ok(bookingsPage.includes('"/api/agent-shares"'), "share toggle must call 
 const agentPanel = read("../client/src/components/agent-shared-bookings.tsx");
 assert.ok(agentPanel.includes("/vendor-email"), "agent panel must reply via vendor-email");
 assert.ok(agentPanel.includes("buy-in-communications"), "agent panel must read the comms endpoint");
+assert.ok(agentPanel.includes("BookingFinancialsStrip"), "agent panel must render the booking financials strip");
+assert.ok(agentPanel.includes("agent-unit-financials-"), "agent panel must render per-unit cost/paid lines");
 console.log("  ✓ source guards: share gate, projection, field-limited Guesty read, and UI wiring intact");
 
 console.log("agent buy-in view suite passed");

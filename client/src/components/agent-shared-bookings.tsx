@@ -1,12 +1,11 @@
-// Agent-portal "Shared bookings" section (operator spec 2026-07-20): the
-// LIMITED buy-in view. The operator shares reservations one by one from the
-// bookings page ("Show in agent portal"); the agent sees, per shared
-// reservation, the attached units' non-financial info + the back-and-forth
-// email thread with the property-management company, and can reply from the
-// unit's alias. Financial data (guest payments, costPaid, paid rates) never
-// reaches these endpoints — the server projects buy-ins through the
-// agentSafeBuyIn whitelist (shared/agent-buyin-view.ts) and the reservation
-// summary comes from a field-limited Guesty read with no `money`.
+// Agent-portal "Shared bookings" section. The operator shares reservations
+// one by one from the bookings page ("Show in agent portal"); the agent sees,
+// per shared reservation, the attached units + the back-and-forth email
+// thread with the property-management company, and can reply from the unit's
+// alias. Since 2026-07-21 (operator: "show the agent everything as I see it,
+// including the financials") the card also carries the money picture: guest
+// total/paid, our payout, per-unit cost + extracted paid rate, notes, and the
+// derived margin. The SHARE GATE is unchanged — unshared reservations 403.
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
@@ -19,7 +18,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { ChevronDown, ChevronRight, Loader2, Mail, Send } from "lucide-react";
 import { formatEmailBodyForDisplay, formatEmailTimestampForDisplay } from "@shared/email-body-format";
-import type { AgentSafeBuyIn } from "@shared/agent-buyin-view";
+import type { AgentBookingFinancials, AgentSafeBuyIn } from "@shared/agent-buyin-view";
 
 type AgentSharedBooking = {
   reservationId: string;
@@ -31,6 +30,7 @@ type AgentSharedBooking = {
   listingName: string;
   confirmationCode: string;
   units: AgentSafeBuyIn[];
+  financials?: AgentBookingFinancials | null;
 };
 
 type AgentBuyInEmail = {
@@ -61,6 +61,45 @@ type AgentCommunicationsResponse = {
 function firstEmailIn(text: string): string {
   const match = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.exec(text);
   return match ? match[0] : "";
+}
+
+function formatMoney(value: number | null | undefined, currency?: string | null): string | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  const prefix = !currency || currency === "USD" ? "$" : `${currency} `;
+  return `${prefix}${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
+function BookingFinancialsStrip({ financials }: { financials?: AgentBookingFinancials | null }) {
+  if (!financials) return null;
+  const bits: Array<{ label: string; value: string; tone?: string }> = [];
+  const guestTotal = formatMoney(financials.guestTotal, financials.currency);
+  const guestPaid = formatMoney(financials.guestPaid, financials.currency);
+  const payout = formatMoney(financials.hostPayout, financials.currency);
+  const costs = formatMoney(financials.unitCostTotal, financials.currency);
+  const profit = formatMoney(financials.profit, financials.currency);
+  if (guestTotal) bits.push({ label: "Guest total", value: guestTotal });
+  if (guestPaid) bits.push({ label: "Guest paid", value: guestPaid });
+  if (payout) bits.push({ label: "Payout", value: payout });
+  if (costs) bits.push({ label: "Unit costs", value: costs });
+  if (profit) {
+    bits.push({
+      label: "Margin",
+      value: profit,
+      tone: (financials.profit ?? 0) >= 0
+        ? "text-emerald-700 dark:text-emerald-400"
+        : "text-red-600 dark:text-red-400",
+    });
+  }
+  if (bits.length === 0) return null;
+  return (
+    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px]" data-testid="agent-booking-financials">
+      {bits.map((bit) => (
+        <span key={bit.label} className="text-muted-foreground">
+          {bit.label}: <span className={`font-medium ${bit.tone ?? "text-foreground"}`}>{bit.value}</span>
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function formatStay(value: string | null): string {
@@ -137,6 +176,26 @@ function AgentUnitCommunications({
           </div>
           {unit.managementContact && (
             <div className="mt-0.5 break-words text-[11px] text-muted-foreground">Contact: {unit.managementContact}</div>
+          )}
+          {(unit.costPaid != null || unit.paidRate != null) && (
+            <div className="mt-0.5 text-[11px]" data-testid={`agent-unit-financials-${unit.id}`}>
+              {unit.costPaid != null && (
+                <span className="font-medium">Cost paid {formatMoney(Number(unit.costPaid)) ?? unit.costPaid}</span>
+              )}
+              {unit.paidRate != null && (
+                <span className="text-muted-foreground">
+                  {unit.costPaid != null ? " · " : ""}charged {formatMoney(Number(unit.paidRate)) ?? unit.paidRate} per the PM receipt
+                </span>
+              )}
+              {unit.bookingConfirmation && (
+                <span className="text-muted-foreground"> · conf {unit.bookingConfirmation}</span>
+              )}
+            </div>
+          )}
+          {unit.notes && (
+            <div className="mt-0.5 max-w-2xl break-words text-[11px] text-muted-foreground" title={unit.notes}>
+              Notes: {unit.notes.length > 220 ? `${unit.notes.slice(0, 220)}…` : unit.notes}
+            </div>
           )}
         </div>
         <Button size="sm" variant="outline" onClick={() => setShowReply((v) => !v)} data-testid={`button-agent-reply-${unit.id}`}>
@@ -248,6 +307,7 @@ function AgentSharedBookingCard({ booking }: { booking: AgentSharedBooking }) {
           <div className="mt-0.5 text-xs text-muted-foreground">
             {formatStay(booking.checkIn)} - {formatStay(booking.checkOut)} · {booking.listingName || "Listing"}
           </div>
+          <BookingFinancialsStrip financials={booking.financials} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Badge variant="outline" className="text-[10px]">

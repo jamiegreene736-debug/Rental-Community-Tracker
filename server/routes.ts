@@ -144,7 +144,7 @@ import {
 } from "@shared/arrival-details-warning";
 import { isHostPost, isSystemPost } from "@shared/guesty-post-classify";
 import { AGENT_REPLY_SIGNOFF_NAME } from "@shared/agent-identity";
-import { agentSafeBuyIn } from "@shared/agent-buyin-view";
+import { agentBookingFinancials, agentSafeBuyIn } from "@shared/agent-buyin-view";
 import { guestThreadAliasesForBuyIn } from "@shared/unified-buyin-alias";
 import path from "path";
 import fs from "fs";
@@ -13725,11 +13725,13 @@ Requirements:
   app.get("/api/bookings/:reservationId/buy-in-communications", async (req, res) => {
     try {
       const reservationId = req.params.reservationId;
-      // Agent-limited view (2026-07-20): agents may open the PM email thread
-      // ONLY for reservations the operator shared via "Show in agent portal",
-      // and the buy-in rows they receive are projected through the
-      // agentSafeBuyIn whitelist (no costPaid / paidRate / notes — see
-      // shared/agent-buyin-view.ts). Admin + loopback responses are unchanged.
+      // Agent share gate (2026-07-20): agents may open the PM email thread
+      // ONLY for reservations the operator shared via "Show in agent portal".
+      // Buy-in rows are projected through the agentSafeBuyIn whitelist —
+      // which, since 2026-07-21, deliberately INCLUDES the financials
+      // (operator: "show the agent everything as I see it"); the whitelist
+      // still exists so future columns can't leak by default. Admin +
+      // loopback responses are unchanged.
       const isAgentSession = (res.locals.portalSession as { role?: string } | undefined)?.role === "agent";
       if (isAgentSession) {
         const [share] = await db
@@ -13876,8 +13878,10 @@ Requirements:
       const manualRows = shares.some((s) => s.reservationId.startsWith("manual:"))
         ? await storage.getManualReservations({ includePast: true })
         : [];
+      // `money` included since 2026-07-21 (operator: the agent sees shared
+      // bookings "as I see it, including the financials").
       const safeFields = encodeURIComponent(
-        "_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest listing listingId confirmationCode integration source",
+        "_id status checkIn checkOut checkInDateLocalized checkOutDateLocalized nightsCount guest listing listingId confirmationCode integration source money",
       );
       const bookings = await Promise.all(
         shares.map(async (share) => {
@@ -13893,6 +13897,7 @@ Requirements:
           let status = "";
           let listingName = units[0]?.propertyName ?? "";
           let confirmationCode = "";
+          let reservationMoney: unknown = null;
           if (reservationId.startsWith("manual:")) {
             const row = manualRows.find((m) => `manual:${m.id}` === reservationId);
             if (row) {
@@ -13906,6 +13911,7 @@ Requirements:
           } else {
             try {
               const reservation = (await guestyRequest("GET", `/reservations/${reservationId}?fields=${safeFields}`)) as any;
+              reservationMoney = reservation?.money ?? null;
               const guest = reservation?.guest ?? {};
               guestName = firstNonEmptyString(guest?.fullName, guest?.name, guest?.firstName, "Guest");
               checkIn = reservation?.checkInDateLocalized ?? reservation?.checkIn ?? checkIn;
@@ -13927,6 +13933,11 @@ Requirements:
             listingName,
             confirmationCode,
             units,
+            // Money roll-up "as the operator sees it" (2026-07-21): guest
+            // side from Guesty money, unit costs from the buy-ins, margin
+            // derived. Manual reservations have no Guesty money — the unit
+            // costs still roll up; unknown sides stay null, never $0.
+            financials: agentBookingFinancials(reservationMoney, units),
           };
         }),
       );
