@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
+// In-tab SPA navigation for the warning-popup action buttons. These were
+// window.open(..., "_blank") — a NEW TAB has no in-app history, so the page
+// header's Back button could only fall back to the dashboard (operator
+// complaint 2026-07-21). Same-tab navigation keeps the history chain intact.
+import { navigate as navigateInApp } from "wouter/use-browser-location";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -7110,7 +7115,7 @@ function AdminDashboard() {
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => window.open(`/inbox?reservationId=${encodeURIComponent(w.reservationId)}`, "_blank")}
+                        onClick={() => navigateInApp(`/inbox?reservationId=${encodeURIComponent(w.reservationId)}`)}
                         data-testid={`button-message-guest-payment-${w.reservationId}`}
                       >
                         Message guest
@@ -7213,7 +7218,7 @@ function AdminDashboard() {
                         <Button
                           size="sm"
                           variant="destructive"
-                          onClick={() => window.open("/bookings", "_blank")}
+                          onClick={() => navigateInApp("/bookings")}
                           data-testid={`button-find-units-${w.reservationId}`}
                         >
                           Find &amp; attach units
@@ -7305,7 +7310,7 @@ function AdminDashboard() {
                     <div className="flex shrink-0 flex-col items-end gap-1">
                       <Button
                         size="sm"
-                        onClick={() => window.open("/bookings", "_blank")}
+                        onClick={() => navigateInApp("/bookings")}
                         data-testid={`button-send-arrival-details-${w.reservationId}`}
                       >
                         Send arrival details

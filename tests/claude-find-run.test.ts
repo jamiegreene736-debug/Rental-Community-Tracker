@@ -30,6 +30,7 @@ import {
   browserProofRequiredFromInit,
   claimNextClaudeFindRun,
   claudeFindRunnerActivity,
+  claudeFindRunOverview,
   claudeFindRunQueueAhead,
   classifyClaudeStreamLine,
   claudeFindRunStatusLabel,
@@ -1141,6 +1142,71 @@ console.log("claude-find-run: checkout-run source wiring");
       scanned.attention,
     );
   }
+}
+
+// ── Page-level status overview (2026-07-21: "show me like a status") ────────
+{
+  const view = (over: Record<string, unknown>) => ({
+    id: "r1", reservationId: "res1", propertyName: "P", guestName: null, kind: "find",
+    status: "queued", createdAt: "2026-07-21T00:00:00.000Z", endedAt: null,
+    cancelRequested: false, attentionReason: null, report: null, error: null,
+    events: [], droppedEvents: 0, ...over,
+  }) as any;
+  const now = Date.parse("2026-07-21T02:00:00.000Z");
+  const overview = claudeFindRunOverview(
+    [
+      view({ id: "a", status: "queued" }),
+      view({ id: "b", status: "running" }),
+      view({ id: "c", status: "attention" }),
+      view({ id: "d", status: "completed", endedAt: "2026-07-21T01:45:00.000Z" }),
+      view({ id: "e", status: "failed", endedAt: "2026-07-21T01:50:00.000Z" }),
+      view({ id: "f", status: "completed", endedAt: "2026-07-20T20:00:00.000Z" }), // outside the window
+      view({ id: "g", status: "cancelled", endedAt: "2026-07-21T01:59:00.000Z" }),
+    ],
+    now,
+  );
+  check(
+    "overview splits active (store order) from recent terminal (newest first)",
+    overview.active.map((r: any) => r.id).join(",") === "a,b,c"
+      && overview.recent.map((r: any) => r.id).join(",") === "g,e,d",
+  );
+  check(
+    "overview counts every bucket and drops stale terminal runs",
+    overview.counts.queued === 1 && overview.counts.working === 1 && overview.counts.attention === 1
+      && overview.counts.completed === 1 && overview.counts.failed === 1 && overview.counts.cancelled === 1,
+  );
+  check("an empty store yields an empty overview", claudeFindRunOverview([], now).active.length === 0
+    && claudeFindRunOverview([], now).recent.length === 0);
+
+  const record = {
+    id: "x", reservationId: "res", propertyId: 1, propertyName: "P", guestName: "Ann Guest",
+    status: "queued", createdAt: "2026-07-21T00:00:00.000Z", claimedAt: null, heartbeatAt: null,
+    endedAt: null, cancelRequested: false, attentionReason: null, report: null, error: null,
+    events: [], droppedEvents: 0, token: "t", prompt: "p", unitIds: [], checkIn: "", checkOut: "",
+  } as any;
+  check("client view carries guestName for the banner (token/prompt still stripped)", (() => {
+    const v = clientClaudeFindRunView(record) as any;
+    return v.guestName === "Ann Guest" && !("token" in v) && !("prompt" in v);
+  })());
+
+  const fs2 = await import("node:fs");
+  const serverSrc = fs2.readFileSync("server/claude-find-runs.ts", "utf8");
+  check(
+    "GET /api/claude-find-runs/overview exists and rolls up via the shared helper",
+    serverSrc.includes('app.get("/api/claude-find-runs/overview"')
+      && /claudeFindRunOverview\(views, Date\.now\(\)\)/.test(serverSrc),
+  );
+  const bannerSrc = fs2.readFileSync("client/src/components/claude-run-status-banner.tsx", "utf8");
+  check(
+    "the banner polls the overview endpoint and can cancel a live run",
+    bannerSrc.includes('"/api/claude-find-runs/overview"') && bannerSrc.includes("/cancel"),
+  );
+  const bookingsSrc = fs2.readFileSync("client/src/pages/bookings.tsx", "utf8");
+  check(
+    "the bookings page mounts the banner and wakes it when runs are enqueued",
+    bookingsSrc.includes("<ClaudeRunStatusBanner")
+      && (bookingsSrc.match(/invalidateQueries\(\{ queryKey: \["\/api\/claude-find-runs\/overview"\] \}\)/g) ?? []).length >= 3,
+  );
 }
 
 console.log(`\nclaude-find-run: ${pass} passed, ${fail} failed`);
