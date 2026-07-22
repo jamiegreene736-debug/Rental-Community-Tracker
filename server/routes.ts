@@ -8963,13 +8963,21 @@ export async function registerRoutes(
       try {
         const receiptRows = await storage.getRecentGuestReceipts(300);
         const nowMs = now.getTime();
+        // Operator dismissals (2026-07-22): individually-dismissed alert rows
+        // stay out of the red panel forever. Keyed by receipt token, so a NEW
+        // failed refund receipt (new row, new token) still raises.
+        const { parseReceiptAttentionDismissals, dismissedReceiptTokenSet, RECEIPT_ATTENTION_DISMISSALS_KEY } =
+          await import("@shared/receipt-attention-dismissals");
+        const dismissedTokens = dismissedReceiptTokenSet(
+          parseReceiptAttentionDismissals(await storage.getSetting(RECEIPT_ATTENTION_DISMISSALS_KEY).catch(() => null)),
+        );
         for (const row of receiptRows) {
           // Refund confirmations that didn't reach the guest's booking channel —
           // OR whose SMS-to-phone leg failed (text send error / no phone on
           // file) — surface for manual follow-up (only recent, in-window rows).
           const channelIssue = row.kind === "refund" && receiptNeedsAttention({ status: row.status, createdAtMs: row.createdAt ? new Date(row.createdAt as any).getTime() : null }, nowMs);
           const smsIssue = refundSmsNeedsAttention({ kind: row.kind, smsStatus: row.smsStatus ?? null });
-          if (channelIssue || smsIssue) {
+          if ((channelIssue || smsIssue) && !dismissedTokens.has(row.token)) {
             const createdDate = row.createdAt ? new Date(row.createdAt as any) : null;
             if (!createdDate || Number.isNaN(createdDate.getTime()) || createdDate >= start) {
               guestRefundReceiptIssues.push({
@@ -53273,6 +53281,34 @@ ${SLEEPING_CAPACITY_RULE}
   // "run now" forces a tick. The toggle is the operator's single OFF switch.
   app.get("/api/inbox/guest-receipts/status", (_req, res) => {
     res.json(getGuestReceiptStatus());
+  });
+
+  // Permanently dismiss ONE refund-attention alert row (2026-07-22 operator:
+  // "dismiss these messages individually and they won't show up again").
+  // Admin-only; persisted in app_settings so the dismissal holds on every
+  // device. Keyed by receipt token — a FUTURE failed refund receipt is a new
+  // row/token and still raises. Dismissing does NOT resend anything.
+  app.post("/api/inbox/guest-receipts/:token/dismiss-attention", async (req, res) => {
+    try {
+      const session = res.locals.portalSession as { role?: string } | undefined;
+      if (session && session.role !== "admin") return res.status(403).json({ error: "Admin only" });
+      const token = String(req.params.token ?? "").trim();
+      if (!token) return res.status(400).json({ error: "token required" });
+      const {
+        parseReceiptAttentionDismissals,
+        serializeReceiptAttentionDismissals,
+        addReceiptAttentionDismissal,
+        RECEIPT_ATTENTION_DISMISSALS_KEY,
+      } = await import("@shared/receipt-attention-dismissals");
+      const store = parseReceiptAttentionDismissals(
+        await storage.getSetting(RECEIPT_ATTENTION_DISMISSALS_KEY).catch(() => null),
+      );
+      const updated = addReceiptAttentionDismissal(store, token, new Date().toISOString());
+      await storage.setSetting(RECEIPT_ATTENTION_DISMISSALS_KEY, serializeReceiptAttentionDismissals(updated));
+      return res.json({ ok: true, dismissed: updated.dismissed.length });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Failed to dismiss alert", message: err.message });
+    }
   });
 
   app.post("/api/inbox/guest-receipts/toggle", (req, res) => {
