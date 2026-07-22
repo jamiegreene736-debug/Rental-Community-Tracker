@@ -51,6 +51,9 @@ import { buildCoworkBuyInPrompt, buildCoworkCheckoutPrompt, type CoworkBuyInProm
 // The daemon runner is plain node .mjs — import its twins directly.
 import {
   browserMcpFailure as runnerBrowserMcpFailure,
+  daemonRestartFailure as runnerDaemonRestartFailure,
+  maxTurnsFailure as runnerMaxTurnsFailure,
+  runCeilingFailure as runnerRunCeilingFailure,
   browserNeverUsedFailure as runnerBrowserNeverUsedFailure,
   browserProofRequiredFromInit as runnerBrowserProofRequired,
   checkoutRunDidNoWorkFailure as runnerCheckoutNoWorkFailure,
@@ -578,7 +581,7 @@ const FIXTURE_LINES = [
     // web-searched guesses; that must never be recorded as a completed find.
     "a browser failure outranks the success/result branches in the terminal classifier",
     (() => {
-      const term = runnerSrc.slice(runnerSrc.indexOf("if (!terminalPosted)"));
+      const term = runnerSrc.slice(runnerSrc.indexOf("if (!terminalPosted"));
       const guard = term.indexOf("} else if (browserFailure) {");
       const success = term.indexOf("sawResult && resultReport !== null");
       return guard > -1 && success > -1 && guard < success;
@@ -1365,7 +1368,7 @@ console.log("\n[refusal / no-work terminal guard]");
   check(
     "runner: a success-result checkout run with zero agent-endpoint calls is FAILED, and the branch outranks the browser gate",
     (() => {
-      const term = runnerSrc.slice(runnerSrc.indexOf("if (!terminalPosted)"));
+      const term = runnerSrc.slice(runnerSrc.indexOf("if (!terminalPosted"));
       const noWork = term.indexOf('runKind === "checkout" && !agentEndpointUsed');
       const browserGate = term.indexOf("} else if (!browserUsed) {");
       return noWork > 0 && browserGate > 0 && noWork < browserGate
@@ -1427,6 +1430,83 @@ console.log("\n[refusal / no-work terminal guard]");
   check(
     "only the headless variant grounds the run token's origin",
     headlessCheckout.includes("minted by my") && !coworkCheckout.includes("minted by my"),
+  );
+}
+
+// ── Interrupted-run honesty (2026-07-22): ceiling / turn-cap / daemon restart ─
+// The Jul-21 bulk queues failed runs three ways that all surfaced as opaque
+// errors: the runner's own 40-min ceiling kill reported as the CLI's bare
+// "error_during_execution", the CLI turn cap as "error_max_turns", and a
+// daemon restart (launchctl kickstart) leaving a mid-flight run to die into
+// the watchdog's generic "no heartbeat" 10 minutes later. These lock the
+// honest messages + the wiring that produces them.
+{
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const runnerSrc = fs.readFileSync(path.join(here, "../daemon/vrbo-sidecar/claude-find-runner.mjs"), "utf8");
+
+  const ceiling = runnerRunCeilingFailure(60);
+  check(
+    "ceiling failure names the minutes, keeps partial work, and points at the env knob",
+    ceiling.includes("60-minute") && /still on the reservation/i.test(ceiling)
+      && ceiling.includes("CLAUDE_FIND_RUN_MAX_MS") && /re-run/i.test(ceiling),
+  );
+  const turns = runnerMaxTurnsFailure(300);
+  check(
+    "turn-cap failure names the turn count and points at the env knob",
+    turns.includes("300") && turns.includes("CLAUDE_FIND_RUN_MAX_TURNS") && /re-run/i.test(turns),
+  );
+  const restart = runnerDaemonRestartFailure();
+  check(
+    "daemon-restart failure says the run is dead and partial work survives",
+    /restarted mid-run/i.test(restart) && /still on the reservation/i.test(restart) && /re-run/i.test(restart),
+  );
+
+  check(
+    "the kill timer flips ceilingHit BEFORE killing the CLI",
+    /ceilingHit = true;[\s\S]{0,400}?child\.kill\("SIGTERM"\)/.test(runnerSrc),
+  );
+  check(
+    // The SIGTERM'd CLI can emit a bare error_during_execution result (or no
+    // result); the ceiling branch must outrank both so the real cause is what
+    // the operator reads on the failed row.
+    "ceilingHit outranks the result branches in the terminal classifier",
+    (() => {
+      const term = runnerSrc.slice(runnerSrc.indexOf("if (!terminalPosted"));
+      const ceilingBranch = term.indexOf("} else if (ceilingHit) {");
+      const success = term.indexOf("sawResult && resultReport !== null");
+      return ceilingBranch > -1 && success > -1 && ceilingBranch < success
+        && /ceilingHit\) \{[\s\S]{0,600}?runCeilingFailure\(/.test(term);
+    })(),
+  );
+  check(
+    "error_max_turns maps to the honest turn-cap message",
+    /subtype === "error_max_turns"[\s\S]{0,300}?maxTurnsFailure\(MAX_TURNS\)/.test(runnerSrc),
+  );
+  check(
+    // Without this a kickstart mid-run leaves the run silent until the server
+    // watchdog buries the cause behind "no heartbeat for 10 minutes".
+    "SIGTERM with a run in flight kills the CLI and posts the daemon-restart terminal",
+    /const shutdown = async \(signal\)/.test(runnerSrc)
+      && /shutdown[\s\S]{0,900}?child\.kill\("SIGTERM"\)/.test(runnerSrc)
+      && /daemonRestartFailure\(\)[\s\S]{0,200}?terminal: \{ status: "failed", error: daemonRestartFailure\(\) \}/.test(runnerSrc)
+      && /process\.on\("SIGTERM", \(\) => void shutdown\("SIGTERM"\)\)/.test(runnerSrc),
+  );
+  check(
+    // The normal terminal classifier must stand down when the shutdown path
+    // owns the terminal — two competing terminals would race.
+    "the terminal classifier defers to the shutdown path",
+    runnerSrc.includes("if (!terminalPosted && !shuttingDown)"),
+  );
+  check(
+    // 60 min stays under the server watchdog's 90-min per-run ceiling — a
+    // runner ceiling ABOVE it would let the watchdog fail live runs first.
+    "runner defaults: 60-min ceiling (under the 90-min watchdog) and 300 turns",
+    runnerSrc.includes("CLAUDE_FIND_RUN_MAX_MS ?? 60 * 60_000")
+      && runnerSrc.includes("CLAUDE_FIND_RUN_MAX_TURNS ?? 300")
+      && 60 * 60_000 < CLAUDE_FIND_RUN_MAX_AGE_MS,
   );
 }
 

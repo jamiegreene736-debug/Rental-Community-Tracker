@@ -38,8 +38,13 @@ const SERVER = process.env.SIDECAR_SERVER ?? "https://rental-community-tracker-p
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
 const POLL_MS = Number(process.env.CLAUDE_FIND_RUN_POLL_MS ?? 15_000);
 const MODEL = process.env.CLAUDE_FIND_RUN_MODEL ?? "claude-sonnet-4-6";
-const MAX_MS = Number(process.env.CLAUDE_FIND_RUN_MAX_MS ?? 40 * 60_000);
-const MAX_TURNS = Number(process.env.CLAUDE_FIND_RUN_MAX_TURNS ?? 200);
+// 60 min / 300 turns (2026-07-22, was 40/200): both caps were the top failure
+// cause in the Jul-21 bulk queues — runs mid-legitimate-work (exhaustive
+// city/PM sweeps) were SIGTERM'd at 40:00 and surfaced as an opaque
+// "error_during_execution". The server's per-run watchdog ceiling is 90 min
+// (CLAUDE_FIND_RUN_MAX_AGE_MS) — keep MAX_MS comfortably under it.
+const MAX_MS = Number(process.env.CLAUDE_FIND_RUN_MAX_MS ?? 60 * 60_000);
+const MAX_TURNS = Number(process.env.CLAUDE_FIND_RUN_MAX_TURNS ?? 300);
 const CDP_PORT = Number(process.env.CLAUDE_FIND_RUN_CDP_PORT ?? 9250);
 const SOUNDS = process.env.CLAUDE_FIND_RUN_SOUNDS !== "0" && process.platform === "darwin";
 const CLAUDE_BIN = process.env.CLAUDE_FIND_RUN_CLAUDE_BIN
@@ -306,6 +311,43 @@ export function checkoutRunDidNoWorkFailure(report) {
     + "a single portal endpoint (not even the step-1 buy-in read), so no checkout "
     + "was prepared and nothing was claimed. Whatever the report says, it is not "
     + "a completed checkout. Recorded as failed; review the report and re-run it."
+  );
+}
+
+/** Honest terminal error for a run the runner itself killed at the time
+ *  ceiling. The CLI reports SIGTERM as a bare "error_during_execution" (the
+ *  Jul-21 queue's opaque failures) — this names the real cause and tells the
+ *  operator the partial work survived. */
+export function runCeilingFailure(minutes) {
+  return (
+    `The run hit the ${minutes}-minute time ceiling while still working and was stopped by the runner. `
+    + "Anything it attached before the cutoff is still on the reservation — re-run it to finish the "
+    + "remaining slots, or raise CLAUDE_FIND_RUN_MAX_MS in the sidecar env if this property genuinely "
+    + "needs longer searches."
+  );
+}
+
+/** Honest terminal error for the CLI's own turn cap (result subtype
+ *  "error_max_turns") — same class as the time ceiling: interrupted mid-work,
+ *  not a real search failure. */
+export function maxTurnsFailure(turns) {
+  return (
+    `The run used all ${turns} agent turns before finishing and was stopped mid-work. `
+    + "Anything it attached before the cutoff is still on the reservation — re-run it to finish the "
+    + "remaining slots, or raise CLAUDE_FIND_RUN_MAX_TURNS in the sidecar env."
+  );
+}
+
+/** Terminal error posted when the daemon itself is being restarted (launchctl
+ *  kickstart / SIGTERM) with a run in flight. Without this the run just goes
+ *  silent and the server watchdog buries the cause 10 minutes later as
+ *  "no heartbeat — check the Mac's sidecar log" (runs 1f0959a1 + 7600ca55,
+ *  Jul 20-21). */
+export function daemonRestartFailure() {
+  return (
+    "The Mac sidecar daemon was restarted mid-run and this run was killed with it. "
+    + "Nothing more will happen on this run — anything attached before the restart is still on the "
+    + "reservation; re-run it from the portal to finish."
   );
 }
 
@@ -872,8 +914,16 @@ async function postEvents(run, payload) {
 }
 
 // ── one run ─────────────────────────────────────────────────────────────────
+// The in-flight run + its CLI child, for the graceful-shutdown handler below —
+// a daemon restart (launchctl kickstart sends SIGTERM) must post an honest
+// terminal instead of leaving the run to die silently.
+let activeRun = null;
+let activeChild = null;
+let shuttingDown = false;
+
 async function handleRun(run) {
   log(`claimed run ${run.id} (${run.propertyName ?? "?"} / ${run.reservationId ?? "?"})`);
+  activeRun = run;
   fs.mkdirSync(RUNS_DIR, { recursive: true });
   const transcriptPath = path.join(RUNS_DIR, `${run.id}.jsonl`);
   const transcript = fs.createWriteStream(transcriptPath, { flags: "a" });
@@ -975,6 +1025,7 @@ async function handleRun(run) {
     ],
     { env: childEnv, cwd: RUNS_DIR, stdio: ["pipe", "pipe", "pipe"] },
   );
+  activeChild = child;
   child.stdin.write(run.prompt);
   child.stdin.end();
 
@@ -1024,8 +1075,14 @@ async function handleRun(run) {
     }
   };
   const flushTimer = setInterval(() => void flush(), 3_000);
+  // Set when the runner's own time ceiling kills the CLI. The kill surfaces
+  // from the CLI as a bare "error_during_execution" (or no result at all), so
+  // the terminal classifier must consult this flag to report the real cause.
+  let ceilingHit = false;
   const killTimer = setTimeout(() => {
+    ceilingHit = true;
     log(`run ${run.id} hit the ${Math.round(MAX_MS / 60_000)}-minute ceiling — killing the CLI`);
+    buffer.push({ at: new Date().toISOString(), kind: "status", text: `Run hit the ${Math.round(MAX_MS / 60_000)}-minute ceiling — stopping.` });
     try {
       child.kill("SIGTERM");
     } catch {}
@@ -1083,6 +1140,10 @@ async function handleRun(run) {
       sawResult = true;
       if (parsed.subtype === "success") {
         resultReport = typeof parsed.result === "string" ? parsed.result : null;
+      } else if (parsed.subtype === "error_max_turns") {
+        // Interrupted mid-work by the CLI's turn cap — name it honestly
+        // instead of the opaque "Runner ended: error_max_turns".
+        resultError = maxTurnsFailure(MAX_TURNS);
       } else {
         resultError = `Runner ended: ${parsed.subtype ?? "unknown"}${typeof parsed.result === "string" ? ` — ${parsed.result.slice(0, 400)}` : ""}`;
       }
@@ -1099,10 +1160,16 @@ async function handleRun(run) {
   stopAttentionAlarm();
 
   // Terminal classification — honest about which way it ended.
-  if (!terminalPosted) {
+  if (!terminalPosted && !shuttingDown) {
     terminalPosted = true;
     if (cancelled) {
       await flush(); // final events only; status is already cancelled server-side
+    } else if (ceilingHit) {
+      // Ahead of the result branches: the SIGTERM'd CLI reports a bare
+      // "error_during_execution" (or nothing), which buries the real cause —
+      // the runner's own time ceiling (the Jul-21 queue failures).
+      await flush({ terminal: { status: "failed", error: runCeilingFailure(Math.round(MAX_MS / 60_000)) } });
+      terminalChime("failed", "Run hit the time ceiling");
     } else if (browserFailure) {
       // Ahead of every other branch: a browser-less run may still emit a
       // "success" result full of web-searched guesses, and that must never be
@@ -1158,13 +1225,41 @@ async function handleRun(run) {
 // ── main loop ───────────────────────────────────────────────────────────────
 async function main() {
   log(`runner up — server ${SERVER}, model ${MODEL}, CDP ${CDP_PORT}, claude ${CLAUDE_BIN}, npx ${NPX_BIN}`);
-  process.on("SIGTERM", () => process.exit(0));
-  process.on("SIGINT", () => process.exit(0));
+  // Graceful shutdown: a daemon restart (launchctl kickstart → SIGTERM) with a
+  // run in flight must kill the CLI AND post an honest terminal — otherwise
+  // the run goes silent and the server watchdog fails it 10 minutes later
+  // with a cause-burying "no heartbeat" message (Jul 20-21 incidents).
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const run = activeRun;
+    const child = activeChild;
+    activeRun = null;
+    activeChild = null;
+    try {
+      if (child) child.kill("SIGTERM");
+    } catch {}
+    if (run) {
+      log(`${signal} with run ${run.id} in flight — posting an honest terminal before exit`);
+      await Promise.race([
+        postEvents(run, {
+          events: [{ at: new Date().toISOString(), kind: "error", text: daemonRestartFailure() }],
+          terminal: { status: "failed", error: daemonRestartFailure() },
+        }).catch(() => {}),
+        new Promise((r) => setTimeout(r, 3_000)),
+      ]);
+    }
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
   while (true) {
     try {
       const run = await claimRun();
       if (run?.id && run?.token && run?.prompt) {
         await handleRun(run);
+        activeRun = null;
+        activeChild = null;
         continue; // check for the next queued run immediately
       }
     } catch (e) {
