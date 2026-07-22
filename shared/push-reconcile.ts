@@ -105,10 +105,21 @@ export function photoPushReconcileDeadlineMs(remainingPhotos: number): number {
 // Shown in the push progress UI while the ledger poll runs. Honest about what
 // happened (the connection dropped, not the push) and what the client is
 // doing about it.
-export function photoPushStreamLostMessage(seen: number, total: number): string {
+// Only blame the 15-minute edge cap when ~15 minutes actually elapsed
+// (operator confusion 2026-07-22: a drop after ONE photo carried the edge-cap
+// explanation, which reads like a systemic failure — an early drop is almost
+// always a network blip or the browser pausing the tab, and the push itself
+// is unaffected either way).
+export const PUSH_EDGE_CAP_BLAME_MS = 14 * 60_000;
+
+export function photoPushStreamLostMessage(seen: number, total: number, elapsedMs?: number): string {
   const progress = total > 0 ? ` after ${Math.min(seen, total)} of ${total} photos` : "";
+  const cause =
+    typeof elapsedMs === "number" && elapsedMs >= 0 && elapsedMs < PUSH_EDGE_CAP_BLAME_MS
+      ? "(usually a brief network blip or the browser pausing the tab)"
+      : "(long pushes exceed the hosting edge's 15-minute response limit)";
   return (
-    `The connection to the server dropped${progress} (long pushes exceed the hosting edge's 15-minute ` +
-    `response limit). The server is still pushing in the background — watching the push ledger for the result…`
+    `The connection to the server dropped${progress} ${cause}. ` +
+    `The server is still pushing in the background — watching the push ledger for the result…`
   );
 }

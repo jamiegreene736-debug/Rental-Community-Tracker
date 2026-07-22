@@ -26,9 +26,14 @@ async function run() {
   let pushCalls = 0;
   const pushedStates: unknown[] = [];
   (globalThis as any).window = {
+    location: { pathname: "/bookings" },
     history: {
       state: null,
-      pushState: (state: unknown, ..._rest: unknown[]) => { pushCalls++; pushedStates.push(state); },
+      pushState: (state: unknown, _title: unknown, url?: unknown) => {
+        pushCalls++;
+        pushedStates.push(state);
+        if (typeof url === "string") (globalThis as any).window.location.pathname = url.split("?")[0];
+      },
       replaceState: (_state: unknown, ..._rest: unknown[]) => {},
     },
     addEventListener: (event: string, handler: (e: { state: unknown }) => void) => {
@@ -76,6 +81,39 @@ async function run() {
   check("nested navigations stamp increasing depths",
     (pushedStates[1] as any)?.__vreNavIdx === 1 && (pushedStates[2] as any)?.__vreNavIdx === 2);
 
+  // ── Back skips pass-through dashboard hops (2026-07-22 operator: "back
+  // needs to go to the page with all the reservations, not the dashboard") ──
+  // Current state from above: trail 0:/bookings, 1:/inbox, 2:/bookings, depth 2.
+  check("plain back is one step when the previous page is a work page",
+    JSON.stringify(nav.backNavigationPlan()) === JSON.stringify({ kind: "steps", delta: 1 }));
+
+  // /bookings → / (dashboard hub) → /builder/89: Back must SKIP the dashboard
+  // and land on All Reservations in one click.
+  popstateHandler?.({ state: pushedStates[2] }); // back on /bookings, depth 2… reset walk
+  (globalThis as any).window.history.pushState(null, "", "/");
+  (globalThis as any).window.history.pushState(null, "", "/builder/89");
+  const skipPlan = nav.backNavigationPlan();
+  check("back from the builder SKIPS the dashboard hop and lands on /bookings",
+    skipPlan.kind === "steps" && (skipPlan as any).delta === 2);
+
+  // dashboard-only history stays honest: / → /inbox → Back is one step (the
+  // dashboard IS the only previous page; skipping would exit the app).
+  const store2 = store; store2.clear();
+  (globalThis as any).window.location.pathname = "/";
+  // simulate a fresh tab landing on the dashboard: reinstall not possible
+  // (installed once) — emulate by walking history back to depth 0 with an
+  // unstamped entry, then pushing /inbox from "/".
+  popstateHandler?.({ state: null });
+  (globalThis as any).window.history.pushState(null, "", "/inbox");
+  const dashPlan = nav.backNavigationPlan();
+  check("back from a page entered FROM the dashboard is a single honest step",
+    dashPlan.kind === "steps" && (dashPlan as any).delta === 1);
+
+  check("no in-app history → fallback plan", (() => {
+    popstateHandler?.({ state: null });
+    return nav.backNavigationPlan().kind === "fallback";
+  })());
+
   console.log("source guards: warning popups navigate in-tab");
   const homeSrc = readFileSync("client/src/pages/home.tsx", "utf8");
   check("dashboard popup actions no longer open in-app pages in NEW TABS (no history = Back falls to dashboard)",
@@ -84,8 +122,8 @@ async function run() {
   console.log("source guards: shared back button + page wiring");
 
   const backButtonSrc = readFileSync("client/src/components/AppBackButton.tsx", "utf8");
-  check("AppBackButton uses history.back only when the previous entry is in-app",
-    backButtonSrc.includes("canGoBackInApp()") && backButtonSrc.includes("window.history.back()"));
+  check("AppBackButton navigates via the dashboard-skipping plan",
+    backButtonSrc.includes("backNavigationPlan()") && backButtonSrc.includes("window.history.go(-plan.delta)"));
   check("AppBackButton falls back to navigating to the dashboard",
     backButtonSrc.includes('fallbackHref = "/"') && backButtonSrc.includes("navigate(fallbackHref)"));
 
