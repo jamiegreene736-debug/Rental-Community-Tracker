@@ -115,6 +115,7 @@ import { upgradeListingPhotoUrlResolution } from "@shared/listing-photo-resoluti
 import { selectInboxAlternativePage, summarizeAlternativePagePayload } from "@shared/alternative-page-inbox";
 import { proxiedGuestPhotoUrl, registerGuestPhotoRoute } from "./guest-photo-upscale";
 import { parseListingAddressFromUrl, parseListingAddressFromText, streetRootFromListingAddress } from "@shared/listing-url-address";
+import { condoCommunityExpected, replacementPropertyTypeRejection } from "@shared/listing-property-type";
 import { learnSiblingStreetRootsFromRejects, type RejectedDiscoveryResult } from "@shared/discovery-root-rescue";
 import {
   MAX_FULL_GALLERY_OPTIONS,
@@ -36619,7 +36620,24 @@ Return ONLY compact JSON with this exact shape:
         : normalizedStreetAddress || addressStreet || folderCommunityAddress || communityName);
     const primaryCommunityAddress = knownCommunityPrimaryAddress();
     const communityAddress = primaryCommunityAddress || rawCommunityAddress;
-    console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}, expanded=${expandedSearch}`);
+    // PROPERTY-TYPE GATE context (2026-07-22, Mauna Lani Point draft -13):
+    // the replace flow committed a 4BR SINGLE-FAMILY HOUSE on the condo
+    // community's street (68-1034 Mauna Lani Point Dr) because nothing here
+    // ever read the scraped homeType. Derive whether this community expects
+    // condo-like units from its OWN stored type; unknown → gate stays off
+    // (house communities keep working). shared/listing-property-type.ts.
+    let expectCondoUnits = false;
+    try {
+      const pid = Number(bodyPropertyId);
+      if (Number.isFinite(pid) && pid < 0) {
+        const gateDraft = await storage.getCommunityDraft(-pid);
+        expectCondoUnits = condoCommunityExpected(gateDraft?.propertyType, gateDraft?.unitTypes);
+      } else if (Number.isFinite(pid) && pid > 0) {
+        const gateBuilder = getUnitBuilderByPropertyId(pid);
+        expectCondoUnits = condoCommunityExpected(gateBuilder?.propertyType ?? null, null);
+      }
+    } catch { expectCondoUnits = false; }
+    console.error(`[find-unit] Starting: folder=${communityFolder}, name=${communityName}, address=${communityAddress}, bedrooms=${requiredBedrooms}, expanded=${expandedSearch}, expectCondoUnits=${expectCondoUnits}`);
     const sameCommunityExclusions = await loadSameCommunityReplacementExclusions({
       communityFolder: safeFolder,
       communityName,
@@ -38088,7 +38106,7 @@ Return ONLY compact JSON with this exact shape:
       source: CandidateSource;
       address: string;
       unit: string;
-      verdict: "skipped-found" | "skipped-photo-found" | "skipped-unknown-strict" | "skipped-internal-duplicate" | "skipped-outside-resort" | "skipped-bedroom-mismatch" | "skipped-too-few-photos" | "skipped-vision-rejected" | "skipped-unfurnished" | "error";
+      verdict: "skipped-found" | "skipped-photo-found" | "skipped-unknown-strict" | "skipped-internal-duplicate" | "skipped-outside-resort" | "skipped-bedroom-mismatch" | "skipped-property-type" | "skipped-too-few-photos" | "skipped-vision-rejected" | "skipped-unfurnished" | "error";
       reason: string;
       platformCheck?: PlatformCheck;
     };
@@ -38378,6 +38396,27 @@ Return ONLY compact JSON with this exact shape:
               sourceUrl, source, address, unit: unitNumber || "?",
               verdict: "skipped-bedroom-mismatch",
               reason: `Listing is ${actualBedrooms}BR, but this replacement must match the unit's ${requiredBedroomCount}BR exactly.`,
+              platformCheck,
+            });
+            continue;
+          }
+          // PROPERTY-TYPE GATE (2026-07-22): a single-family house / lot /
+          // mobile home must never replace a unit in a condo community even
+          // when its bedrooms/photos qualify — the Mauna Lani Point incident
+          // (swap 65) committed a 4BR house whose Redfin facts said
+          // "single family residential" the whole time. Fail-open: absent
+          // homeType never rejects (shared/listing-property-type.ts).
+          const propertyTypeRejection = replacementPropertyTypeRejection({
+            expectCondoUnits,
+            homeType: candidateFacts.homeType,
+            propertySubType: candidateFacts.propertySubType,
+          });
+          if (propertyTypeRejection) {
+            console.error(`[find-unit] [${source}] ${sourceUrl} rejected: ${propertyTypeRejection}`);
+            attempts.push({
+              sourceUrl, source, address, unit: unitNumber || "?",
+              verdict: "skipped-property-type",
+              reason: propertyTypeRejection,
               platformCheck,
             });
             continue;
@@ -43344,7 +43383,7 @@ Return ONLY compact JSON with this exact shape:
   //      to apply cleanly.
   // ============================================================
   app.post("/api/community/fetch-unit-photos", async (req, res) => {
-    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates, useSidecar, nocache, rejectRepresentativeFallback } = req.body as {
+    const { url, communityName, streetAddress, city, state, bedrooms, minBedrooms, skipUrls, skipFirst, maxCandidates, useSidecar, nocache, rejectRepresentativeFallback, expectCondoUnits: bodyExpectCondoUnits } = req.body as {
       url?: string;
       communityName?: string;
       streetAddress?: string;
@@ -43382,6 +43421,10 @@ Return ONLY compact JSON with this exact shape:
       // Creation-time callers (add-community wizard, empty-unit Find Photos)
       // omit it and keep the representative fallback.
       rejectRepresentativeFallback?: boolean;
+      // PROPERTY-TYPE GATE (2026-07-22): caller-asserted "this community's
+      // units are condos" — discovery then rejects single-family/lot/mobile
+      // candidates (shared/listing-property-type.ts). Absent → gate off.
+      expectCondoUnits?: boolean;
     };
     const suppressRepresentativeFallback = rejectRepresentativeFallback === true;
     const bypassDiscoveryCaches = nocache === true;
@@ -44195,6 +44238,19 @@ Return ONLY compact JSON with this exact shape:
               `[fetch-unit-photos] parallel scrape returned 0 photos for cluster ` +
               `(${clusterUrls.length} urls): ${clusterUrls.join(" | ")}`,
             );
+            continue;
+          }
+          // PROPERTY-TYPE GATE (2026-07-22, Mauna Lani Point draft -13): a
+          // single-family house / lot / mobile home must never become a condo
+          // unit's gallery — not even as the representative fallback. Only a
+          // POSITIVE wrong-type detection rejects; unknown homeType passes.
+          const discoveryTypeRejection = replacementPropertyTypeRejection({
+            expectCondoUnits: bodyExpectCondoUnits === true,
+            homeType: facts.homeType,
+            propertySubType: facts.propertySubType,
+          });
+          if (discoveryTypeRejection) {
+            console.warn(`[fetch-unit-photos] skipping ${sourceUrl}: ${discoveryTypeRejection}`);
             continue;
           }
           const scrapedBR = facts.bedrooms ?? null;
@@ -48930,7 +48986,27 @@ Return ONLY compact JSON with this exact shape:
       unit2Photos?: string[];
       unit1SourceUrl?: string | null;
       unit2SourceUrl?: string | null;
+      // FIND-NEW IDENTITY ATOMICITY (2026-07-22): when the photo-fetch job's
+      // find-new mode replaces a unit's gallery with a DIFFERENT listing, it
+      // sends the new listing's parsed identity so the draft's address (and
+      // bedrooms when scraped) move together with the URL + folder. Without
+      // this the draft kept the PREVIOUS unit's address — the Mauna Lani
+      // Point scrambled-identity class (unit A: house address, condo URL).
+      // Only honored alongside the matching unitNSourceUrl; wizard/bulk flows
+      // that omit it are byte-identical to before.
+      unit1Identity?: { address?: string | null; bedrooms?: number | null } | null;
+      unit2Identity?: { address?: string | null; bedrooms?: number | null } | null;
     };
+    const parseUnitIdentity = (raw: unknown): { address: string | null; bedrooms: number | null } | null => {
+      if (!raw || typeof raw !== "object") return null;
+      const o = raw as { address?: unknown; bedrooms?: unknown };
+      const address = typeof o.address === "string" && o.address.trim() ? o.address.trim().slice(0, 200) : null;
+      const bedroomsNum = Number(o.bedrooms);
+      const bedrooms = Number.isFinite(bedroomsNum) && bedroomsNum > 0 && bedroomsNum < 20 ? Math.round(bedroomsNum) : null;
+      return { address, bedrooms };
+    };
+    const unit1Identity = parseUnitIdentity(body.unit1Identity);
+    const unit2Identity = parseUnitIdentity(body.unit2Identity);
     const unit1Urls = Array.isArray(body.unit1Photos) ? body.unit1Photos.filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)) : [];
     const unit2Urls = Array.isArray(body.unit2Photos) ? body.unit2Photos.filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)) : [];
     const unit1SourceUrl = typeof body.unit1SourceUrl === "string" && /^https?:\/\//i.test(body.unit1SourceUrl) ? body.unit1SourceUrl : null;
@@ -49208,17 +49284,41 @@ Return ONLY compact JSON with this exact shape:
         // would keep the PREVIOUS photo's caption.
         await storage.deletePhotoLabelsByFolder(unit.folder).catch(() => {});
       }));
-      const update: Record<string, string | null> = {};
+      const update: Record<string, string | number | null> = {};
       if (u1) {
         update.unit1PhotoFolder = u1.folder;
         if (unit1SourceUrl) update.unit1Url = unit1SourceUrl;
+        if (unit1SourceUrl && unit1Identity) {
+          // Identity moves ATOMICALLY with the source URL (2026-07-22): the
+          // new listing's slug-parsed address replaces the old unit's (null =
+          // honest blank when unparseable — a stale WRONG address is worse),
+          // and a scraped bedroom count updates the unit's claim.
+          update.unit1Address = unit1Identity.address;
+          if (unit1Identity.bedrooms) update.unit1Bedrooms = unit1Identity.bedrooms;
+        }
       }
       if (u2) {
         update.unit2PhotoFolder = u2.folder;
         if (unit2SourceUrl) update.unit2Url = unit2SourceUrl;
+        if (unit2SourceUrl && unit2Identity) {
+          update.unit2Address = unit2Identity.address;
+          if (unit2Identity.bedrooms) update.unit2Bedrooms = unit2Identity.bedrooms;
+        }
+      }
+      // Keep the combo total consistent whenever an identity update changed a
+      // unit's bedroom claim (same reconcile the unit-swaps commit repoint
+      // does — the stale combinedBedrooms class from the 2026-07-18 Cliffs fix).
+      if (typeof update.unit1Bedrooms === "number" || typeof update.unit2Bedrooms === "number") {
+        const freshDraft = await storage.getCommunityDraft(draftId);
+        if (freshDraft && freshDraft.singleListing !== true) {
+          const b1 = typeof update.unit1Bedrooms === "number" ? update.unit1Bedrooms : freshDraft.unit1Bedrooms ?? 0;
+          const b2 = typeof update.unit2Bedrooms === "number" ? update.unit2Bedrooms : freshDraft.unit2Bedrooms ?? 0;
+          const combined = b1 + b2;
+          if (combined > 0 && combined !== (freshDraft.combinedBedrooms ?? 0)) update.combinedBedrooms = combined;
+        }
       }
       if (Object.keys(update).length > 0) {
-        await storage.updateCommunityDraft(draftId, update);
+        await storage.updateCommunityDraft(draftId, update as any);
       }
       const [unit1AutoLabel, unit2AutoLabel] = await Promise.all([
         u1 && u1.saved > 0 ? queueMissingPhotoLabels(u1.folder, "draft-photos-persist") : Promise.resolve(null),

@@ -43,6 +43,14 @@ export type SourcePageVerdict = {
   confidence?: number;
   /** True when the page could not be read at all (fetch failed / empty / auth-gated). */
   unreadable?: boolean;
+  /**
+   * DETERMINISTIC fact contradiction between the source page and the unit's
+   * configured identity — "source says 4BR Single Family but the unit is a
+   * 3BR condo" (shared/listing-property-type.ts sourceListingFactContradiction).
+   * Regex-extracted from the page itself, independent of the Claude verdict.
+   * Added 2026-07-22 (Mauna Lani Point house-as-condo incident).
+   */
+  factContradiction?: string;
 };
 
 const SNIPPET_MAX = 2200;

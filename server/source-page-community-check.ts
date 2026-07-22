@@ -20,6 +20,11 @@ import {
   type SourcePageSignals,
   type SourcePageVerdict,
 } from "../shared/source-page-community-logic";
+import {
+  detectBedroomsFromListingHtml,
+  detectPropertyTypeFromListingHtml,
+  sourceListingFactContradiction,
+} from "../shared/listing-property-type";
 import { callClaudeJson } from "./claude-json";
 
 const SOURCE_PAGE_MODEL = process.env.SOURCE_PAGE_COMMUNITY_MODEL || "claude-sonnet-4-6";
@@ -33,6 +38,10 @@ const MAX_CONCURRENCY = 3;
 export type SourcePageUnitInput = {
   label: string;
   sourceUrl?: string | null;
+  /** The unit's CONFIGURED bedroom count — cross-checked against the page's scraped facts (2026-07-22). */
+  configuredBedrooms?: number | null;
+  /** True when this community's units are condos — a single-family source page then contradicts. */
+  expectCondoUnits?: boolean;
 };
 
 /** Bounded, fail-open page fetch. Returns null on any error / non-text / empty. */
@@ -200,6 +209,22 @@ async function verifyOneSourcePage(
   // edges) must not be treated as the listing — its "Access denied" title would
   // read as non-empty signals and burn a Claude call on junk.
   const directBlocked = !html || looksLikeBotWallPage(html);
+  // DETERMINISTIC fact cross-check (2026-07-22, Mauna Lani Point): read the
+  // page's own bedrooms + property type and compare them to the unit's
+  // configured identity. This is what catches "the source listing is a 4BR
+  // single-family HOUSE but this unit is configured as a 3BR condo" — a class
+  // the community-vision leg structurally cannot see (a luxury house on the
+  // resort street photographs as "same community"). Regex-only, no model call;
+  // absence of scraped facts never contradicts.
+  const factContradiction = !directBlocked && html
+    ? sourceListingFactContradiction({
+        unitLabel: unit.label,
+        configuredBedrooms: unit.configuredBedrooms ?? null,
+        scrapedBedrooms: detectBedroomsFromListingHtml(html),
+        expectCondoUnits: unit.expectCondoUnits === true,
+        scrapedPropertyType: detectPropertyTypeFromListingHtml(html),
+      })
+    : null;
   let signals: SourcePageSignals | null = directBlocked ? null : extractSourcePageSignals(html!);
   let readViaApify = false;
 
@@ -268,9 +293,11 @@ async function verifyOneSourcePage(
       url,
       match: "uncertain",
       reason: `Source-page analysis unavailable (${res.error}).`,
+      ...(factContradiction ? { factContradiction } : {}),
     };
   }
   const verdict = parseSourcePageVerdict(res.data, unit.label, url, expectedCommunity);
+  if (factContradiction) verdict.factContradiction = factContradiction;
   if (readViaApify) {
     // Honesty note for the report UI: the page itself blocked us; the listing
     // data came from the Apify scraper instead.

@@ -1,4 +1,7 @@
 import { findNewDiscoveryResultRejection, preflightPhotoDiscoveryAttempts } from "@shared/preflight-photo-discovery";
+import { condoCommunityExpected, replacementPropertyTypeRejection } from "@shared/listing-property-type";
+import { parseListingAddressFromUrl } from "@shared/listing-url-address";
+import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import {
   auditUnitIdsNeedingRetry,
   mergeRetriedAuditUnitResult,
@@ -612,6 +615,18 @@ async function runPreflightPhotoFetchJob(
   // thin gallery — static units are real listed properties, so a <MIN result
   // must not replace (or seed) their active folder.
   const staticFolderMode = !(input.draftId > 0);
+  // PROPERTY-TYPE GATE context (2026-07-22, Mauna Lani Point draft -13): does
+  // this community expect CONDO-LIKE units? Derived from the draft/builder's
+  // own stored type; unknown -> false (gate off, house communities unaffected).
+  let expectCondoUnits = false;
+  try {
+    if (input.draftId > 0) {
+      const gateDraft = await storage.getCommunityDraft(input.draftId);
+      expectCondoUnits = condoCommunityExpected(gateDraft?.propertyType, gateDraft?.unitTypes);
+    } else if (Number.isFinite(input.propertyId) && input.propertyId > 0) {
+      expectCondoUnits = condoCommunityExpected(getUnitBuilderByPropertyId(input.propertyId)?.propertyType ?? null, null);
+    }
+  } catch { expectCondoUnits = false; }
   const rescrapeSourceUrl = !findNewSource
     && typeof input.rescrapeSourceUrl === "string" && /^https?:\/\//i.test(input.rescrapeSourceUrl)
     ? input.rescrapeSourceUrl.trim()
@@ -802,6 +817,9 @@ async function runPreflightPhotoFetchJob(
         // gallery must never come back as the "found" result (the 2026-07-18
         // Cliffs-at-Princeville 3BR→2BR silent identity swap).
         rejectRepresentativeFallback: findNewSource,
+        // Condo-community context: discovery rejects single-family/lot/mobile
+        // candidates outright (2026-07-22 Mauna Lani Point house incident).
+        expectCondoUnits,
         // Operator-initiated: bypass the discovery cache reads (SERP + scrape) so a
         // deliberate retry hits the live portals instead of a day-old cached result.
         nocache: true,
@@ -846,6 +864,13 @@ async function runPreflightPhotoFetchJob(
         representativeFallback: fetchData?.representativeFallback === true
           || nextProof.representativeFallback === true,
         bedroomMatch: nextProof.bedroomMatch ?? null,
+        // Belt-and-braces twin of the endpoint-side gate: a single-family
+        // house must never replace a condo unit's gallery in find-new mode.
+        propertyTypeRejection: replacementPropertyTypeRejection({
+          expectCondoUnits,
+          homeType: (fetchData?.facts as { homeType?: string } | undefined)?.homeType ?? nextProof.scrapedPropertyType,
+          propertySubType: (fetchData?.facts as { propertySubType?: string } | undefined)?.propertySubType,
+        }),
       });
       if (findNewRejection) {
         console.warn(
@@ -945,9 +970,24 @@ async function runPreflightPhotoFetchJob(
       message: "Saving photos to this draft",
       progress: 86,
     });
+    // FIND-NEW IDENTITY ATOMICITY (2026-07-22, Mauna Lani Point draft -13):
+    // when find-new replaces a unit's gallery + source URL, the unit's ADDRESS
+    // (and bedrooms when scraped) must move with it. The old partial re-stamp
+    // (URL + folder only) left the PREVIOUS unit's address on the draft, so
+    // unit A read as "68-1034 Mauna Lani Point Dr" (the replaced house) while
+    // its URL/photos were condo E304 — a scrambled identity no later check
+    // could reason about. Address parses from the accepted listing URL's slug;
+    // unparseable -> null (an honest blank beats a stale WRONG address that
+    // geocoding/walking-distance would treat as real).
+    const identity = findNewSource && sourceUrl
+      ? {
+          address: parseListingAddressFromUrl(sourceUrl),
+          bedrooms: lastProof?.scrapedBedrooms ?? null,
+        }
+      : null;
     const persistBody = input.unitIndex === 0
-      ? { unit1Photos: photos.map((p) => p.url), unit2Photos: [], unit1SourceUrl: sourceUrl }
-      : { unit1Photos: [], unit2Photos: photos.map((p) => p.url), unit2SourceUrl: sourceUrl };
+      ? { unit1Photos: photos.map((p) => p.url), unit2Photos: [], unit1SourceUrl: sourceUrl, ...(identity ? { unit1Identity: identity } : {}) }
+      : { unit1Photos: [], unit2Photos: photos.map((p) => p.url), unit2SourceUrl: sourceUrl, ...(identity ? { unit2Identity: identity } : {}) };
     const persistData = await withDraftPhotoProofLock(input.draftId, async () => {
       const duplicateReservation = lastProof
         ? reserveDraftPhotoProof(input.draftId, input.unitIndex, lastProof)

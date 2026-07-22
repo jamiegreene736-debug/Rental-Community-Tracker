@@ -27,6 +27,13 @@ export function findNewDiscoveryResultRejection(input: {
   representativeFallback: boolean;
   /** Proof bedroomMatch: false = scraped bedrooms contradict the request; null/undefined = unverifiable (allowed). */
   bedroomMatch: boolean | null | undefined;
+  /**
+   * PROPERTY-TYPE rejection reason from replacementPropertyTypeRejection
+   * (shared/listing-property-type.ts), or null when the type is acceptable /
+   * unknown. Added 2026-07-22 (Mauna Lani Point draft -13): a find-new run
+   * must never replace a condo unit's gallery with a single-family house's.
+   */
+  propertyTypeRejection?: string | null;
 }): string | null {
   if (!input.findNewSource) return null;
   if (input.representativeFallback) {
@@ -34,6 +41,9 @@ export function findNewDiscoveryResultRejection(input: {
   }
   if (input.bedroomMatch === false) {
     return "scraped bedroom count contradicts the requested bedrooms";
+  }
+  if (typeof input.propertyTypeRejection === "string" && input.propertyTypeRejection) {
+    return input.propertyTypeRejection;
   }
   return null;
 }

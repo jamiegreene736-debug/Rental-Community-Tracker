@@ -43,6 +43,40 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-22 (Mauna Lani Point draft -13: "3 bedroom condo" that was really the 4BR HOUSE at
+  68-1034 — full layer-by-layer diagnosis + fix): Operator: "identify why this went so wrong and
+  fix it in every layer." RECONSTRUCTED FROM PROD DB (don't re-chase): (1) 7/12 the replace flow
+  committed 68-1034 Mauna Lani Point Dr — a 4BR SINGLE-FAMILY HOUSE on the condo community's
+  street — as unit A (unit_swaps 65, new_bedrooms=4 honestly recorded); no gate read
+  ListingFacts.homeType even though Redfin's page said "single family residential" (only
+  find-clean-unit consulted it; street-match community gate + vision community check are
+  type-blind). (2) 7/18 17:12Z a find-new run overwrote unit A's gallery/URL with condo E304
+  (3BR) but left the HOUSE's address on the draft → scrambled identity (house address + condo
+  URL + 3BR claim), no swap row. (3) The community check passed both states (vision judges
+  scenery; source-page leg never read the page's own facts). SHIPPED
+  (`claude/listing-property-type-error-9ccce7`): shared/listing-property-type.ts (pure
+  normalize/detect/reject) + PROPERTY-TYPE GATES in find-unit ("skipped-property-type"),
+  fetch-unit-photos discovery, and findNewDiscoveryResultRejection — active ONLY when the
+  draft/builder's OWN propertyType/unitTypes says condo-like (condoCommunityExpected); unknown
+  scraped type NEVER rejects (fail-open, don't tighten). FIND-NEW IDENTITY ATOMICITY:
+  persist-photos unitNIdentity moves address (URL-slug-parsed, unparseable → honest null) +
+  scraped bedrooms with the source URL and reconciles combinedBedrooms. SOURCE-FACT CROSS-CHECK:
+  the Check-photo-community source-page leg regex-extracts the page's own bedrooms + property
+  type and FAILS on contradiction with the unit config (factContradiction, red line in the
+  shared report). LIVE FIX: unit A = E304 (3BR/3BA condo — its gallery was already on disk in
+  draft-13-unit-a from the 7/18 overwrite; _source.json confirms), unit1_address/bathrooms
+  updated, stale unit-A swaps 57+65 deleted (active folder = draft folder again), house-gallery
+  photo_labels/photo_listing_checks purged (files inert on volume), description overrides healed
+  (7BR→6BR, 18→16 guests, Unit A 4BR→3BR — THREE separate stale phrasings, grep for "7-bedroom"
+  hyphen forms too), titles "Sleeps 12"→"Sleeps 16" pushed to Guesty (verified; accommodates was
+  ALREADY 16, so the capacity-backfill title-vs-accommodates drift on -13 is now resolved),
+  full E304 gallery re-pulled + relabeled via rescrape-unit-photos (12 photos, 2 of 3 bedrooms
+  photographed — an audit may still warn coverage 2/3; that's honest, and any future ladder
+  replacement must now be a 3BR CONDO). Locked by tests/listing-property-type.test.ts (58, npm
+  chain). See AGENTS.md Unit Audit Sweep #26 + the 2026-07-22 Decision Log line. Post-deploy:
+  re-run "Check photo community" / an audit on -13 — the source-page rows should show the new
+  fact cross-check and the listing should converge green.
+
 - 2026-07-21 (headless checkout run REFUSED by the model but recorded "completed" — refusal/no-work
   terminal guard): Run 629799c6… (Jul 19, reservation 6a357e7c60363d0014ae9958) refused the checkout
   brief ("I'm not going to execute this task… hallmarks of fraudulent automation"); the CLI emitted

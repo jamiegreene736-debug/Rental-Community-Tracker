@@ -5845,6 +5845,40 @@ in `client/src/components/unit-audit-dialog.tsx`). PR 1 is VERIFY-ONLY.
    tests/find-new-bedroom-guard.test.ts ("replacement finder EXACT bedroom
    rule" section).
 
+26. **PROPERTY-TYPE gate + source-fact cross-check (2026-07-22, Mauna Lani
+   Point draft -13).** A 4BR SINGLE-FAMILY HOUSE on the condo community's
+   street (68-1034 Mauna Lani Point Dr) was committed as a condo unit
+   replacement: the resort-street community gate matches by street, the
+   Claude-vision community check judges scenery (a luxury tropical house
+   reads "same community" beside resort condos), and no replacement gate
+   ever read the already-scraped `ListingFacts.homeType` — Redfin's page
+   said "single family residential" the whole time (only the single-listing
+   find-clean-unit wizard consulted it). Fixes, all sourced from
+   `shared/listing-property-type.ts` (pure) and locked by
+   tests/listing-property-type.test.ts:
+   (a) find-unit, fetch-unit-photos discovery, and
+   `findNewDiscoveryResultRejection` all reject single-family / lot /
+   manufactured candidates when the community context expects CONDO-like
+   units — context comes from the draft/builder's OWN `propertyType` /
+   `unitTypes` (`condoCommunityExpected`); an UNKNOWN scraped type never
+   rejects and non-condo communities are untouched (fail-open — do not
+   "tighten" this to reject unknowns, it would starve legitimate finds).
+   (b) FIND-NEW IDENTITY ATOMICITY: when find-new replaces a draft unit's
+   gallery + source URL, persist-photos now also moves the unit's ADDRESS
+   (slug-parsed from the accepted URL; unparseable → honest null, never a
+   stale WRONG address) and bedrooms (when scraped), then reconciles
+   `combinedBedrooms` — the incident left "house address + condo URL + 3BR
+   claim" on one unit, a scrambled identity nothing downstream could
+   reason about. Wizard/bulk persist calls that omit `unitNIdentity` are
+   byte-identical to before.
+   (c) The "Check photo community" source-page leg now deterministically
+   extracts the source page's OWN bedrooms + property type
+   (`detectBedroomsFromListingHtml` / `detectPropertyTypeFromListingHtml`,
+   regex-only, no model call) and FAILS the check when they contradict the
+   unit's configured identity (`factContradiction` on the verdict, rendered
+   red in the shared report) — the class the vision leg structurally
+   cannot see.
+
 ## Conventions
 
 ### Branches
@@ -6353,3 +6387,5 @@ Welcome. When in doubt, ask the human.
 
 2026-07-22 · Jamie: "There were a couple issues/errors with the queue for buying in the units utilizing cowork. Please diagnose and fix" · DIAGNOSED LIVE (prod app_settings claude_find_runs.v1 via Postgres DATABASE_PUBLIC_URL + the Mac's sidecar-launchd.log): every "error_during_execution" failure in the Jul-21 bulk queues (runs 8b792550/34adf217/5bed475d/3322ade4) was the RUNNER'S OWN 40-minute ceiling killing a run still mid-legitimate-work (log: "hit the 40-minute ceiling — killing the CLI"), reported to the operator as the CLI's opaque subtype; 6f50b8da was the 200-turn cap ("error_max_turns"); and both "runner went silent (no heartbeat for 10 minutes)" failures (1f0959a1 Jul-20 — mid buy-in attach, Unit A already attached; 7600ca55 Jul-21) line up exactly with supervisor SIGTERM restarts of the daemon (launchctl kickstart from live-fix sessions) that killed the runner child without any terminal post. FIXED (`claude/cowork-queue-buying-errors-844c6f`): honest terminal classification for all three interruption classes (runCeilingFailure/maxTurnsFailure/daemonRestartFailure — each says partial work survives + re-run), graceful SIGTERM shutdown that posts the terminal + kills the CLI child, and defaults raised to 60 min / 300 turns (still under the server's 90-min watchdog ceiling). Live daemon runner copied (backup .bak-interrupthonesty-*) + kickstarted. See the "INTERRUPTED-RUN honesty + limits" Load-Bearing bullet.
 2026-07-22 · Jamie (revenue-dialog screenshot): "have a modal pop up so that I can dismiss these [refund-attention] messages individually and they won't show up again in the future" · ACCEPTED (`claude/receipt-alert-dismiss`) · Each red refund-attention row in the dashboard revenue dialog now has a ghost "Dismiss" button (window.confirm-gated — it silences a MONEY alert without resending, and the confirm says so). Dismissals persist SERVER-SIDE in app_settings `receipt_attention_dismissals.v1` (pure shared/receipt-attention-dismissals.ts: parse/serialize, idempotent add, 400-newest cap) via admin-only POST /api/inbox/guest-receipts/:token/dismiss-attention, so they hold across devices. KEYED BY RECEIPT TOKEN — a FUTURE failed refund receipt is a new ledger row with a new token and still raises (dismissing can never mute the alert class). The revenue handler filters dismissed tokens before building guestRefundReceiptIssues. Locked by tests/receipt-attention-dismissals.test.ts (store matrix + route/filter/confirm source guards, npm chain).
+
+2026-07-22 · Jamie (Mauna Lani Point draft -13 screenshots): "This listing is 3 bedrooms and a condo [68-1034 Redfin] when in fact this is a 4 bedroom house. How did it get this wrong? ... identify why this went so wrong and fix it in every layer" · SHIPPED (`claude/listing-property-type-error-9ccce7`) · Root chain: (1) the 2026-07-12 replace flow committed 68-1034 Mauna Lani Point Dr — a 4BR SINGLE-FAMILY HOUSE on the condo community's street — as unit A (unit_swaps 65; Redfin's own page said "single family residential" but no replacement gate ever read ListingFacts.homeType — only find-clean-unit did); (2) the 2026-07-18 find-new rung (pre-guard-deploy window) then overwrote unit A's gallery/URL with condo E304 (3BR) while leaving the house's ADDRESS on the draft — a scrambled identity (house address + condo URL + 3BR claim) no later check could reason about; (3) the community photo check passed the house because the vision leg judges scenery and the source-page leg never read the page's own bedrooms/type. FIXES: shared/listing-property-type.ts (normalize/detect/reject, pure) + property-type gates in find-unit, fetch-unit-photos discovery, and findNewDiscoveryResultRejection (condo-community context derived from the draft/builder's OWN propertyType; unknown type NEVER rejects); find-new persist now moves the unit's ADDRESS+bedrooms atomically with the URL (persist-photos unitNIdentity + combinedBedrooms reconcile); the source-page leg deterministically cross-checks the page's scraped bedrooms+type against the unit's config and FAILS the check on contradiction. Live fix: unit A = E304 (3BR/3BA condo, gallery already on disk), stale unit-A swaps + house-gallery labels/checks purged, 7BR/18-guest/4BR override copy healed, title pushed "Sleeps 16" = Guesty accommodates 16 (the capacity-backfill drift resolved). Locked by tests/listing-property-type.test.ts (58, npm chain).

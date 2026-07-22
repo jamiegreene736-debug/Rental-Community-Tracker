@@ -6,6 +6,7 @@ import { getUnitBuilderByPropertyId, type PropertyUnitBuilder } from "../client/
 import { resolveActiveUnitPhotoFolders } from "../shared/unit-swap-photos";
 import { resolveCanonicalCommunityPhotoFolder } from "../shared/community-photo-folders";
 import { resolveDraftUnitBedrooms, positiveDraftInteger } from "../shared/draft-unit-bedrooms";
+import { condoCommunityExpected } from "../shared/listing-property-type";
 import { parseExpectedBedInventory } from "../shared/photo-bedroom-coverage-logic";
 import { draftUnitIdForSlot } from "../shared/auto-replace-job-logic";
 import { storage } from "./storage";
@@ -356,6 +357,9 @@ export async function buildPhotoCommunityCheckRequestForProperty(
           request: {
             expectedCommunity: complexName,
             expectedListingBedrooms: expectedListingBedrooms ?? undefined,
+            // Condo-community context → the source-page leg cross-checks each
+            // unit's source listing type/bedrooms (2026-07-22 Mauna Lani fix).
+            expectCondoUnits: condoCommunityExpected(builder.propertyType ?? null, null),
             groups,
           },
         }
@@ -414,6 +418,7 @@ export async function buildPhotoCommunityCheckRequestForProperty(
         request: {
           expectedCommunity: complexName,
           expectedListingBedrooms: expectedListingBedrooms ?? undefined,
+          expectCondoUnits: condoCommunityExpected(draft.propertyType, (draft as any).unitTypes),
           groups,
         },
       }

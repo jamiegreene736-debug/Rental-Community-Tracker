@@ -131,6 +131,13 @@ export type PhotoCommunityCheckRequest = {
    * is NOT persisted to the dashboard Community QA status.
    */
   communityOnly?: boolean;
+  /**
+   * True when this community's units are CONDOS (draft/builder propertyType).
+   * The source-page leg then cross-checks each unit's source listing type —
+   * a single-family-house source page is flagged as a fact contradiction
+   * (2026-07-22 Mauna Lani Point incident). Absent → cross-check off.
+   */
+  expectCondoUnits?: boolean;
   groups: CheckGroupInput[];
 };
 
@@ -987,7 +994,15 @@ export async function runPhotoCommunityCheck(
   let sourcePages: SourcePageVerdict[] = [];
   const sourceUnitInputs = unitInputs
     .filter((g) => typeof g.sourceUrl === "string" && g.sourceUrl.trim().length > 0)
-    .map((g) => ({ label: g.label, sourceUrl: g.sourceUrl }));
+    .map((g) => ({
+      label: g.label,
+      sourceUrl: g.sourceUrl,
+      // Fact cross-check inputs (2026-07-22): the unit's configured bedrooms +
+      // whether this community's units are condos — the source page's own
+      // scraped facts are compared against these.
+      configuredBedrooms: typeof g.expectedBedrooms === "number" && g.expectedBedrooms > 0 ? g.expectedBedrooms : null,
+      expectCondoUnits: request.expectCondoUnits === true,
+    }));
   if (sourceUnitInputs.length > 0 && apiKey && !SOURCE_PAGE_CHECK_DISABLED) {
     try {
       sourcePages = await verifyUnitSourcePages(sourceUnitInputs, expectedCommunity, apiKey);
@@ -1087,6 +1102,12 @@ export async function runPhotoCommunityCheck(
   }
 
   for (const sp of sourcePages) {
+    // A DETERMINISTIC fact contradiction (page's own bedrooms/type vs the
+    // unit's configured identity) always fails — this is the wrong-property
+    // catch the vision leg cannot make (Mauna Lani Point 4BR-house-as-3BR-condo).
+    if (sp.factContradiction) {
+      fail(`${sp.unitLabel}: source listing facts contradict this unit — ${sp.factContradiction.replace(`${sp.unitLabel}: `, "")}`);
+    }
     if (sourcePageIsStrongContradiction(sp)) {
       const where = sp.identifiedCommunity || sp.identifiedLocation || "a different place";
       fail(`${sp.unitLabel}: source listing page is a DIFFERENT community (${where}) — ${sp.reason}`);
