@@ -28,6 +28,8 @@ export type UnitPhotoResolverProof = {
   minimumBedrooms: number | null;
   scrapedBedrooms: number | null;
   bedroomMatch: boolean | null;
+  /** Raw scraped property type (Zillow homeType / Redfin propertyCategory), when known. */
+  scrapedPropertyType: string | null;
   representativeFallback: boolean;
   reusedConfiguredSource: boolean;
   relaxedSearch: boolean;
@@ -41,7 +43,7 @@ export type UnitPhotoProofInput = {
   foundVia?: string | null;
   requestedBedrooms?: number | null;
   minimumBedrooms?: number | null;
-  facts?: { bedrooms?: number | null } | null;
+  facts?: { bedrooms?: number | null; homeType?: string | null; propertySubType?: string | null } | null;
   representativeFallback?: boolean;
   reusedConfiguredSource?: boolean;
   relaxedSearch?: boolean;
@@ -109,6 +111,7 @@ export function buildUnitPhotoResolverProof(input: UnitPhotoProofInput): UnitPho
   const requestedBedrooms = positiveIntegerOrNull(input.requestedBedrooms);
   const minimumBedrooms = positiveIntegerOrNull(input.minimumBedrooms);
   const scrapedBedrooms = positiveIntegerOrNull(input.facts?.bedrooms);
+  const scrapedPropertyType = String(input.facts?.homeType ?? input.facts?.propertySubType ?? "").trim() || null;
   const representativeFallback = input.representativeFallback === true;
   const reusedConfiguredSource = input.reusedConfiguredSource === true;
   const relaxedSearch = input.relaxedSearch === true;
@@ -166,6 +169,7 @@ export function buildUnitPhotoResolverProof(input: UnitPhotoProofInput): UnitPho
     minimumBedrooms,
     scrapedBedrooms,
     bedroomMatch,
+    scrapedPropertyType,
     representativeFallback,
     reusedConfiguredSource,
     relaxedSearch,

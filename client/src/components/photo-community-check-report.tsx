@@ -81,6 +81,8 @@ export type CommunityCheckSourcePage = {
   reason: string;
   confidence?: number;
   unreadable?: boolean;
+  /** Deterministic page-facts vs unit-config contradiction (2026-07-22). */
+  factContradiction?: string;
 };
 export type PhotoCommunityCheckResult = {
   ok: boolean;
@@ -558,6 +560,11 @@ export function PhotoCommunityCheckReport({
                     ) : null}
                   </div>
                   <div style={{ fontSize: 11, color: "#64748b", marginTop: 3 }}>{sp.reason}</div>
+                  {sp.factContradiction ? (
+                    <div style={{ fontSize: 11, color: "#b91c1c", fontWeight: 600, marginTop: 3 }}>
+                      ⚠ {sp.factContradiction}
+                    </div>
+                  ) : null}
                 </div>
               );
             })}
