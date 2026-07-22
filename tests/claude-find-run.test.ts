@@ -1268,6 +1268,15 @@ console.log("claude-find-run: checkout-run source wiring");
   );
   const bookingsSrc = fs2.readFileSync("client/src/pages/bookings.tsx", "utf8");
   check(
+    // 2026-07-22 "reservations loading slowly": 50+ rows each firing their own
+    // status POST on mount → one 50ms-window batched call (endpoint takes 100
+    // ids). Un-batching this reintroduces the mount stampede.
+    "per-row find-run status fetches are COALESCED into batched POSTs",
+    bookingsSrc.includes("fetchClaudeFindRunStatusCoalesced")
+      && /queryFn: \(\) => fetchClaudeFindRunStatusCoalesced\(reservationId\)/.test(bookingsSrc)
+      && bookingsSrc.includes("ids.slice(i, i + 100)"),
+  );
+  check(
     "the bookings page mounts the banner and wakes it when runs are enqueued",
     bookingsSrc.includes("<ClaudeRunStatusBanner")
       && (bookingsSrc.match(/invalidateQueries\(\{ queryKey: \["\/api\/claude-find-runs\/overview"\] \}\)/g) ?? []).length >= 3,

@@ -26,6 +26,10 @@
 
 const STORAGE_KEY = "vre_app_nav_depth_v1";
 const STATE_KEY = "__vreNavIdx";
+// Per-depth PATH trail ({"0": "/bookings", "1": "/", ...}) — what lets the
+// Back button SKIP pass-through dashboard hops (see backNavigationPlan).
+const TRAIL_KEY = "vre_app_nav_trail_v1";
+const TRAIL_CAP = 60;
 
 function readStoredDepth(): number {
   try {
@@ -60,6 +64,40 @@ function withStamp(state: unknown, depth: number): unknown {
   return state;
 }
 
+function readTrail(): Record<string, string> {
+  try {
+    const raw = window.sessionStorage.getItem(TRAIL_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeTrailEntry(atDepth: number, pathname: string): void {
+  try {
+    const trail = readTrail();
+    trail[String(atDepth)] = pathname;
+    const keys = Object.keys(trail);
+    if (keys.length > TRAIL_CAP) {
+      for (const key of keys.sort((a, b) => Number(a) - Number(b)).slice(0, keys.length - TRAIL_CAP)) {
+        delete trail[key];
+      }
+    }
+    window.sessionStorage.setItem(TRAIL_KEY, JSON.stringify(trail));
+  } catch {
+    // sessionStorage unavailable — Back degrades to plain history.back().
+  }
+}
+
+function currentPathname(): string {
+  try {
+    return window.location?.pathname ?? "";
+  } catch {
+    return "";
+  }
+}
+
 let depth = 0;
 let installed = false;
 
@@ -69,6 +107,10 @@ export function installAppNavHistoryTracker(): void {
   // The stamp on the CURRENT entry (survives reloads exactly) wins over the
   // sessionStorage fallback.
   depth = stampedDepth(window.history.state) ?? readStoredDepth();
+  // Record the CURRENT entry's path — this covers the tab's FIRST page (depth
+  // 0, never sees a pushState), which is exactly the entry the skip-the-
+  // dashboard walk needs to know about (e.g. /bookings → / → /builder).
+  writeTrailEntry(depth, currentPathname());
 
   const originalPushState = window.history.pushState.bind(window.history);
   window.history.pushState = function pushStateTracked(
@@ -77,7 +119,11 @@ export function installAppNavHistoryTracker(): void {
     depth += 1;
     writeStoredDepth(depth);
     args[0] = withStamp(args[0], depth);
-    return originalPushState(...args);
+    const result = originalPushState(...args);
+    // Record AFTER the push so location reflects the new entry (wouter
+    // navigates via pushState(url) — location updates synchronously).
+    writeTrailEntry(depth, currentPathname());
+    return result;
   };
 
   const originalReplaceState = window.history.replaceState.bind(window.history);
@@ -100,4 +146,31 @@ export function installAppNavHistoryTracker(): void {
 /** True when the previous browser-history entry is a page inside this app. */
 export function canGoBackInApp(): boolean {
   return depth > 0;
+}
+
+/**
+ * How the Back button should navigate (2026-07-22 operator: "when I click
+ * back it needs to go to the page with all the reservations, not the
+ * dashboard"). The dashboard is a pass-through hub — its own header logo is
+ * the way TO it (see AppBackButton's design note) — so Back walks the
+ * recorded trail to the nearest previous entry whose path is NOT "/" and
+ * jumps straight there (history.go(-delta)). When every previous entry is the
+ * dashboard (or the trail is unavailable), a plain one-step back is the
+ * honest fallback; with no in-app history at all, the caller navigates to
+ * fallbackHref.
+ *
+ * Returns: {kind:"steps", delta} → history.go(-delta);
+ *          {kind:"fallback"}     → navigate(fallbackHref).
+ */
+export function backNavigationPlan(): { kind: "steps"; delta: number } | { kind: "fallback" } {
+  if (depth <= 0) return { kind: "fallback" };
+  const trail = readTrail();
+  const here = currentPathname();
+  for (let i = depth - 1; i >= 0; i--) {
+    const path = trail[String(i)];
+    if (path === undefined) break; // unknown territory — stop walking
+    if (path !== "/" && path !== here) return { kind: "steps", delta: depth - i };
+  }
+  // Everything behind us is the dashboard/unknown — one honest step back.
+  return { kind: "steps", delta: 1 };
 }

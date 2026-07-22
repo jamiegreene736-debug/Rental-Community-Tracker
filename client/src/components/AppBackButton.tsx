@@ -1,7 +1,7 @@
 import { useLocation } from "wouter";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { canGoBackInApp } from "@/lib/app-nav-history";
+import { backNavigationPlan } from "@/lib/app-nav-history";
 
 // The ONE page-header back control. It goes to the browser's PREVIOUS page
 // when the previous history entry is inside this app, and falls back to
@@ -22,8 +22,12 @@ export default function AppBackButton({
 }) {
   const [, navigate] = useLocation();
   const goBack = () => {
-    if (canGoBackInApp()) {
-      window.history.back();
+    // Skip pass-through dashboard hops: Back lands on the previous WORK page
+    // (e.g. Operations/All Reservations), because the header logo already owns
+    // navigation to the dashboard. See backNavigationPlan for the rules.
+    const plan = backNavigationPlan();
+    if (plan.kind === "steps") {
+      window.history.go(-plan.delta);
     } else {
       navigate(fallbackHref);
     }

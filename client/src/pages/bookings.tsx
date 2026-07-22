@@ -2513,13 +2513,54 @@ async function launchCoworkPrompt(
 // too.
 const claudeFindRunStatusKey = (reservationId: string) => ["/api/claude-find-runs/status", reservationId];
 
+// ── request coalescer (2026-07-22 "reservations are loading slowly") ────────
+// Every booking row mounts its own useClaudeFindRun, which used to fire its
+// own POST /status — 50+ near-simultaneous requests on page load. The status
+// endpoint already accepts up to 100 reservationIds, so callers arriving
+// within one 50ms window share ONE batched POST and each picks its own slice
+// from the response. Query keys stay per-reservation, so every existing
+// invalidation call site keeps working unchanged.
+type ClaudeFindRunStatusBatch = {
+  runs: Record<string, ClaudeFindRunClientView>;
+  history?: Record<string, ClaudeFindRunHistoryEntry[]>;
+  disabled?: boolean;
+};
+let findRunBatchIds: Set<string> = new Set();
+let findRunBatchPromise: Promise<ClaudeFindRunStatusBatch> | null = null;
+
+async function fetchClaudeFindRunStatusCoalesced(reservationId: string): Promise<ClaudeFindRunStatusBatch> {
+  findRunBatchIds.add(reservationId);
+  if (!findRunBatchPromise) {
+    findRunBatchPromise = new Promise<void>((resolve) => setTimeout(resolve, 50)).then(async () => {
+      const ids = Array.from(findRunBatchIds);
+      findRunBatchIds = new Set();
+      findRunBatchPromise = null;
+      const merged: ClaudeFindRunStatusBatch = { runs: {}, history: {} };
+      // The endpoint caps at 100 ids per call — chunk, never silently drop.
+      for (let i = 0; i < ids.length; i += 100) {
+        const res = await apiRequest("POST", "/api/claude-find-runs/status", {
+          reservationIds: ids.slice(i, i + 100),
+        });
+        const page = (await res.json()) as ClaudeFindRunStatusBatch;
+        Object.assign(merged.runs, page.runs ?? {});
+        Object.assign(merged.history!, page.history ?? {});
+        if (page.disabled) merged.disabled = true;
+      }
+      return merged;
+    });
+  }
+  const batch = await findRunBatchPromise;
+  return {
+    runs: batch.runs[reservationId] ? { [reservationId]: batch.runs[reservationId] } : {},
+    history: batch.history?.[reservationId] ? { [reservationId]: batch.history[reservationId] } : {},
+    ...(batch.disabled ? { disabled: true } : {}),
+  };
+}
+
 function useClaudeFindRun(reservationId: string) {
   return useQuery<{ runs: Record<string, ClaudeFindRunClientView>; history?: Record<string, ClaudeFindRunHistoryEntry[]>; disabled?: boolean }>({
     queryKey: claudeFindRunStatusKey(reservationId),
-    queryFn: async () => {
-      const res = await apiRequest("POST", "/api/claude-find-runs/status", { reservationIds: [reservationId] });
-      return res.json();
-    },
+    queryFn: () => fetchClaudeFindRunStatusCoalesced(reservationId),
     // Poll only while a run is live; a terminal run re-renders once and rests.
     refetchInterval: (query) => {
       const run = query.state.data?.runs?.[reservationId];

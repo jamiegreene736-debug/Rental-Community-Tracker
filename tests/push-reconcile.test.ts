@@ -118,7 +118,14 @@ check(
 check(
   "stream-lost copy says the SERVER is still pushing (never implies failure)",
   photoPushStreamLostMessage(45, 51).includes("still pushing") &&
-    photoPushStreamLostMessage(45, 51).includes("45 of 51"),
+    photoPushStreamLostMessage(45, 51).includes("45 of 51") &&
+    // elapsed-aware cause (2026-07-22): an EARLY drop must not blame the
+    // 15-minute edge cap — that's a network blip / paused tab; only a
+    // ~15-minute run earns the edge-cap explanation.
+    photoPushStreamLostMessage(1, 27, 60_000).includes("network blip") &&
+    !photoPushStreamLostMessage(1, 27, 60_000).includes("15-minute") &&
+    photoPushStreamLostMessage(20, 27, 15 * 60_000).includes("15-minute") &&
+    photoPushStreamLostMessage(45, 51).includes("15-minute"),
 );
 check(
   "stream-lost copy omits progress when total is unknown",

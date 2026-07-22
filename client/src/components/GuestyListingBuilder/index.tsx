@@ -3070,6 +3070,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     // strictly newer than this baseline counts as THIS push's outcome —
     // server-time vs server-time, so client clock skew can never matter.
     const baselineMs = pushEntryTimeMs(await readPhotosPushLedgerEntry(selectedId));
+    const pushStartedAtMs = Date.now();
 
     try {
       // Streaming NDJSON: the server sends one JSON line per photo as it
@@ -3301,7 +3302,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     // scales with how many photos the server still had in flight.
     setSavingToGuesty(false);
     setPushVerifyNote(null);
-    setPushReconcileNote(photoPushStreamLostMessage(lastSeenIndex, photos.length));
+    setPushReconcileNote(photoPushStreamLostMessage(lastSeenIndex, photos.length, Date.now() - pushStartedAtMs));
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const reconcileDeadline = Date.now() + photoPushReconcileDeadlineMs(Math.max(0, photos.length - lastSeenIndex));
     try {
