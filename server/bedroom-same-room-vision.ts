@@ -45,6 +45,7 @@ function buildPrompt(ids: string[]): string {
     "Put two photos in the SAME group ONLY when you can point to concrete SHARED features proving it is one space — the same headboard/bedding, the same window and the same outside view, the same wall art, the same flooring AND the same furniture layout.",
     "",
     "Be conservative. Two photos sharing the same BED TYPE (two king rooms, two queen rooms) are usually DIFFERENT bedrooms — bed size alone is NOT evidence of the same room. If two photos merely look similar (same bed size, generic resort decor) but you cannot prove they are the same room, put them in SEPARATE groups.",
+    "Actively look for DIFFERENCES that prove two same-bed-size photos are different rooms: a different bed frame or headboard (e.g. four-poster/pillars vs plain), different linens or bedding pattern, different pillow count or arrangement, different nightstands/lamps/curtains, or a different window/view. ANY one such difference means the photos go in SEPARATE groups.",
     "Merging two DIFFERENT bedrooms into one group is a serious error; leaving one room split across two groups is acceptable.",
     "",
     `There are ${ids.length} photos: ${ids.join(", ")}. Every photo id must appear in exactly one group.`,
