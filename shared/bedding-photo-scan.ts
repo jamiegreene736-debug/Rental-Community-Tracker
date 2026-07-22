@@ -212,6 +212,7 @@ export function buildBeddingVisionPrompt(input: {
     "RULES",
     `- ${expected}`,
     "- Two photos can show the SAME room from different angles — fold them into ONE entry (list all of that room's photo numbers). Compare bedding, headboard, wall color, windows, and layout before deciding two bedroom photos are different rooms.",
+    "- Do NOT fold two rooms together just because the beds are the same size: two bedrooms can both have a king bed. A different bed frame/headboard (four-poster/pillars vs plain), different linens or pillow arrangement, different nightstands or windows = DIFFERENT rooms, each with its own entry.",
     "- Beds: count only real beds visible in the photos. Types: KING, QUEEN, DOUBLE, TWIN, SOFA, BUNK. Two twins side by side = {\"type\":\"TWIN\",\"quantity\":2}. A sofa/daybed/futon in a living area is NOT a bedroom — skip it.",
     "- ensuiteFeatures: fill ONLY when a photo of that bedroom visibly shows its ATTACHED bathroom (open door / pass-through into the bathroom from the bedroom shot). Otherwise use []. Never infer an en-suite you cannot see.",
     "- Bathroom features (fixed vocabulary): walk-in-shower (glass/open shower, NO tub under the head), shower-tub-combo (shower head over a tub), soaking-tub (standalone tub, no shower head over it), jetted-tub (visible jets), rain-shower (ceiling-mounted head), double-vanity (two sinks).",
