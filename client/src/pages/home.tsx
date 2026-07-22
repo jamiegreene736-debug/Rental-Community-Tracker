@@ -3757,6 +3757,25 @@ function AdminDashboard() {
   // receipt; the OTA delivery path de-dupes so the guest's channel is never
   // double-posted (an already-delivered copy is reused).
   const [resendingRefundFor, setResendingRefundFor] = useState<string | null>(null);
+  // Permanently dismiss one refund-attention row (server-persisted, all
+  // devices). Confirm first: dismissing silences a money alert without
+  // resending anything.
+  const dismissRefundIssueMutation = useMutation({
+    mutationFn: async (token: string) => {
+      const r = await apiRequest("POST", `/api/inbox/guest-receipts/${encodeURIComponent(token)}/dismiss-attention`, {});
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.message ?? err.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/revenue-30-days"] });
+      toast({ title: "Alert dismissed", description: "This refund alert won't show again on any device." });
+    },
+    onError: (e: any) => toast({ title: "Dismiss failed", description: e.message, variant: "destructive" }),
+  });
+
   const resendRefundReceiptMutation = useMutation({
     mutationFn: async (reservationId: string) => {
       // Direct fetch, NOT apiRequest: apiRequest throws on EVERY non-2xx, which
@@ -4286,15 +4305,35 @@ function AdminDashboard() {
                               </span>
                             )}
                           </div>
-                          <Button
-                            size="sm"
-                            variant="destructive"
-                            disabled={resendRefundReceiptMutation.isPending && resendingRefundFor === issue.reservationId}
-                            onClick={() => resendRefundReceiptMutation.mutate(issue.reservationId)}
-                            data-testid={`button-resend-refund-${issue.token}`}
-                          >
-                            {resendRefundReceiptMutation.isPending && resendingRefundFor === issue.reservationId ? "Resending…" : "Resend to guest"}
-                          </Button>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              disabled={resendRefundReceiptMutation.isPending && resendingRefundFor === issue.reservationId}
+                              onClick={() => resendRefundReceiptMutation.mutate(issue.reservationId)}
+                              data-testid={`button-resend-refund-${issue.token}`}
+                            >
+                              {resendRefundReceiptMutation.isPending && resendingRefundFor === issue.reservationId ? "Resending…" : "Resend to guest"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="text-muted-foreground hover:text-foreground"
+                              disabled={dismissRefundIssueMutation.isPending}
+                              onClick={() => {
+                                if (
+                                  window.confirm(
+                                    `Dismiss this alert for ${issue.guestName || "the guest"}'s ${formatCurrency(issue.amount)} refund permanently?\n\nNothing will be resent — the guest will NOT be notified through this receipt. The alert will never show again on any device.`,
+                                  )
+                                ) {
+                                  dismissRefundIssueMutation.mutate(issue.token);
+                                }
+                              }}
+                              data-testid={`button-dismiss-refund-${issue.token}`}
+                            >
+                              Dismiss
+                            </Button>
+                          </div>
                         </div>
                       ))}
                     </div>
