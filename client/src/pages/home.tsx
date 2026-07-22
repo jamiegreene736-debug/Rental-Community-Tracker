@@ -7562,7 +7562,12 @@ function AdminDashboard() {
                         <div key={`${m.listingUrl}-${i}`} className="flex gap-3 items-start" data-testid={`photo-review-match-${propertyId}-${i}`}>
                           {m.photoUrl ? (
                             <a href={m.photoUrl} target="_blank" rel="noreferrer" title="Open our photo full size">
-                              <img src={m.photoUrl} alt="Our photo that matched" className="h-16 w-16 rounded object-cover border" />
+                              <img
+                                src={m.photoUrl}
+                                alt="Our photo that matched"
+                                className="h-16 w-16 rounded object-cover border"
+                                onError={(e) => { const a = e.currentTarget.closest("a"); if (a) { a.style.display = "none"; } else { e.currentTarget.style.display = "none"; } }}
+                              />
                             </a>
                           ) : null}
                           <div className="min-w-0 flex-1 space-y-1">
@@ -7787,6 +7792,7 @@ function AdminDashboard() {
                                               title={photoFilenameFromMatchUrl(p) ?? p}
                                               loading="lazy"
                                               className="h-12 w-12 rounded border border-red-200 object-cover dark:border-red-900"
+                                              onError={(e) => { e.currentTarget.style.display = "none"; }}
                                             />
                                           ))}
                                           {groupPhotos.length > 8 ? (
@@ -7848,6 +7854,7 @@ function AdminDashboard() {
                                                     title={photoFilenameFromMatchUrl(p) ?? p}
                                                     loading="lazy"
                                                     className="h-9 w-9 rounded border border-red-200 object-cover dark:border-red-900"
+                                                    onError={(e) => { e.currentTarget.style.display = "none"; }}
                                                   />
                                                 ))}
                                                 {link.matchedPhotoUrls.length > 4 ? (

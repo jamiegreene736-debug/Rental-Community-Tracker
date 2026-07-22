@@ -241,4 +241,15 @@ check(
   homeSrc.includes("photoMatchExceptionSets.get(f)"),
 );
 
+// ── 2026-07-22: _pending_ temp-name scan guard + stale-thumbnail degrade ──
+check(
+  "scanner label candidates exclude _-prefixed pipeline temp names (a scan racing a hydration must not stamp _pending_NNN.jpg photoUrls)",
+  scannerSrc.includes('!l.filename.startsWith("_")') && scannerSrc.includes('!l.filename.startsWith(".")'),
+);
+check(
+  "match thumbnails hide themselves on a broken/stale photoUrl instead of rendering a broken-image icon",
+  (homeSrc.match(/onError=\{\(e\) => \{ (?:const a = )?e\.currentTarget/g)?.length ?? 0) >= 2 &&
+    homeSrc.includes('e.currentTarget.style.display = "none"'),
+);
+
 console.log("photo-listing-decision: all assertions passed");
