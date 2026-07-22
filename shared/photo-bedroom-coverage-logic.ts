@@ -309,6 +309,15 @@ function clusterMentionsMultipleBeds<T extends BedroomClusterInput>(cluster: T[]
     || /\b(twin|queen|king|double|full)\s+beds\b/.test(joined);
 }
 
+/** Explicit room number from captions ("Bedroom 2 — King Bed" → 2), null when absent. */
+function clusterBedroomNumber<T extends BedroomClusterInput>(cluster: T[]): number | null {
+  const joined = clusterCaptions(cluster).join(" ");
+  const m = joined.match(/\bbedroom\s+(\d+)\b/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 /** Are two bedroom clusters confidently the SAME physical room (different angles)? */
 export function bedroomClustersSameRoom<T extends BedroomClusterInput>(a: T[], b: T[]): boolean {
   const aRole = clusterRoomRole(a);
@@ -316,13 +325,26 @@ export function bedroomClustersSameRoom<T extends BedroomClusterInput>(a: T[], b
   // Never merge a master with a guest room.
   if (aRole && bRole && aRole !== bRole) return false;
 
+  // Explicit room numbers are per-room labeler output: same number = same room,
+  // different numbers = provably different rooms regardless of bed type.
+  const aNum = clusterBedroomNumber(a);
+  const bNum = clusterBedroomNumber(b);
+  if (aNum != null && bNum != null) return aNum === bNum;
+
   // Two "master"/"primary" shots are almost always the same master bedroom.
   if (aRole === "master" && bRole === "master") return true;
 
   const aType = clusterBedTypeLabel(a);
   const bType = clusterBedTypeLabel(b);
-  // Identical specific bed type → same room (e.g. both "Two Twin Beds").
-  if (aType && bType && aType.toLowerCase() === bType.toLowerCase()) return true;
+  // Identical bed type is ONLY same-room evidence for distinctive MULTI-bed
+  // layouts (both "Two Twin Beds", both bunks). A shared SINGULAR bed size —
+  // two "King Bed" clusters — is NOT: units routinely have two king bedrooms
+  // that differ only in details captions can't carry (four-poster vs plain
+  // headboard, different linens/pillows). Those must stay separate here and be
+  // resolved by the same-room VISION pass, which reads the pixels.
+  if (aType && bType && aType.toLowerCase() === bType.toLowerCase() && isMultiBedType(aType)) {
+    return true;
+  }
 
   // One side names a specific multi-bed type, the other generically says it has
   // multiple beds ("Two Beds") — the common "Twin Beds" + "Two Beds" pairing.

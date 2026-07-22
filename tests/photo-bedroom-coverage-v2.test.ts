@@ -225,7 +225,9 @@ check("mergeBedroomClustersByCaption is a no-op at/under expected count",
     3,
   ).mergedCount === 0);
 
-// Over-count with a duplicate King: merge the dup King, never the distinct types.
+// Over-count with two King captions carrying DIFFERENT room numbers: those are
+// provably different rooms — caption merge must NOT fold them (the diversity-
+// aware cap + the vision same-room fold own any trimming past expected count).
 const mergeKeepsDistinct = mergeBedroomClustersByCaption(
   [
     [{ id: "a", caption: "Bedroom 1 King" }],
@@ -235,10 +237,8 @@ const mergeKeepsDistinct = mergeBedroomClustersByCaption(
   ],
   3,
 );
-check("mergeBedroomClustersByCaption stops at expected and keeps distinct bed types",
-  mergeKeepsDistinct.clusters.length === 3
-  && mergeKeepsDistinct.clusters.some((c) => /queen/i.test(c.map((x) => x.caption).join(" ")))
-  && mergeKeepsDistinct.clusters.some((c) => /twin/i.test(c.map((x) => x.caption).join(" "))));
+check("mergeBedroomClustersByCaption never folds numbered rooms just for a shared bed type",
+  mergeKeepsDistinct.clusters.length === 4 && mergeKeepsDistinct.mergedCount === 0);
 
 const sameRoomMerge = mergeBedroomClustersSameRoom([
   [{ id: "a", caption: "Two Queens Bedroom" }],
@@ -248,13 +248,32 @@ const sameRoomMerge = mergeBedroomClustersSameRoom([
 check("mergeBedroomClustersSameRoom folds duplicate Two Queens clusters",
   sameRoomMerge.clusters.length === 2 && sameRoomMerge.mergedCount === 1);
 
-const kingAngles = mergeBedroomClustersSameRoom([
+// THE clumped-kings regression (2026-07-22): a unit with TWO separate king
+// bedrooms (one four-poster, one plain — different linens) plus a twin room.
+// A shared SINGULAR bed size is NOT same-room evidence — the caption layers
+// must keep the kings apart and leave the judgment to the vision pass.
+const twoKingUnit = mergeBedroomClustersSameRoom([
   [{ id: "a", caption: "King Bedroom" }],
   [{ id: "b", caption: "King Bedroom With View" }],
-  [{ id: "c", caption: "Queen Bedroom" }],
+  [{ id: "c", caption: "Twin Bedroom" }],
 ]);
-check("mergeBedroomClustersSameRoom folds duplicate King clusters",
-  kingAngles.clusters.length === 2 && kingAngles.mergedCount === 1);
+check("mergeBedroomClustersSameRoom does NOT clump two singular King clusters",
+  twoKingUnit.clusters.length === 3 && twoKingUnit.mergedCount === 0);
+check("bedroomClustersSameRoom: two King Bed clusters are NOT the same room",
+  !bedroomClustersSameRoom(
+    [{ id: "a", caption: "King Bedroom" }],
+    [{ id: "b", caption: "King Bedroom" }],
+  ));
+check("bedroomClustersSameRoom: same explicit bedroom number IS the same room",
+  bedroomClustersSameRoom(
+    [{ id: "a", caption: "Bedroom 2 — King Bed" }],
+    [{ id: "b", caption: "Bedroom 2 — Alt View" }],
+  ));
+check("bedroomClustersSameRoom: different bedroom numbers never merge (even same type)",
+  !bedroomClustersSameRoom(
+    [{ id: "a", caption: "Bedroom 2 — King Bed" }],
+    [{ id: "b", caption: "Bedroom 3 — King Bed" }],
+  ));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
