@@ -692,7 +692,14 @@ export async function runPhotoListingCheckForFolder(
   }
 
   const labels = await storage.getPhotoLabelsByFolder(folder);
-  let visible: PhotoCandidate[] = labels.filter((l) => !l.hidden).sort((a, b) => a.filename.localeCompare(b.filename));
+  // Exclude "_"-prefixed files (the photo pipeline's _pending_NNN.jpg download temp names) and
+  // dotfiles — same rule listDiskPhotoCandidates applies. A scan that races a folder hydration
+  // can otherwise see transient label rows for temp names and stamp match photoUrls that 404
+  // after the pipeline's rename step (2026-07-22: the broken thumbnails in the duplicate-photos
+  // popup were exactly this — draft-20-unit-a matches pointing at _pending_02x.jpg).
+  let visible: PhotoCandidate[] = labels
+    .filter((l) => !l.hidden && !l.filename.startsWith("_") && !l.filename.startsWith("."))
+    .sort((a, b) => a.filename.localeCompare(b.filename));
   if (visible.length === 0) {
     visible = await listDiskPhotoCandidates(folder);
   }
