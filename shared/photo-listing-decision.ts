@@ -1,6 +1,8 @@
-// Pure, zero-dependency per-platform PHOTO verdict for the photo-listing reverse-image scanner.
-// Extracted from server/photo-listing-scanner.ts so the Balanced detection contract (2026-06-29)
-// is unit-testable without the scanner's network / DB / disk dependencies.
+// Pure per-platform PHOTO verdict for the photo-listing reverse-image scanner (only other pure
+// shared modules imported — no Node/DB/React). Extracted from server/photo-listing-scanner.ts so
+// the Balanced detection contract (2026-06-29) is unit-testable without the scanner's
+// network / DB / disk dependencies.
+import { normalizeListingUrlForMatch } from "./photo-match-exceptions";
 //
 // A platform (Airbnb / VRBO / Booking) is judged "found" by photos when EITHER:
 //   1. >= minMatches distinct photos were FULLY verified — community-compatible AND the unit number
@@ -69,10 +71,33 @@ export function subThresholdVerifiedMatches(
   status: string | null | undefined,
   matches: Array<{ verified?: boolean } | null | undefined> | null | undefined,
 ): number {
-  if (status === "found") return 0; // already red — the review tier only covers sub-threshold rows
-  let n = 0;
+  return subThresholdVerifiedMatchRows(status, matches).length;
+}
+
+// Row-level variant (2026-07-22): returns the actual verified sub-threshold match rows so the
+// dashboard's review modal can show the operator WHICH photo matched WHICH listing. Accepts an
+// optional set of operator-confirmed exception keys (normalizeListingUrlForMatch output — the
+// photo-match-exceptions allowlist): a match whose listing URL the operator already reviewed and
+// confirmed as "not a match" is excluded, so the amber badge greens IMMEDIATELY after confirming
+// (the stored scan row still heals through the real scanner rescan, which suppresses the same
+// URLs at the authorized-URL seam). Matches with an unparseable listing URL are never excluded —
+// fail-loud: an exception can only silence the exact listing the operator saw.
+export function subThresholdVerifiedMatchRows<
+  T extends { verified?: boolean; listingUrl?: string | null },
+>(
+  status: string | null | undefined,
+  matches: Array<T | null | undefined> | null | undefined,
+  exceptedNormalizedUrls?: Set<string> | null,
+): T[] {
+  if (status === "found") return []; // already red — the review tier only covers sub-threshold rows
+  const out: T[] = [];
   for (const m of matches ?? []) {
-    if (m && m.verified === true) n += 1;
+    if (!m || m.verified !== true) continue;
+    if (exceptedNormalizedUrls && exceptedNormalizedUrls.size > 0) {
+      const normalized = normalizeListingUrlForMatch(m.listingUrl);
+      if (normalized && exceptedNormalizedUrls.has(normalized)) continue;
+    }
+    out.push(m);
   }
-  return n;
+  return out;
 }

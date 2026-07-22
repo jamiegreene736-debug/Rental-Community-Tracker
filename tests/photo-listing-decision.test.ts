@@ -5,6 +5,7 @@ import {
   decidePlatformStatus,
   photoListingScanWasInconclusive,
   subThresholdVerifiedMatches,
+  subThresholdVerifiedMatchRows,
 } from "../shared/photo-listing-decision";
 
 function check(label: string, ok: boolean) {
@@ -131,6 +132,34 @@ check(
   subThresholdVerifiedMatches("unknown", [{ verified: true }]) === 1,
 );
 
+// ── subThresholdVerifiedMatchRows (2026-07-22: rows + operator exception filter) ──
+console.log("subThresholdVerifiedMatchRows:");
+
+const rowA = { verified: true, listingUrl: "https://www.vrbo.com/p123?x=1" };
+const rowB = { verified: true, listingUrl: "https://vrbo.com/p999" };
+check(
+  "returns the verified rows themselves (count fn delegates)",
+  subThresholdVerifiedMatchRows("clean", [rowA, { verified: false, listingUrl: "https://vrbo.com/p2" }]).length === 1 &&
+    subThresholdVerifiedMatchRows("clean", [rowA])[0] === rowA,
+);
+check(
+  "an operator-confirmed exception (normalized URL) excludes that match — www/query variants collapse",
+  subThresholdVerifiedMatchRows("clean", [rowA, rowB], new Set(["vrbo.com/p123"])).length === 1 &&
+    subThresholdVerifiedMatchRows("clean", [rowA, rowB], new Set(["vrbo.com/p123"]))[0] === rowB,
+);
+check(
+  "all matches excepted => zero rows (badge greens)",
+  subThresholdVerifiedMatchRows("clean", [rowA, rowB], new Set(["vrbo.com/p123", "vrbo.com/p999"])).length === 0,
+);
+check(
+  "a match with an unparseable listing URL is never silenced by exceptions (fail-loud)",
+  subThresholdVerifiedMatchRows("clean", [{ verified: true, listingUrl: "not-a-url" }], new Set(["vrbo.com/p123"])).length === 1,
+);
+check(
+  "found platform still returns no review rows (red wins)",
+  subThresholdVerifiedMatchRows("found", [rowA]).length === 0,
+);
+
 // ── Source guards: the wiring these helpers exist for must not drift ──
 console.log("source guards:");
 
@@ -191,7 +220,25 @@ check(
 
 check(
   "dashboard derives the amber review badge from the shared helper (status stays clean — no popup)",
-  homeSrc.includes("subThresholdVerifiedMatches(row.airbnbStatus, row.airbnbMatches)"),
+  homeSrc.includes("subThresholdVerifiedMatchRows(row.airbnbStatus, row.airbnbMatches") &&
+    homeSrc.includes("subThresholdVerifiedMatchRows(row.vrboStatus, row.vrboMatches") &&
+    homeSrc.includes("subThresholdVerifiedMatchRows(row.bookingStatus, row.bookingMatches"),
+);
+
+// ── 2026-07-22: amber badge → review modal → match-exception wiring ──
+check(
+  "amber review badge is clickable and opens the review modal",
+  homeSrc.includes("setPhotoReviewModal({ propertyId: property.id") &&
+    homeSrc.includes("onClick={isReview ?"),
+);
+check(
+  "confirming 'not a match' saves a match exception then deep-rescans the folder (heals through the real scanner)",
+  homeSrc.includes('"/api/photo-listing-check/match-exceptions"') &&
+    homeSrc.includes("photoScanMutation.mutate({ folders: [vars.folder]"),
+);
+check(
+  "the badge computation consults the operator exception allowlist so a confirmed listing greens immediately",
+  homeSrc.includes("photoMatchExceptionSets.get(f)"),
 );
 
 console.log("photo-listing-decision: all assertions passed");

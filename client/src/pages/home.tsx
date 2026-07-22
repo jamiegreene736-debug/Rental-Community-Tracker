@@ -88,7 +88,8 @@ import {
 import { getActiveUnitBuilders, getAllUnitBuilders, getMultiUnitPropertyIds, getUnitBuilderByPropertyId } from "@/data/unit-builder-data";
 import { occupancyForBedrooms } from "@/data/bedding-config";
 import { isScannableFolder, replacementPhotoFolderRef } from "@shared/photo-folder-utils";
-import { subThresholdVerifiedMatches } from "@shared/photo-listing-decision";
+import { subThresholdVerifiedMatchRows } from "@shared/photo-listing-decision";
+import { exceptionSetForFolder, type PhotoMatchExceptionStore } from "@shared/photo-match-exceptions";
 import { replacementPhotoFolderForUnit } from "@shared/unit-swap-photos";
 import { inferCommunityStreetAddress } from "@shared/community-addresses";
 import { UnitReplacementFlow, findLiveReplacementJobRef, type ReplacementUnitData } from "@/components/unit-replacement-flow";
@@ -2677,6 +2678,22 @@ function AdminDashboard() {
     refetchInterval: () => Date.now() < photoScanPollUntil ? (photoScanModalOpen || duplicatePhotoWarningOpen ? 4_000 : 10_000) : false,
   });
 
+  // Operator-confirmed match exceptions (photo_match_exceptions.v1) — the same allowlist the
+  // scanner suppresses at scan time. The dashboard consults it so a just-confirmed "not a match"
+  // greens the amber review badge immediately, before the healing rescan lands.
+  const { data: photoMatchExceptionsData } = useQuery<PhotoMatchExceptionStore>({
+    queryKey: ["/api/photo-listing-check/match-exceptions"],
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const photoMatchExceptionSets = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const folder of Object.keys(photoMatchExceptionsData ?? {})) {
+      map.set(folder, exceptionSetForFolder(photoMatchExceptionsData!, folder));
+    }
+    return map;
+  }, [photoMatchExceptionsData]);
+
   type PhotoCommunityStatusResponse = {
     statuses: Record<string, PhotoCommunityRowStatus>;
     activeJob: BulkPhotoCommunityJob | null;
@@ -2919,9 +2936,12 @@ function AdminDashboard() {
         addMatchedUnits("vrbo", f, row.vrboMatches?.length ?? 0);
         addMatchedUnits("booking", f, row.bookingMatches?.length ?? 0);
         // Review tier: verified matches on a NOT-found platform (one photo short of the red bar).
-        addReviewUnits("airbnb", f, subThresholdVerifiedMatches(row.airbnbStatus, row.airbnbMatches));
-        addReviewUnits("vrbo", f, subThresholdVerifiedMatches(row.vrboStatus, row.vrboMatches));
-        addReviewUnits("booking", f, subThresholdVerifiedMatches(row.bookingStatus, row.bookingMatches));
+        // Operator-confirmed exceptions are excluded so a reviewed "not a match" greens the badge
+        // immediately (the stored row still heals through the real rescan).
+        const exceptedForFolder = photoMatchExceptionSets.get(f);
+        addReviewUnits("airbnb", f, subThresholdVerifiedMatchRows(row.airbnbStatus, row.airbnbMatches, exceptedForFolder).length);
+        addReviewUnits("vrbo", f, subThresholdVerifiedMatchRows(row.vrboStatus, row.vrboMatches, exceptedForFolder).length);
+        addReviewUnits("booking", f, subThresholdVerifiedMatchRows(row.bookingStatus, row.bookingMatches, exceptedForFolder).length);
         const foundPlatforms: DuplicatePhotoPlatform[] = [];
         if (row.airbnbStatus === "found") foundPlatforms.push("airbnb");
         if (row.vrboStatus === "found") foundPlatforms.push("vrbo");
@@ -2952,7 +2972,7 @@ function AdminDashboard() {
       out.set(p.id, agg);
     }
     return out;
-  }, [allProperties, activePhotoFolderByOriginal, communityDraftsDataForRows, photoCheckByFolder]);
+  }, [allProperties, activePhotoFolderByOriginal, communityDraftsDataForRows, photoCheckByFolder, photoMatchExceptionSets]);
 
   // Duplicate-photos warning popup — one row per unit folder whose photos
   // were FOUND on Airbnb / VRBO / Booking.com. De-duped by folder because a
@@ -3900,6 +3920,43 @@ function AdminDashboard() {
       }
       toast({ title: "Rescan failed to start", description: e.message, variant: "destructive" });
     },
+  });
+
+  // Amber REVIEW badge modal (2026-07-22): clicking an amber A!/V!/B! badge opens a modal showing
+  // each sub-threshold verified match (our photo + the flagged listing) so the operator can confirm
+  // "not a match". Confirming saves the same per-(folder, listing URL) exception the red popup's
+  // "This listing is OK" button uses — the badge greens immediately (client-side exception filter)
+  // and a deep rescan heals the stored row through the real scanner path.
+  const [photoReviewModal, setPhotoReviewModal] = useState<{
+    propertyId: number;
+    propertyName: string;
+    platform: "airbnb" | "vrbo" | "booking";
+    platformName: string;
+  } | null>(null);
+  const confirmReviewNotMatchMutation = useMutation({
+    mutationFn: async (vars: { folder: string; url: string; title: string; propertyName: string }) => {
+      const r = await apiRequest("POST", "/api/photo-listing-check/match-exceptions", {
+        folder: vars.folder,
+        url: vars.url,
+        title: vars.title,
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error ?? `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    onSuccess: (_data, vars) => {
+      // Instant green: the badge computation excludes excepted URLs client-side.
+      queryClient.invalidateQueries({ queryKey: ["/api/photo-listing-check/match-exceptions"] });
+      toast({
+        title: "Marked as not a match",
+        description: "This exact listing is now ignored for this unit's future scans. Rescanning to heal the stored scan row.",
+      });
+      // Heal the stored row through the REAL scanner (the exception suppresses the URL at scan time).
+      photoScanMutation.mutate({ folders: [vars.folder], label: vars.propertyName });
+    },
+    onError: (e: any) => toast({ title: "Could not save the confirmation", description: e.message, variant: "destructive" }),
   });
 
   // "I confirm this listing is okay — stop warning about it" (operator,
@@ -6571,12 +6628,20 @@ function AdminDashboard() {
                                 it.status === "clean" ? `${it.name}: no matches (last checked ${stamp})` :
                                 it.status === "unknown" ? `${it.name}: inconclusive, not a match (${stamp})${errorPreview ? ` — ${errorPreview}` : ""}` :
                                 `${it.name}: not checked yet`;
+                              // Amber review badges are CLICKABLE: the modal shows the matched
+                              // photo + flagged listing so the operator can confirm "not a match"
+                              // (saves a scan exception + greens the badge). Other tones stay inert.
+                              const platformKey = it.letter === "A" ? "airbnb" : it.letter === "V" ? "vrbo" : "booking";
                               return (
                                 <span
                                   key={it.letter}
-                                  title={tip}
-                                  className="inline-flex items-center justify-center h-[18px] px-0.5 rounded text-[8px] font-bold leading-none"
+                                  title={isReview ? `${tip} — click to review` : tip}
+                                  role={isReview ? "button" : undefined}
+                                  tabIndex={isReview ? 0 : undefined}
+                                  className={`inline-flex items-center justify-center h-[18px] px-0.5 rounded text-[8px] font-bold leading-none ${isReview ? "cursor-pointer ring-1 ring-amber-300 hover:brightness-110" : ""}`}
                                   style={{ background: p.bg, color: "white", minWidth: 20 }}
+                                  onClick={isReview ? () => setPhotoReviewModal({ propertyId: property.id, propertyName: property.name, platform: platformKey as "airbnb" | "vrbo" | "booking", platformName: it.name }) : undefined}
+                                  onKeyDown={isReview ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setPhotoReviewModal({ propertyId: property.id, propertyName: property.name, platform: platformKey as "airbnb" | "vrbo" | "booking", platformName: it.name }); } } : undefined}
                                   data-testid={`photo-match-${it.name.toLowerCase().replace(/\./g, "")}-${property.id}`}
                                 >
                                   {it.letter}{p.glyph}
@@ -7450,6 +7515,105 @@ function AdminDashboard() {
               Dismiss
             </Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Amber photo-review modal (2026-07-22): opened by clicking an amber A!/V!/B! badge in the
+          Photos column. Shows each sub-threshold VERIFIED match (our photo thumbnail + the flagged
+          listing link) so the operator can rule: "Not a match" saves a per-(folder, listing URL)
+          scan exception (the same allowlist as the red popup's "This listing is OK"), greens the
+          badge immediately, and deep-rescans the folder so the stored row heals through the real
+          scanner. "It IS a match" leaves the amber flag — remediation is the Replace-photos flow. */}
+      <Dialog open={!!photoReviewModal} onOpenChange={(open) => { if (!open) setPhotoReviewModal(null); }}>
+        <DialogContent className="max-w-xl">
+          {(() => {
+            if (!photoReviewModal) return null;
+            const { propertyId, propertyName, platform, platformName } = photoReviewModal;
+            const agg = photoByProperty.get(propertyId);
+            const folders = agg?.folders ?? [];
+            const rowsByFolder = folders.map((folder) => {
+              const row = photoCheckByFolder.get(folder);
+              if (!row) return { folder, matches: [] as PhotoMatchRow[] };
+              const status = platform === "airbnb" ? row.airbnbStatus : platform === "vrbo" ? row.vrboStatus : row.bookingStatus;
+              const matches = platform === "airbnb" ? row.airbnbMatches : platform === "vrbo" ? row.vrboMatches : row.bookingMatches;
+              return {
+                folder,
+                matches: subThresholdVerifiedMatchRows(status, matches ?? [], photoMatchExceptionSets.get(folder)),
+              };
+            }).filter((r) => r.matches.length > 0);
+            const total = rowsByFolder.reduce((n, r) => n + r.matches.length, 0);
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2 text-amber-700 dark:text-amber-300">
+                    <AlertTriangle className="h-4 w-4" /> Review photo match — {propertyName} · {platformName}
+                  </DialogTitle>
+                  <DialogDescription>
+                    {total > 0
+                      ? `${total} photo${total === 1 ? "" : "s"} verified on a ${platformName} listing — below the 2-photo red threshold, so a human decides. If it's a false match (look-alike unit, shared building shot), confirm below and that exact listing is ignored for this unit's future scans.`
+                      : "All flagged matches for this platform have been reviewed — the badge is green. A deep rescan is healing the stored scan row in the background."}
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-4 max-h-[55vh] overflow-y-auto">
+                  {rowsByFolder.map(({ folder, matches }) => (
+                    <div key={folder} className="rounded border border-amber-200 dark:border-amber-800 p-3 space-y-3">
+                      <div className="text-xs font-semibold text-muted-foreground">{folder}</div>
+                      {matches.map((m, i) => (
+                        <div key={`${m.listingUrl}-${i}`} className="flex gap-3 items-start" data-testid={`photo-review-match-${propertyId}-${i}`}>
+                          {m.photoUrl ? (
+                            <a href={m.photoUrl} target="_blank" rel="noreferrer" title="Open our photo full size">
+                              <img src={m.photoUrl} alt="Our photo that matched" className="h-16 w-16 rounded object-cover border" />
+                            </a>
+                          ) : null}
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="text-xs font-medium truncate">{m.title || "Flagged listing"}</div>
+                            <a
+                              href={m.listingUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="block text-xs text-red-700 dark:text-red-400 underline truncate"
+                            >
+                              {m.listingUrl}
+                            </a>
+                            <div className="flex gap-2 pt-1">
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="h-7 bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
+                                disabled={confirmReviewNotMatchMutation.isPending}
+                                onClick={() => confirmReviewNotMatchMutation.mutate({
+                                  folder,
+                                  url: m.listingUrl,
+                                  title: m.title || "",
+                                  propertyName,
+                                })}
+                                data-testid={`button-review-not-match-${propertyId}-${i}`}
+                              >
+                                ✓ Not a match — ignore this listing
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-xs"
+                                onClick={() => setPhotoReviewModal(null)}
+                                title="Keep the amber flag — use Replace photos if the unit's gallery needs to change"
+                              >
+                                It IS a match — keep flagged
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+                <div className="flex justify-end">
+                  <Button type="button" variant="ghost" size="sm" onClick={() => setPhotoReviewModal(null)}>Close</Button>
+                </div>
+              </>
+            );
+          })()}
         </DialogContent>
       </Dialog>
 
