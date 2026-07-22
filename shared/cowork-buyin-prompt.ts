@@ -483,14 +483,17 @@ Projected loss = (combined all-in cost) − ${netRevenueLabel}.
    - LOSS: the cheapest qualifying same-community ${n === 1 ? "pick" : "set"} you CAN find is a LOSS over the $${maxLoss} cap (see the profit guard above).
    In that city-wide search, look for ${n === 1
         ? `a cheaper qualifying same-bedroom ${unitType ?? "listing"}`
-        : `TWO qualifying ${bedroomPlan} ${unitType ?? "listing"}s that sit in the SAME complex as each other`} and take the CHEAPEST qualifying ${n === 1 ? "unit" : "same-complex pair"} that stays within the $${maxLoss} loss cap.${n === 1 ? "" : `
-   The PAIR RULE still holds — the two city-wide units must share ONE complex
-   (ideally one building); a cheaper but scattered cross-complex pair does NOT
-   qualify.`}`
+        : `TWO qualifying ${bedroomPlan} ${unitType ?? "listing"}s that sit in the SAME community/complex as each other`} and take the CHEAPEST qualifying ${n === 1 ? "unit" : "same-complex pair"} that stays within the $${maxLoss} loss cap.${n === 1 ? "" : `
+   The PAIR RULE still holds — the two city-wide units must share ONE
+   community/complex (ideally the SAME BUILDING); a cheaper but scattered
+   cross-complex pair does NOT qualify.`}`
     : `2. **City-wide fallback.** If you cannot find a qualifying listing for ${n === 1 ? "the unit" : "one and/or more unit slots"}
    inside the resort/community, widen to a
    **city-wide search of ${effectiveCityWideLabel}** — any qualifying same-bedroom
-   ${unitType ?? "listing"} in that city.`;
+   ${unitType ?? "listing"} in that city.${n === 1 ? "" : `
+   The PAIR RULE still holds — the city-wide units must share ONE
+   community/complex (ideally the SAME BUILDING); a cheaper but scattered
+   cross-complex set does NOT qualify.`}`;
 
   const stopRungLossTail = profitGuardOn
     ? ` If the CHEAPEST qualifying ${n === 1 ? "unit" : "same-complex pair"} anywhere in the

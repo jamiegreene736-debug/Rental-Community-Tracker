@@ -241,7 +241,7 @@ check(
 );
 check(
   "loss guard: rollback hunts a same-complex pair of the required bedroom size",
-  lossPrompt.includes("TWO qualifying 3BR + 3BR listings that sit in the SAME complex as each other") &&
+  lossPrompt.includes("TWO qualifying 3BR + 3BR listings that sit in the SAME community/complex as each other") &&
     lossPrompt.includes("take the CHEAPEST qualifying same-complex pair that stays within the $100 loss cap") &&
     lossPrompt.includes("The PAIR RULE still holds"),
 );
@@ -294,6 +294,19 @@ check(
 check(
   "loss guard: guard-off output is byte-identical to omitting netRevenue",
   guardOffZero === prompt,
+);
+// Operator 2026-07-22: the city-wide units must sit in the same community/
+// complex/building EVEN when the profit guard is off — the coverage-driven
+// city-wide fallback carries the pair rule too (multi-unit sets only).
+check(
+  "city-wide pair rule: guard-off multi-unit fallback still demands one community/complex",
+  prompt.includes("The PAIR RULE still holds — the city-wide units must share ONE") &&
+    prompt.includes("community/complex (ideally the SAME BUILDING)"),
+);
+check(
+  "city-wide pair rule: guard-on rollback pair shares one community/complex (ideally same building)",
+  lossPrompt.includes("must share ONE") &&
+    lossPrompt.includes("community/complex (ideally the SAME BUILDING)"),
 );
 
 // ── buildCoworkCheckoutPrompt: the separate BOOK-ONLY prompt ─────────────────
