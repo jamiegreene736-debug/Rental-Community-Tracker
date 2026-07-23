@@ -16,6 +16,18 @@ import {
   consumePhotoPersistProof,
   issuePhotoPersistProof,
 } from "../server/photo-persist-proof";
+import { dedupeZillowPhotoVariants } from "../server/zillow-photo-variants";
+
+{
+  const first = "https://photos.zillowstatic.com/fp/faf09381fdbedb785e989ef091fb3f7d-cc_ft_576.jpg";
+  const largerFirst = "https://photos.zillowstatic.com/fp/faf09381fdbedb785e989ef091fb3f7d-cc_ft_1536.webp";
+  const second = "https://photos.zillowstatic.com/fp/92a5ab6fd88185bfa8fb22d7a83ec7de-p_c.jpg";
+  assert.deepEqual(
+    dedupeZillowPhotoVariants([first, second, largerFirst, `${second}?width=960`]),
+    [largerFirst, second],
+    "Zillow render variants collapse while retaining the first carousel position",
+  );
+}
 
 // Gallery metadata planning preserves human rows for still-live filenames,
 // removes rows for departed scrape photos, and never removes staged variants.

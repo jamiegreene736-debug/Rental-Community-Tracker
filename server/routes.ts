@@ -442,6 +442,7 @@ import {
   unitGalleryMaxKeep,
   type UnitPhotoResolverProof,
 } from "./unit-photo-resolver";
+import { dedupeZillowPhotoVariants } from "./zillow-photo-variants";
 import { createKeepBetterScrapeCache, createSearchQueryCache } from "./discovery-cache";
 import {
   describeSearchApiQuota,
@@ -3821,37 +3822,9 @@ async function scrapeZillowViaApify(url: string, timeoutMs = 180_000): Promise<{
       walkForPhotosScoped(items[0], found);
     }
 
-    // Hash-dedupe only collapses SIZE VARIANTS of the same photo (same
-    // /fp/<hash>- prefix) — it never discards distinct listing photos,
-    // because Zillow's own photo list is already de-duplicated.
-    const hashRe = /\/fp\/([a-f0-9]{16,})-/i;
-    const byHash = new Map<string, { url: string; score: number; pos: number }>();
-    const scoreForUrl = (u: string): number => {
-      const sizeMatch = u.match(/_(?:cc_ft_|uncropped_scaled_within_)?(\d{3,4})\./i);
-      if (sizeMatch) return parseInt(sizeMatch[1], 10);
-      if (/-p_h\./i.test(u)) return 1200;
-      if (/-p_f\./i.test(u)) return 1024;
-      if (/-p_e\./i.test(u)) return 800;
-      if (/-p_d\./i.test(u)) return 600;
-      return 0;
-    };
-    for (let i = 0; i < found.length; i++) {
-      const u = found[i];
-      const m = u.match(hashRe);
-      if (!m) continue;
-      const hash = m[1];
-      const score = scoreForUrl(u);
-      const prev = byHash.get(hash);
-      if (!prev) {
-        byHash.set(hash, { url: u, score, pos: i });
-      } else if (score > prev.score) {
-        byHash.set(hash, { url: u, score, pos: prev.pos });  // keep original position
-      }
-    }
-    // Sort by original position so Zillow's ordering is preserved.
-    const uniq = Array.from(byHash.values())
-      .sort((a, b) => a.pos - b.pos)
-      .map((v) => v.url);
+    // Collapse only size/format variants of the same /fp/<hash>, retaining
+    // Zillow's first-seen carousel position while choosing the best rendering.
+    const uniq = dedupeZillowPhotoVariants(found);
     console.log(`[scrapeZillow:Apify] ${url} → ${found.length} raw → ${uniq.length} unique photos (facts: ${facts.bedrooms ?? "?"}BR / ${facts.bathrooms ?? "?"}BA)`);
     return { urls: uniq, facts };
   } catch (e: any) {
@@ -5371,6 +5344,11 @@ async function scrapeListingPhotos(
           console.log(`[scrapeZillow] sidecar trigger=${trigger} (apify-photos=${result.urls.length}, bedrooms=${result.facts.bedrooms ?? "?"}, wallet=${sidecarWalletMs}ms)`);
           const sidecar = await scrapeZillowPhotosViaSidecar({
             url: primaryUrl,
+            // The worker harvests src/srcset renderings before returning its
+            // bounded result. Ask for its full 120-URL ceiling so resize
+            // variants cannot consume the first 40 slots before the
+            // server-side hash collapse below sees the later unique photos.
+            maxPhotos: 120,
             walletBudgetMs: sidecarWalletMs,
           });
           // CODEX NOTE (2026-05-05, claude/sidecar-merge): MERGE
@@ -5413,6 +5391,7 @@ async function scrapeListingPhotos(
         console.warn(`[scrapeZillow] sidecar fallback errored: ${e?.message ?? e}`);
       }
     }
+    result.urls = dedupeZillowPhotoVariants(result.urls);
     if (listingFacts) {
       if (result.facts.bedrooms != null) listingFacts.bedrooms = result.facts.bedrooms;
       if (result.facts.bathrooms != null) listingFacts.bathrooms = result.facts.bathrooms;

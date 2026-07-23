@@ -105,7 +105,18 @@ export function buildUnitPhotoResolverProof(input: UnitPhotoProofInput): UnitPho
       .map((fingerprint) => String(fingerprint ?? "").trim().toLowerCase())
       .filter(Boolean),
   ));
-  const distinctFingerprints = contentFingerprints.length > 0 ? contentFingerprints : urlFingerprints;
+  // Content hashes catch identical bytes served from unrelated URLs. Zillow's
+  // stable /fp/<hash> additionally catches one image rendered at different
+  // sizes or formats, whose encoded bytes naturally differ. Do not apply URL
+  // cardinality globally: other CDNs may identify distinct images in queries.
+  const hasZillowPhotoFingerprint = urlFingerprints.some((fingerprint) =>
+    fingerprint.startsWith("zillow-fp:"),
+  );
+  const distinctPhotoCount = contentFingerprints.length > 0
+    ? hasZillowPhotoFingerprint
+      ? Math.min(urlFingerprints.length, contentFingerprints.length)
+      : contentFingerprints.length
+    : urlFingerprints.length;
   const sourceUrl = typeof input.sourceUrl === "string" && input.sourceUrl.trim() ? input.sourceUrl.trim() : null;
   const sourceKey = canonicalListingKey(sourceUrl);
   const requestedBedrooms = positiveIntegerOrNull(input.requestedBedrooms);
@@ -131,8 +142,8 @@ export function buildUnitPhotoResolverProof(input: UnitPhotoProofInput): UnitPho
     issues.push("no-photos");
     selfFix.push("continue candidate search; do not persist an empty gallery");
   }
-  if (distinctFingerprints.length < MIN_INDEPENDENT_UNIT_PHOTOS) {
-    issues.push(`too-few-distinct-photos:${distinctFingerprints.length}`);
+  if (distinctPhotoCount < MIN_INDEPENDENT_UNIT_PHOTOS) {
+    issues.push(`too-few-distinct-photos:${distinctPhotoCount}`);
     selfFix.push(`continue search until at least ${MIN_INDEPENDENT_UNIT_PHOTOS} distinct unit photos are available`);
   }
   if (bedroomMatch === false && !representativeFallback && !relaxedSearch) {
@@ -162,7 +173,7 @@ export function buildUnitPhotoResolverProof(input: UnitPhotoProofInput): UnitPho
     sourceKey,
     foundVia: input.foundVia ?? null,
     photoCount: photos.length,
-    distinctPhotoCount: distinctFingerprints.length,
+    distinctPhotoCount,
     photoFingerprints: urlFingerprints,
     photoContentFingerprints: contentFingerprints,
     requestedBedrooms,

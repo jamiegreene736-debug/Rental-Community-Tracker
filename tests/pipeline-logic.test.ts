@@ -538,6 +538,32 @@ const sparseUnitProof = buildUnitPhotoResolverProof({
 });
 assert.equal(sparseUnitProof.status, "rejected", "duplicate photo variants must not count as independent unit proof");
 assert.equal(sparseUnitProof.distinctPhotoCount, 1, "Zillow photo fingerprints should collapse size variants");
+const resizedContentProof = buildUnitPhotoResolverProof({
+  photos: [
+    { url: "https://photos.zillowstatic.com/fp/abc11111-test.jpg" },
+    { url: "https://photos.zillowstatic.com/fp/abc11111-other-size.webp" },
+    { url: "https://photos.zillowstatic.com/fp/abc11111-third-size.jpg" },
+  ],
+  sourceUrl: "https://www.zillow.com/homedetails/example/123_zpid/",
+  requestedBedrooms: 3,
+  facts: { bedrooms: 3 },
+  contentFingerprints: ["sha256:size-a", "sha256:size-b", "sha256:size-c"],
+});
+assert.equal(resizedContentProof.status, "rejected", "different encodings of one Zillow photo must not pass the distinct-photo floor");
+assert.equal(resizedContentProof.distinctPhotoCount, 1, "URL and byte evidence must both constrain distinctness");
+const queryIdentifiedContentProof = buildUnitPhotoResolverProof({
+  photos: [
+    { url: "https://images.example.com/render?id=one" },
+    { url: "https://images.example.com/render?id=two" },
+    { url: "https://images.example.com/render?id=three" },
+  ],
+  sourceUrl: "https://www.example.com/listing/123",
+  requestedBedrooms: 3,
+  facts: { bedrooms: 3 },
+  contentFingerprints: ["sha256:one", "sha256:two", "sha256:three"],
+});
+assert.equal(queryIdentifiedContentProof.status, "accepted", "non-Zillow CDNs may identify distinct images through query parameters");
+assert.equal(queryIdentifiedContentProof.distinctPhotoCount, 3, "non-Zillow proof must continue to trust distinct content hashes");
 const contentProof = buildUnitPhotoResolverProof({
   photos: [
     { url: "https://cdn-a.example.com/photo-1.jpg" },
