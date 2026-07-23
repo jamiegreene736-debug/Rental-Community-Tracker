@@ -178,5 +178,91 @@ console.log("revenue-projection: baseline fill + on-books split");
   check("first month is the current month", snap.months[0].month === "2026-07", snap.months[0].month);
 }
 
+// ── Phase 2: seasonal baseline from trailing-year stay revenue ────────────
+console.log("revenue-projection: seasonal baseline weighting");
+{
+  // Trailing booking run-rate: $9000 over last 90 days → $100/day.
+  const trailingBookingReservations: ProjectionReservationLike[] = [
+    { _id: "rr", status: "confirmed", createdAt: "2026-07-01T00:00:00Z", money: { totalPrice: 9000 } },
+  ];
+  // Past-year stays (seasonality signal): 6 calendar months w/ data, Aug peak,
+  // Sep trough. avg = 25000/6 = 4166.67. weight[8]=2.4→clamp 2.0; weight[9]=0.24→0.4.
+  const histStay = (checkIn: string, total: number, i: number): ProjectionReservationLike => ({
+    _id: `h${i}`,
+    status: "confirmed",
+    checkInDateLocalized: checkIn,
+    money: { totalPrice: total },
+  });
+  const historicalStayReservations: ProjectionReservationLike[] = [
+    histStay("2025-08-10", 10000, 1), // Aug peak
+    histStay("2025-09-10", 1000, 2), // Sep trough
+    histStay("2025-10-10", 2000, 3),
+    histStay("2025-11-10", 2000, 4),
+    histStay("2025-12-10", 8000, 5),
+    histStay("2026-01-10", 2000, 6),
+  ];
+  const snap = aggregateRevenueProjection({
+    forwardStayReservations: [],
+    trailingBookingReservations,
+    historicalStayReservations,
+    nowMs: NOW,
+  });
+  check("seasonality applied with >=6 months of history", snap.seasonality.applied === true, snap.seasonality);
+  check("monthsOfHistory = 6", snap.seasonality.monthsOfHistory === 6, snap.seasonality.monthsOfHistory);
+  const aug = monthOf(snap, "2026-08"); // 31 days, cal month 8 → weight clamped to 2.0
+  const sep = monthOf(snap, "2026-09"); // 30 days, cal month 9 → weight clamped to 0.4
+  const feb = monthOf(snap, "2027-02"); // 28 days, cal month 2 → no history → neutral 1
+  check("Aug seasonal weight clamped to 2.0", aug.seasonalWeight === 2.0, aug.seasonalWeight);
+  check("Aug baseline = 100/day x 31 x 2.0 = 6200", aug.baselineRevenue === 6200, aug.baselineRevenue);
+  check("Sep seasonal weight clamped to 0.4", sep.seasonalWeight === 0.4, sep.seasonalWeight);
+  check("Sep baseline = 100/day x 30 x 0.4 = 1200", sep.baselineRevenue === 1200, sep.baselineRevenue);
+  check("Feb (no history) weight neutral 1", feb.seasonalWeight === 1, feb.seasonalWeight);
+  check("Feb baseline = 100/day x 28 x 1 = 2800", feb.baselineRevenue === 2800, feb.baselineRevenue);
+}
+
+console.log("revenue-projection: seasonality falls back to flat when sparse");
+{
+  const trailingBookingReservations: ProjectionReservationLike[] = [
+    { _id: "rr", status: "confirmed", createdAt: "2026-07-01T00:00:00Z", money: { totalPrice: 9000 } },
+  ];
+  const historicalStayReservations: ProjectionReservationLike[] = [
+    { _id: "h1", status: "confirmed", checkInDateLocalized: "2025-08-10", money: { totalPrice: 5000 } },
+    { _id: "h2", status: "confirmed", checkInDateLocalized: "2025-12-10", money: { totalPrice: 5000 } },
+    { _id: "h3", status: "confirmed", checkInDateLocalized: "2026-01-10", money: { totalPrice: 5000 } },
+  ];
+  const snap = aggregateRevenueProjection({
+    forwardStayReservations: [],
+    trailingBookingReservations,
+    historicalStayReservations,
+    nowMs: NOW,
+  });
+  check("seasonality NOT applied with <6 months of history", snap.seasonality.applied === false, snap.seasonality);
+  const aug = monthOf(snap, "2026-08");
+  check("sparse history → flat baseline (weight 1)", aug.seasonalWeight === 1 && aug.baselineRevenue === 6200 / 2, aug.baselineRevenue);
+}
+
+console.log("revenue-projection: YoY growth");
+{
+  const trailingBookingReservations: ProjectionReservationLike[] = [
+    { _id: "cur", status: "confirmed", createdAt: "2026-07-01T00:00:00Z", money: { totalPrice: 9000 } }, // last 365
+    { _id: "prior", status: "confirmed", createdAt: "2025-01-01T00:00:00Z", money: { totalPrice: 6000 } }, // prior 365
+  ];
+  const snap = aggregateRevenueProjection({
+    forwardStayReservations: [],
+    trailingBookingReservations,
+    nowMs: NOW,
+  });
+  check("revenueLast365 = 9000", snap.trailing.revenueLast365 === 9000, snap.trailing.revenueLast365);
+  check("revenuePrev365 = 6000 (prior-year booking)", snap.trailing.revenuePrev365 === 6000, snap.trailing.revenuePrev365);
+  check("YoY = (9000-6000)/6000 = 0.5", near(snap.trailing.revenueYoyPct ?? NaN, 0.5, 1e-9), snap.trailing.revenueYoyPct);
+
+  const noPrior = aggregateRevenueProjection({
+    forwardStayReservations: [],
+    trailingBookingReservations: [trailingBookingReservations[0]],
+    nowMs: NOW,
+  });
+  check("YoY null when no prior-year data", noPrior.trailing.revenueYoyPct === null, noPrior.trailing.revenueYoyPct);
+}
+
 console.log(`\nrevenue-projection-aggregate: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

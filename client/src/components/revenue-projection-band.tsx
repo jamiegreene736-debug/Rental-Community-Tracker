@@ -68,7 +68,7 @@ function MomentumChip({ value, label }: { value: number | null; label: string })
 
 // Compact, dependency-free stacked bar chart: full bar = projected revenue,
 // solid segment = on-the-books, lighter segment on top = run-rate fill.
-function MiniBars({ months }: { months: RevenueProjectionMonth[] }) {
+function MiniBars({ months, seasonal }: { months: RevenueProjectionMonth[]; seasonal: boolean }) {
   const max = Math.max(1, ...months.map((m) => m.projectedRevenue));
   return (
     <div className="mt-3">
@@ -102,7 +102,7 @@ function MiniBars({ months }: { months: RevenueProjectionMonth[] }) {
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
         <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-3 rounded-sm bg-sky-500" /> On the books</span>
-        <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-3 rounded-sm bg-sky-200/70 dark:bg-sky-900/50" /> Run-rate estimate</span>
+        <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-3 rounded-sm bg-sky-200/70 dark:bg-sky-900/50" /> {seasonal ? "Seasonal estimate" : "Run-rate estimate"}</span>
       </div>
     </div>
   );
@@ -148,9 +148,14 @@ export function RevenueProjectionBand({
         <div className="flex items-center gap-2">
           <CalendarClock className="h-4 w-4 text-muted-foreground" />
           <span className="text-sm font-semibold">Next 12 months — projection</span>
-          <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-700 dark:bg-sky-950/60 dark:text-sky-300" title="Share of projected revenue that is already contracted (booked). The rest is a 90-day run-rate estimate for unbooked nights.">
+          <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-700 dark:bg-sky-950/60 dark:text-sky-300" title="Share of projected revenue that is already contracted (booked). The rest is an estimate for unbooked nights.">
             {pct(t.onBooksPct12mo)} on the books
           </span>
+          {ready.seasonality.applied && (
+            <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700 dark:bg-violet-950/60 dark:text-violet-300" title={`Unbooked nights are estimated seasonally from your last ${ready.seasonality.monthsOfHistory} months of stay revenue, not a flat run rate.`}>
+              seasonally adjusted
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[11px] text-muted-foreground">
@@ -173,9 +178,11 @@ export function RevenueProjectionBand({
                   <DialogTitle>12-month revenue projection · by stay month</DialogTitle>
                 </DialogHeader>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Revenue is anchored on already-booked stays and filled to your trailing 90-day run rate where a
-                  month isn't booked up yet. Net profit counts contracted stays only, estimating a market-rate cost
-                  for slots not yet bought in.
+                  Revenue is anchored on already-booked stays and filled where a month isn't booked up yet
+                  {ready.seasonality.applied
+                    ? ` — using a seasonal estimate from your last ${ready.seasonality.monthsOfHistory} months of stay revenue`
+                    : " — using your trailing 90-day run rate"}
+                  . Net profit counts contracted stays only, estimating a market-rate cost for slots not yet bought in.
                 </p>
                 <div className="mt-3 max-w-full overflow-x-auto rounded-md border">
                   <Table className="min-w-[720px] table-fixed">
@@ -237,6 +244,7 @@ export function RevenueProjectionBand({
               90-day run rate: {usd(ready.trailing.revenueRunRateAnnual)}/yr
             </span>
             <MomentumChip value={ready.trailing.revenueMomentumPct} label="vs prior 30d" />
+            <MomentumChip value={ready.trailing.revenueYoyPct} label="YoY" />
           </div>
         </div>
 
@@ -274,7 +282,7 @@ export function RevenueProjectionBand({
         </div>
       </div>
 
-      <MiniBars months={ready.months} />
+      <MiniBars months={ready.months} seasonal={ready.seasonality.applied} />
     </Card>
   );
 }

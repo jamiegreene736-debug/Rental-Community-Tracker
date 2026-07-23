@@ -66,17 +66,24 @@ export async function runRevenueProjectionRefresh(): Promise<RevenueProjectionRu
   const now = new Date();
   const nowMs = now.getTime();
   const today = isoDay(now);
+  const yesterday = isoDay(new Date(nowMs - DAY_MS));
   const forwardEnd = isoDay(new Date(nowMs + 365 * DAY_MS));
-  const trailingStart = isoDay(new Date(nowMs - 365 * DAY_MS));
+  // Two years of booking history so the trailing run-rate AND the YoY prior-year
+  // window are covered by one pull; one year of past STAYS for seasonality.
+  const bookingStart = isoDay(new Date(nowMs - 730 * DAY_MS));
+  const historyStayStart = isoDay(new Date(nowMs - 365 * DAY_MS));
 
-  const [forwardStayReservations, trailingBookingReservations] = await Promise.all([
-    pullReservations(`checkInFrom=${today}&checkInTo=${forwardEnd}&maxRows=${MAX_ROWS}`),
-    pullReservations(`includePast=true&createdFrom=${trailingStart}&createdTo=${today}&maxRows=${MAX_ROWS}`),
-  ]);
+  const [forwardStayReservations, trailingBookingReservations, historicalStayReservations] =
+    await Promise.all([
+      pullReservations(`checkInFrom=${today}&checkInTo=${forwardEnd}&maxRows=${MAX_ROWS}`),
+      pullReservations(`includePast=true&createdFrom=${bookingStart}&createdTo=${today}&maxRows=${MAX_ROWS}`),
+      pullReservations(`includePast=true&checkInFrom=${historyStayStart}&checkInTo=${yesterday}&maxRows=${MAX_ROWS}`),
+    ]);
 
   const snapshot = aggregateRevenueProjection({
     forwardStayReservations,
     trailingBookingReservations,
+    historicalStayReservations,
     nowMs,
     horizonMonths: HORIZON_MONTHS,
   });
@@ -91,7 +98,10 @@ export async function runRevenueProjectionRefresh(): Promise<RevenueProjectionRu
     message:
       `Projection refreshed: ${snapshot.totals.reservations} on-the-books reservation(s), ` +
       `12-mo revenue ~$${snapshot.totals.projectedRevenue12mo.toLocaleString()}, ` +
-      `net profit ~$${snapshot.totals.projectedNetProfit12mo.toLocaleString()}`,
+      `net profit ~$${snapshot.totals.projectedNetProfit12mo.toLocaleString()}` +
+      (snapshot.seasonality.applied
+        ? ` · seasonally adjusted (${snapshot.seasonality.monthsOfHistory}mo history)`
+        : ` · flat run-rate baseline`),
   };
   _lastRunAt = now;
   _lastRunResult = result;

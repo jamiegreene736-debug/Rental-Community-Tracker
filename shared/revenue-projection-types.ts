@@ -10,6 +10,7 @@ export interface RevenueProjectionMonth {
   baselineRevenue: number; // T90 run-rate × days in month (Phase 1 fill)
   projectedRevenue: number; // max(onBooks, baseline)
   onBooksPct: number; // onBooksRevenue / projectedRevenue (0..1)
+  seasonalWeight: number; // baseline seasonal multiplier applied (1 = neutral)
   collections: number; // scheduled cash forecast due this month
   reservationCount: number;
   netProfit: number; // OTB: netRevenue − attachedCost − estimatedCost
@@ -36,8 +37,18 @@ export interface RevenueProjectionTrailing {
   revenueDailyAvg90: number;
   revenueRunRateAnnual: number;
   revenueMomentumPct: number | null;
+  revenuePrev365: number; // booking revenue in [today-730, today-365) — the prior year
+  revenueYoyPct: number | null; // (last365 − prev365) / prev365, null when no prior-year data
   refundsLast30: number;
   refundsLast90: number;
+}
+
+// How the far-month baseline was shaped. `applied` = we had enough trailing
+// stay-history to weight the baseline seasonally; otherwise it stays a flat
+// 90-day run rate (Phase 1 behavior).
+export interface RevenueProjectionSeasonality {
+  applied: boolean;
+  monthsOfHistory: number; // calendar months of the past year with realized stay revenue
 }
 
 export interface RevenueProjectionTotals {
@@ -60,6 +71,7 @@ export interface RevenueProjectionSnapshot {
   months: RevenueProjectionMonth[];
   trailing: RevenueProjectionTrailing;
   totals: RevenueProjectionTotals;
+  seasonality: RevenueProjectionSeasonality;
 }
 
 // What GET /api/dashboard/revenue-projection returns: the snapshot plus the

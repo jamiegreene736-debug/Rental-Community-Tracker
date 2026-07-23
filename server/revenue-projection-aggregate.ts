@@ -54,6 +54,7 @@ import type {
   RevenueProjectionTrailing,
   RevenueProjectionTotals,
   RevenueProjectionSnapshot,
+  RevenueProjectionSeasonality,
 } from "@shared/revenue-projection-types";
 
 export type {
@@ -61,10 +62,19 @@ export type {
   RevenueProjectionTrailing,
   RevenueProjectionTotals,
   RevenueProjectionSnapshot,
+  RevenueProjectionSeasonality,
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EXCLUDED_STATUS_RE = /cancel|declin|inquir|request|expired|closed/;
+
+// Seasonal baseline (Phase 2): shape the flat run-rate fill by the portfolio's
+// own realized seasonality. Only apply when the trailing year has enough
+// calendar months with revenue to be a signal, and clamp each month's weight so
+// one outlier month can't produce a wild baseline.
+const MIN_SEASONAL_MONTHS = 6;
+const SEASONAL_WEIGHT_MIN = 0.4;
+const SEASONAL_WEIGHT_MAX = 2.0;
 
 export interface ProjectionSlotLike {
   unitId?: string;
@@ -235,21 +245,66 @@ function scheduledCollections(
   return out;
 }
 
+// Seasonal weight per calendar month (1..12) from the trailing year's realized
+// stay revenue. weight = that month's revenue ÷ the average month (over months
+// that HAVE data), clamped; a calendar month with no history stays neutral (1).
+// Returns applied=false (all weights 1 → flat baseline) when there isn't enough
+// history to be a signal.
+function computeSeasonalWeights(historical: ProjectionReservationLike[]): {
+  weights: number[]; // length 13, indices 1..12 used
+  monthsOfHistory: number;
+  applied: boolean;
+} {
+  const byMonth = new Array(13).fill(0);
+  const seen = new Set<string>();
+  for (const r of historical) {
+    if (isExcludedStatus(r)) continue;
+    const rid = reservationId(r);
+    if (rid && seen.has(rid)) continue;
+    if (rid) seen.add(rid);
+    const stayDay = localizedStayDate(r, "in");
+    if (!stayDay) continue;
+    const cm = Number(stayDay.slice(5, 7));
+    if (!(cm >= 1 && cm <= 12)) continue;
+    const rev = reservationRevenue(r);
+    if (rev > 0) byMonth[cm] += rev;
+  }
+  const monthsWithData = byMonth.filter((v) => v > 0).length;
+  const total = byMonth.reduce((s, v) => s + v, 0);
+  const weights = new Array(13).fill(1);
+  if (monthsWithData < MIN_SEASONAL_MONTHS || total <= 0) {
+    return { weights, monthsOfHistory: monthsWithData, applied: false };
+  }
+  const avg = total / monthsWithData;
+  for (let m = 1; m <= 12; m++) {
+    if (byMonth[m] > 0) {
+      weights[m] = Math.min(SEASONAL_WEIGHT_MAX, Math.max(SEASONAL_WEIGHT_MIN, byMonth[m] / avg));
+    }
+  }
+  return { weights, monthsOfHistory: monthsWithData, applied: true };
+}
+
 export function aggregateRevenueProjection(input: {
   forwardStayReservations: ProjectionReservationLike[];
   trailingBookingReservations: ProjectionReservationLike[];
+  // Past-year stays (checkIn in the last 365 days) — the seasonality signal.
+  // Optional: absent/sparse → the baseline stays a flat run rate (Phase 1).
+  historicalStayReservations?: ProjectionReservationLike[];
   nowMs: number;
   horizonMonths?: number;
 }): RevenueProjectionSnapshot {
   const { forwardStayReservations, trailingBookingReservations, nowMs } = input;
   const horizonMonths = input.horizonMonths ?? 12;
+  const seasonal = computeSeasonalWeights(input.historicalStayReservations ?? []);
 
   // ── Trailing run-rate ────────────────────────────────────────────────────
   const t30 = nowMs - 30 * DAY_MS;
   const t60 = nowMs - 60 * DAY_MS;
   const t90 = nowMs - 90 * DAY_MS;
   const t365 = nowMs - 365 * DAY_MS;
+  const t730 = nowMs - 730 * DAY_MS;
 
+  let revenuePrev365 = 0; // booking revenue in [t730, t365) — the prior year, for YoY
   let collectedLast30 = 0,
     collectedPrev30 = 0,
     collectedLast60 = 0,
@@ -308,6 +363,10 @@ export function aggregateRevenueProjection(input: {
           if (t >= t30) revenueLast30 += rev;
           else if (t >= t60) revenuePrev30 += rev;
         }
+      } else if (t >= t730 && t < t365) {
+        // Prior year (same-length window, one year back) — YoY denominator.
+        const rev = reservationRevenue(r);
+        if (rev > 0) revenuePrev365 += rev;
       }
     }
   }
@@ -333,6 +392,8 @@ export function aggregateRevenueProjection(input: {
     revenueRunRateAnnual: Math.round(revenueDailyAvg90 * 365),
     revenueMomentumPct:
       revenuePrev30 > 0 ? (revenueLast30 - revenuePrev30) / revenuePrev30 : null,
+    revenuePrev365,
+    revenueYoyPct: revenuePrev365 > 0 ? (revenueLast365 - revenuePrev365) / revenuePrev365 : null,
     refundsLast30,
     refundsLast90,
   };
@@ -416,7 +477,9 @@ export function aggregateRevenueProjection(input: {
   }
 
   const months: RevenueProjectionMonth[] = acc.map((b) => {
-    const baselineRevenue = Math.round(revenueDailyAvg90 * daysInMonth(b.month));
+    const calMonth = Number(b.month.slice(5, 7));
+    const seasonalWeight = seasonal.weights[calMonth] ?? 1;
+    const baselineRevenue = Math.round(revenueDailyAvg90 * daysInMonth(b.month) * seasonalWeight);
     const onBooksRevenue = Math.round(b.onBooksRevenue);
     const projectedRevenue = Math.max(onBooksRevenue, baselineRevenue);
     return {
@@ -426,6 +489,7 @@ export function aggregateRevenueProjection(input: {
       baselineRevenue,
       projectedRevenue,
       onBooksPct: projectedRevenue > 0 ? onBooksRevenue / projectedRevenue : 1,
+      seasonalWeight,
       collections: Math.round(b.collections),
       reservationCount: b.reservationCount,
       netProfit: Math.round(b.netProfit),
@@ -453,6 +517,11 @@ export function aggregateRevenueProjection(input: {
       ? totals.onBooksRevenue12mo / totals.projectedRevenue12mo
       : 1;
 
+  const seasonality: RevenueProjectionSeasonality = {
+    applied: seasonal.applied,
+    monthsOfHistory: seasonal.monthsOfHistory,
+  };
+
   return {
     ready: true,
     generatedAt: new Date(nowMs).toISOString(),
@@ -460,5 +529,6 @@ export function aggregateRevenueProjection(input: {
     months,
     trailing,
     totals,
+    seasonality,
   };
 }
