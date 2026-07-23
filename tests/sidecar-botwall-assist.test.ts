@@ -229,6 +229,9 @@ assert.ok(
 );
 {
   const galleryFn = workerSrc.match(/async function processListingGalleryScrape\(id, params\) \{[\s\S]*?\n\}\n/)?.[0] ?? "";
+  const hydrationStart = galleryFn.indexOf("const galleryHydration");
+  const hydrationEnd = galleryFn.indexOf("let photos = await page.evaluate", hydrationStart);
+  const hydrationSource = galleryFn.slice(hydrationStart, hydrationEnd);
   assert.ok(
     galleryFn.includes("const postSolveState = await captureVrboChallengeState(page)"),
     "the post-solve navigation is classified before gallery harvesting",
@@ -252,6 +255,26 @@ assert.ok(
   assert.ok(
     /await page\.waitForTimeout\(1200\);\s+\/\/ Zillow[\s\S]*?const galleryWallAssist = await resolveListingBotWallManually/.test(galleryFn),
     "the post-click manual-solve check runs even when Playwright dispatches a click but times out during challenge navigation",
+  );
+  assert.ok(
+    galleryFn.includes("modalOverflowScrollers")
+      && galleryFn.includes("target.scrollTop = Math.min")
+      && galleryFn.includes("target.dispatchEvent(new Event(\"scroll\"")
+      && galleryFn.includes("modalGalleryRoots")
+      && galleryFn.includes("listingPhotoCdnRe")
+      && galleryFn.includes("captureGalleryUrls(target)")
+      && galleryFn.includes("? 1400")
+      && galleryFn.includes("Math.min(target.scrollHeight, 40000)")
+      && galleryFn.includes("hydratedGalleryUrls.forEach"),
+    "full-gallery hydration scrolls modal overflow containers, preserves bounded document depth, and retains URLs from virtualized trusted galleries",
+  );
+  assert.ok(
+    hydrationSource.includes("modalGalleryRoots.length > 0")
+      && hydrationSource.includes("modalOverflowScrollers")
+      && !hydrationSource.includes('document.querySelectorAll("*")')
+      && !hydrationSource.includes('[class*="gallery"]')
+      && !hydrationSource.includes('[aria-label*="photo"'),
+    "hydration never scrolls or trusts arbitrary page galleries, photo labels, or overflow containers",
   );
 }
 // The audible alert must fire for gallery labels too (gate was vrbo-only).

@@ -8580,26 +8580,149 @@ async function processListingGalleryScrape(id, params) {
   );
   throwIfListingTerminalDenial(galleryWallAssist);
 
-  // Scroll so lazy galleries hydrate (Redfin/Zillow defer thumbnails), then
-  // return to the top.
-  await page
+  // Scroll the active photo modal when one exists; otherwise retain the prior
+  // outer-document scroll behavior. Zillow's numbered "See all N photos"
+  // control opens a modal whose own scrollport lazy-loads the remaining
+  // thumbnails. Never scroll arbitrary page containers here: doing so can
+  // hydrate "similar homes" carousels that are not the subject listing.
+  const galleryHydration = await page
     .evaluate(async () => {
-      await new Promise((resolve) => {
-        let y = 0;
-        const step = () => {
-          window.scrollTo(0, y);
-          y += 1400;
-          if (y < Math.min(document.body?.scrollHeight || 0, 40000)) setTimeout(step, 110);
-          else resolve();
-        };
-        step();
-      });
-      window.scrollTo(0, 0);
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const documentScroller = document.scrollingElement;
+      const listingPhotoCdnRe =
+        /(?:photos\.zillowstatic\.com|cdn-redfin\.com|rdcpix\.com|images(?:cdn)?\.homes\.com|listingphotos\.sierrastatic\.com)/i;
+      const isVisible = (element) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return (
+          rect.width >= 300 &&
+          rect.height >= 200 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity || 1) > 0
+        );
+      };
+      const listingPhotoCount = (root) => {
+        const urls = new Set();
+        root.querySelectorAll("img, source[srcset]").forEach((element) => {
+          for (const raw of [
+            element.currentSrc,
+            element.src,
+            element.getAttribute("srcset"),
+            element.getAttribute("data-src"),
+            element.getAttribute("data-lazy-src"),
+          ]) {
+            String(raw || "").split(",").forEach((part) => {
+              const candidate = part.trim().split(/\s+/)[0];
+              if (listingPhotoCdnRe.test(candidate)) urls.add(candidate);
+            });
+          }
+        });
+        return urls.size;
+      };
+      const modalGalleryRoots = Array.from(
+        document.querySelectorAll('[role="dialog"], [aria-modal="true"]'),
+      ).filter(
+        (root) => isVisible(root) && listingPhotoCount(root) >= 2,
+      );
+      const modalOverflowScrollers = Array.from(new Set(
+        modalGalleryRoots.flatMap((root) => [root, ...root.querySelectorAll("*")]),
+      ))
+        .filter((element) => {
+          if (!isVisible(element)) return false;
+          if (element.clientHeight < 240 || element.scrollHeight <= element.clientHeight + 200) return false;
+          return /(?:auto|scroll)/i.test(getComputedStyle(element).overflowY);
+        })
+        .sort(
+          (left, right) =>
+            (right.scrollHeight - right.clientHeight) -
+            (left.scrollHeight - left.clientHeight),
+        )
+        .slice(0, 3);
+      const targets = modalGalleryRoots.length > 0
+        ? modalOverflowScrollers
+        : documentScroller
+          ? [documentScroller]
+          : [];
+      const stats = [];
+      const galleryUrls = new Set();
+      const captureGalleryUrls = (root) => {
+        root.querySelectorAll("img").forEach((img) => {
+          for (const raw of [
+            img.currentSrc,
+            img.src,
+            img.getAttribute("data-src"),
+            img.getAttribute("data-lazy-src"),
+            img.getAttribute("data-flickity-lazyload"),
+          ]) {
+            if (raw) galleryUrls.add(String(raw));
+          }
+          const srcset = img.getAttribute("srcset");
+          if (srcset) {
+            srcset.split(",").forEach((part) => {
+              const raw = part.trim().split(/\s+/)[0];
+              if (raw) galleryUrls.add(raw);
+            });
+          }
+        });
+        root.querySelectorAll("source[srcset]").forEach((source) => {
+          String(source.getAttribute("srcset") || "").split(",").forEach((part) => {
+            const raw = part.trim().split(/\s+/)[0];
+            if (raw) galleryUrls.add(raw);
+          });
+        });
+      };
+
+      for (const target of targets) {
+        const trustedGalleryTarget = modalGalleryRoots.some(
+          (root) => root === target || root.contains(target),
+        );
+        if (trustedGalleryTarget) captureGalleryUrls(target);
+        let stableAtEnd = 0;
+        let priorHeight = target.scrollHeight;
+        for (let step = 0; step < 40; step += 1) {
+          const isDocumentTarget = target === documentScroller;
+          const amount = isDocumentTarget
+            ? 1400
+            : Math.max(500, Math.round(target.clientHeight * 0.85));
+          const scrollLimit = isDocumentTarget
+            ? Math.min(target.scrollHeight, 40000)
+            : target.scrollHeight;
+          target.scrollTop = Math.min(target.scrollTop + amount, scrollLimit);
+          target.dispatchEvent(new Event("scroll", { bubbles: true }));
+          await wait(110);
+          if (trustedGalleryTarget) captureGalleryUrls(target);
+          const currentHeight = target.scrollHeight;
+          const currentLimit = isDocumentTarget
+            ? Math.min(currentHeight, 40000)
+            : currentHeight;
+          const atEnd = target.scrollTop + target.clientHeight >= currentLimit - 4;
+          stableAtEnd = atEnd && currentHeight === priorHeight ? stableAtEnd + 1 : 0;
+          priorHeight = currentHeight;
+          if (stableAtEnd >= 3) break;
+        }
+        stats.push({
+          kind: target === documentScroller ? "document" : "overflow",
+          height: target.scrollHeight,
+          trustedGallery: trustedGalleryTarget,
+        });
+        target.scrollTop = 0;
+        target.dispatchEvent(new Event("scroll", { bubbles: true }));
+      }
+      return { stats, galleryUrls: Array.from(galleryUrls) };
     })
-    .catch(() => {});
+    .catch(() => ({ stats: [], galleryUrls: [] }));
+  if (galleryHydration.stats.length > 0) {
+    log(
+      `listing_gallery_scrape ${id}: hydrated ${galleryHydration.stats.length} scroll target(s) ` +
+      `(${galleryHydration.stats.map((stat) => `${stat.kind}:${stat.height}${stat.trustedGallery ? ":gallery" : ""}`).join(", ")}); ` +
+      `captured ${galleryHydration.galleryUrls.length} gallery URL(s)`,
+    );
+  }
   await page.waitForTimeout(600);
 
-  let photos = await page.evaluate(({ maxPhotos }) => {
+  let photos = await page.evaluate(({ maxPhotos, hydratedGalleryUrls }) => {
     const seen = new Set();
     const jsonLdHits = [];
     const galleryHits = [];
@@ -8675,6 +8798,11 @@ async function processListingGalleryScrape(id, params) {
       try { visitLd(JSON.parse(s.textContent || "null"), 0, false); } catch { /* malformed block */ }
     });
 
+    // A virtualized modal can discard early thumbnail nodes while it scrolls.
+    // These URLs were captured only from trusted dialog/gallery containers at
+    // each lazy-load step, so keep them in the scoped-gallery bucket.
+    hydratedGalleryUrls.forEach((u) => accept(u, galleryHits));
+
     // 1) Scoped gallery/carousel containers — purest DOM source: the subject
     //    listing's own gallery, which lives in a DIFFERENT container than
     //    "similar homes"/neighborhood/agent sections, so those are structurally
@@ -8724,7 +8852,7 @@ async function processListingGalleryScrape(id, params) {
       chosen = displayed.length > 0 ? displayed : scriptHits;
     }
     return chosen.slice(0, cap);
-  }, { maxPhotos });
+  }, { maxPhotos, hydratedGalleryUrls: galleryHydration.galleryUrls });
 
   // Redfin comp-carousel isolation. An off-market/sold Redfin detail page
   // renders a "Nearby similar homes" carousel — each comp card carries ~3
