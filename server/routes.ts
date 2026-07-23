@@ -8,6 +8,7 @@ import { cancelUnitAuditSweep, getUnitAuditDashboardStatus, getUnitAuditJob, lis
 import { getUnitAuditCronStatus, runUnitAuditCronSweep } from "./unit-audit-scheduler";
 import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
 import { assembleGuestyPushPhotos, type GuestyPushGallery } from "@shared/guesty-photo-repush";
+import { unitGalleryLabel } from "@shared/photo-gallery-layout";
 import { withUnitSwapPropertyWriteLock } from "./unit-swap-write-lock";
 import { buildPricingAuditReceipt, type PricingAuditReceipt } from "./pricing-audit-receipt";
 import {
@@ -51152,6 +51153,8 @@ Return ONLY compact JSON with this exact shape:
           scope: "unit" | "community",
           unitId?: string,
           staticLabels?: Record<string, string>,
+          staticCategories?: Record<string, string>,
+          unitLabel?: string,
         ): Promise<GuestyPushGallery> => {
           const diskFiles = await listPhotoFiles(path.join(photosRoot, folder)).catch(() => [] as string[]);
           const files = unitId
@@ -51170,6 +51173,9 @@ Return ONLY compact JSON with this exact shape:
             files,
             labels: await storage.getPhotoLabelsByFolder(folder).catch(() => []),
             staticLabels,
+            staticCategories,
+            unitId,
+            unitLabel,
           };
         };
 
@@ -51179,15 +51185,27 @@ Return ONLY compact JSON with this exact shape:
             "community",
             undefined,
             Object.fromEntries(builder.communityPhotos.map((photo) => [photo.filename, photo.label])),
+            undefined,
           ));
         }
-        for (const unit of builder.units) {
+        for (let index = 0; index < builder.units.length; index++) {
+          const unit = builder.units[index];
           const active = activeFolders.find((entry) => entry.unitId === unit.id);
           if (!active?.activeFolder) continue;
           const staticLabels = !active.replaced
             ? Object.fromEntries(unit.photos.map((photo) => [photo.filename, photo.label]))
             : undefined;
-          galleries.push(await galleryFor(active.activeFolder, "unit", unit.id, staticLabels));
+          const staticCategories = !active.replaced
+            ? Object.fromEntries(unit.photos.map((photo) => [photo.filename, photo.category]))
+            : undefined;
+          galleries.push(await galleryFor(
+            active.activeFolder,
+            "unit",
+            unit.id,
+            staticLabels,
+            staticCategories,
+            unitGalleryLabel(index, unit.bedrooms),
+          ));
         }
         return assembleGuestyPushPhotos(galleries);
       };

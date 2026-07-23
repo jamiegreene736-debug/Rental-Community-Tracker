@@ -384,16 +384,15 @@ export default function Builder() {
     // Static-label lookup: fall back to hardcoded captions only for photos
     // that were in the original static list. New rescraped photos rely on
     // Claude labels via labelFor().
-    const staticLabelFor = (folder: string, filename: string): string | undefined => {
-      const inCommunity = communityPhotos.find((p) => p.filename === filename && folder === property.communityPhotoFolder);
-      if (inCommunity) return inCommunity.label;
-      for (const u of units) {
-        if (u.photoFolder !== folder) continue;
-        const unitPhotos = Array.isArray(u.photos) ? u.photos : [];
-        const hit = unitPhotos.find((p) => p.filename === filename);
-        if (hit) return hit.label;
+    const staticPhotoFor = (folder: string, filename: string, unitId?: string) => {
+      if (!unitId) {
+        return communityPhotos.find(
+          (photo) => photo.filename === filename && folder === property.communityPhotoFolder,
+        );
       }
-      return undefined;
+      const unit = units.find((candidate) => candidate.id === unitId && candidate.photoFolder === folder);
+      const unitPhotos = Array.isArray(unit?.photos) ? unit.photos : [];
+      return unitPhotos.find((photo) => photo.filename === filename);
     };
 
     // Assemble the push/display photo order the operator asked for
@@ -411,21 +410,26 @@ export default function Builder() {
     type PhotoEntry = {
       url: string;
       caption: string;
+      category: string | null;
       source: string;
       unitId?: string;
       text: string;            // ranking signal for the hero-first default
       sortOrder: number | null;
     };
     const entryFor = (folder: string, filename: string, source: string, unitId?: string): PhotoEntry => {
-      const caption = getLabel(folder, filename) ?? staticLabelFor(folder, filename) ?? captionFromFilename(filename);
+      const staticPhoto = staticPhotoFor(folder, filename, unitId);
+      const caption = getLabel(folder, filename) ?? staticPhoto?.label ?? captionFromFilename(filename);
+      const staticCategory = staticPhoto && "category" in staticPhoto ? staticPhoto.category : null;
+      const category = getCategory(folder, filename) ?? staticCategory;
       return {
         url: `${origin}/photos/${folder}/${filename}`,
         caption,
+        category,
         source,
         unitId,
         // Combine caption + labeler category + filename for the best chance
         // at a meaningful category match in the hero-first default sort.
-        text: [caption, getCategory(folder, filename), filename].filter(Boolean).join(" "),
+        text: [caption, category, filename].filter(Boolean).join(" "),
         sortOrder: getSortOrder(folder, filename),
       };
     };
@@ -476,6 +480,7 @@ export default function Builder() {
       photos.push({
         url: e.url,
         caption: e.caption,
+        category: e.category,
         // A divider KEEPS the community `source` — it is a community photo, and
         // every source-driven consumer (photo-community check role/grouping,
         // dedupe scan folder label, cover-collage pools) must keep classifying
@@ -483,6 +488,10 @@ export default function Builder() {
         // and it reads the explicit flag below.
         source: e.source,
         unitId: item.kind === "unit" ? e.unitId : undefined,
+        // Folder labels stay unit-neutral because one physical folder can back
+        // multiple logical units. The Photos tab uses this natural identity to
+        // re-project freshly loaded metadata with the same contextual suffix.
+        roomUnitLabel: item.kind === "unit" && units.length > 1 ? item.unitLabel : undefined,
         ...(item.kind === "divider"
           ? { isUnitDivider: true as const, dividerNextUnitLabel: item.unitLabel }
           : {}),

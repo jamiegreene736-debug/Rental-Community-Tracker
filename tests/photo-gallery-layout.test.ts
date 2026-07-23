@@ -16,6 +16,7 @@ import {
   DEFAULT_UNIT_DIVIDERS,
   MIN_COMMUNITY_PHOTOS_AFTER_DIVIDERS,
   applyUnitOrder,
+  captionWithUnitRoomSuffix,
   dividerCaptionFor,
   dividerCount,
   dividerFilenames,
@@ -24,6 +25,7 @@ import {
   planGalleryLayout,
   serializePhotoGalleryLayouts,
   stripDividerCaptionSuffix,
+  stripUnitRoomCaptionSuffix,
   unitDividersEnabled,
   unitGalleryLabel,
   type PhotoGalleryLayout,
@@ -68,6 +70,64 @@ assert.equal(unitGalleryLabel(0, null), "Unit A");
 assert.equal(unitGalleryLabel(0, 0), "Unit A");
 assert.equal(unitGalleryLabel(1, "not a number"), "Unit B");
 console.log("  ✓ unitGalleryLabel: letters + bedrooms, safe degrade");
+
+// ── bedroom/bathroom unit suffix ─────────────────────────────────────────────
+assert.equal(
+  captionWithUnitRoomSuffix("Master Bedroom — King", "Unit A (3BR)", "Bedrooms"),
+  "Master Bedroom — King (Unit A)",
+);
+assert.equal(
+  captionWithUnitRoomSuffix("Primary Bathroom — Alt View", "Unit B (2BR)", "Bathrooms"),
+  "Primary Bathroom — Alt View (Unit B)",
+);
+assert.equal(
+  captionWithUnitRoomSuffix("A Quiet Place to Recharge", "Unit C (1BR)", "Bedrooms"),
+  "A Quiet Place to Recharge (Unit C)",
+  "effective category keeps a human bedroom caption contextual",
+);
+// Static rows may not have category metadata; only structured room prefixes are
+// allowed to trigger the fallback.
+assert.equal(
+  captionWithUnitRoomSuffix("Bedroom 2 — Two Twin Beds", "Unit B (2BR)"),
+  "Bedroom 2 — Two Twin Beds (Unit B)",
+);
+assert.equal(
+  captionWithUnitRoomSuffix("Living Room Near Bathroom", "Unit A (3BR)"),
+  "Living Room Near Bathroom",
+);
+assert.equal(
+  captionWithUnitRoomSuffix("Bedroom 2 — Queen", "Unit A (3BR)", "Living Spaces"),
+  "Bedroom 2 — Queen",
+  "an explicit non-room category wins over the caption fallback",
+);
+assert.equal(
+  captionWithUnitRoomSuffix("Bedroom 2 — Queen (Unit A)", "Unit B (2BR)", "Bedrooms"),
+  "Bedroom 2 — Queen (Unit B)",
+  "a stale logical suffix is corrected rather than compounded",
+);
+assert.equal(
+  captionWithUnitRoomSuffix("Half Bath (Unit B)", "Unit B (2BR)", "Bathrooms"),
+  "Half Bath (Unit B)",
+  "reapplying the same suffix is idempotent",
+);
+assert.equal(
+  stripUnitRoomCaptionSuffix("Bathroom 2 — Shower (Unit B)", "Bathrooms"),
+  "Bathroom 2 — Shower",
+);
+assert.equal(
+  stripUnitRoomCaptionSuffix("Master Bedroom (Unit A)"),
+  "Master Bedroom",
+  "a structured category-less room is clean when its generated suffix enters edit mode",
+);
+assert.equal(
+  stripUnitRoomCaptionSuffix("Building Entrance (Unit A)", "Exterior"),
+  "Building Entrance (Unit A)",
+  "a legitimate non-room parenthetical is not stripped",
+);
+const longUnitCaption = captionWithUnitRoomSuffix("x".repeat(400), "Unit A (3BR)", "Bedrooms");
+assert.ok(longUnitCaption.length <= 200);
+assert.ok(longUnitCaption.endsWith(" (Unit A)"), "the bounded caption must preserve the complete suffix");
+console.log("  ✓ bedroom/bathroom captions get an idempotent, bounded natural-unit suffix");
 
 // ── dividerCaptionFor / stripDividerCaptionSuffix ────────────────────────────
 assert.equal(dividerCaptionFor("Resort Pool", "Unit B (3BR)"), "Resort Pool — next: Unit B (3BR)");
@@ -163,6 +223,30 @@ console.log("  ✓ default layout: A → divider → B → community, divider mo
 }
 console.log("  ✓ swapped order: B leads, divider announces Unit A, labels never renamed");
 
+// Unit-room captions use the same natural identity and remain correct when B
+// leads. The projection is contextual; folder-level input captions stay clean.
+{
+  const roomA = { id: "a-bedroom", caption: "Master Bedroom — King", category: "Bedrooms" };
+  const roomB = { id: "b-bathroom", caption: "Primary Bathroom", category: "Bathrooms" };
+  const roomUnits = [
+    { unitId: "a", label: "Unit A (3BR)", photos: [roomA] },
+    { unitId: "b", label: "Unit B (2BR)", photos: [roomB] },
+  ];
+  const out = planGalleryLayout({
+    units: roomUnits,
+    community: [{ id: "pool", caption: "Resort Pool", category: "Amenities" }],
+    layout: { unitOrder: ["b", "a"], unitDividers: false },
+  });
+  assert.deepEqual(out.map((item) => item.photo.caption), [
+    "Primary Bathroom (Unit B)",
+    "Master Bedroom — King (Unit A)",
+    "Resort Pool",
+  ]);
+  assert.equal(roomA.caption, "Master Bedroom — King");
+  assert.equal(roomB.caption, "Primary Bathroom");
+}
+console.log("  ✓ room suffix follows natural unit identity after a B-first reorder; inputs stay clean");
+
 // Dividers off → the old grouped behaviour, community intact.
 {
   const out = planGalleryLayout({
@@ -186,6 +270,18 @@ console.log("  ✓ dividers off reproduces the plain units-then-community groupi
   });
   assert.deepEqual(out.map((x) => x.photo.id), ["a1", "a2", "c1", "c2", "c3"]);
   assert.ok(!out.some((x) => x.kind === "divider"));
+}
+{
+  const out = planGalleryLayout({
+    units: [{
+      unitId: "a",
+      label: "Unit A (2BR)",
+      photos: [{ id: "bed", caption: "Master Bedroom", category: "Bedrooms" }],
+    }],
+    community: [],
+    layout: null,
+  });
+  assert.equal(out[0].photo.caption, "Master Bedroom");
 }
 console.log("  ✓ single-unit listing gets no divider");
 
@@ -316,6 +412,7 @@ console.log("  ✓ store parse/serialize: fail-soft, scrubbing, proto defense, r
     "/photos/community/c2.jpg",
   ]);
   assert.equal(def[2].caption, "Resort Pool — next: Unit B (2BR)");
+  assert.equal(def[1].caption, "Master Bedroom (Unit A)");
 
   // Operator swapped the units — the automated re-push honours it.
   const swapped = assembleGuestyPushPhotos(galleries, { unitOrder: ["b", "a"] });
@@ -326,6 +423,10 @@ console.log("  ✓ store parse/serialize: fail-soft, scrubbing, proto defense, r
     "/photos/community/c2.jpg",
   ]);
   assert.equal(swapped[1].caption, "Resort Pool — next: Unit A (3BR)");
+  assert.equal(
+    swapped.find((p) => p.localPath.endsWith("/unit-a/a2.jpg"))?.caption,
+    "Master Bedroom (Unit A)",
+  );
 
   // Opted out → the historical grouped order, byte-for-byte.
   const off = assembleGuestyPushPhotos(galleries, { unitDividers: false });
@@ -365,6 +466,13 @@ console.log("  ✓ assembleGuestyPushPhotos applies unit order + dividers");
     /galleryLayout\]\)/.test(builder),
     "galleryLayout must be in the propertyData memo deps or the gallery won't rebuild when the operator changes the order",
   );
+  assert.ok(
+    /staticPhoto\s*&&\s*"category"\s+in\s+staticPhoto\s*\?\s*staticPhoto\.category/.test(builder)
+      && /getCategory\(folder,\s*filename\)\s*\?\?\s*staticCategory/.test(builder)
+      && /\bcategory:\s*e\.category/.test(builder)
+      && /roomUnitLabel:/.test(builder),
+    "the manual push/display assembly must carry DB-or-static category and natural unit context for room captions",
+  );
 
   const repush = read("server/guesty-photo-repush.ts");
   assert.ok(
@@ -378,6 +486,17 @@ console.log("  ✓ assembleGuestyPushPhotos applies unit order + dividers");
   assert.ok(
     /unitGalleryLabel\(index,\s*unit\.bedrooms\)/.test(repush),
     "the re-push must label units from their NATURAL index so a reorder never renames Unit B to Unit A",
+  );
+  const sharedRepush = read("shared/guesty-photo-repush.ts");
+  assert.ok(
+    /gallery\.staticCategories\?\.\[filename\]/.test(sharedRepush)
+      && /category:\s*entry\.category/.test(sharedRepush),
+    "the automated re-push assembly must carry effective DB-or-static category into the shared caption projection",
+  );
+  const routes = read("server/routes.ts");
+  assert.ok(
+    /assemblePhotosFor[\s\S]{0,5000}unitGalleryLabel\(index,\s*unit\.bedrooms\)[\s\S]{0,500}assembleGuestyPushPhotos\(galleries\)/.test(routes),
+    "the alert-remediation Guesty assembly must also pass each unit's natural label into the shared caption projection",
   );
 
   // The divider keeps the COMMUNITY source — every source-driven consumer
@@ -405,6 +524,20 @@ console.log("  ✓ assembleGuestyPushPhotos applies unit order + dividers");
   assert.ok(
     /stripDividerCaptionSuffix/.test(curator),
     "the '— next: Unit B' tail must be stripped before a caption is persisted back to photo_labels",
+  );
+  assert.ok(
+    /stripUnitRoomCaptionSuffix/.test(curator),
+    "the generated '(Unit A/B)' room tail must be stripped before any caption is persisted to folder-global photo_labels",
+  );
+  assert.ok(
+    /const editableCaption = stripUnitRoomCaptionSuffix\(effectiveCaption,\s*effectiveCategory\)/.test(curator)
+      && /setDraft\(editableCaption\)/.test(curator)
+      && /draft\.trim\(\)\s*!==\s*editableCaption/.test(curator),
+    "caption editing must start from the clean base so free-form renames cannot retain a generated unit suffix",
+  );
+  assert.ok(
+    /m\?\.userLabel\s*\|\|\s*m\?\.label\s*\|\|\s*tile\.caption/.test(curator),
+    "best-order sorting after relabel must prefer the fresh AI metadata over the stale pre-click tile caption",
   );
 }
 console.log("  ✓ source guards: both assemblies apply the layout; divider stays community-sourced");

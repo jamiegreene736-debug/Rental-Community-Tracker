@@ -52,7 +52,72 @@ export const DEFAULT_UNIT_DIVIDERS = true;
 export const MIN_COMMUNITY_PHOTOS_AFTER_DIVIDERS = 1;
 
 /** Guesty truncates long captions; keep the suffixed caption sane. */
-export const MAX_DIVIDER_CAPTION_LENGTH = 200;
+export const MAX_PUBLISHED_PHOTO_CAPTION_LENGTH = 200;
+export const MAX_DIVIDER_CAPTION_LENGTH = MAX_PUBLISHED_PHOTO_CAPTION_LENGTH;
+
+const UNIT_ROOM_SUFFIX_RE = /\s+\(Unit\s+[A-Z]\)\s*$/i;
+const UNIT_LETTER_RE = /^Unit\s+([A-Z])(?:\s|\(|$)/i;
+const ROOM_CATEGORY_RE = /^(?:bedrooms?|bathrooms?)$/i;
+// Fallback for static/pre-label rows that have no category metadata. Keep this
+// anchored to structured room labels so copy such as "Living Room Near Bathroom"
+// is never mistaken for a bathroom photo.
+const STRUCTURED_ROOM_CAPTION_RE =
+  /^(?:(?:master|primary|guest|king|queen|twin|bunk|second|third|fourth|fifth|sixth)\s+bedroom\b|bedroom(?:\s+\d+)?\b|(?:master|primary|guest)\s+bath(?:room)?\b|bathroom(?:\s+\d+)?\b|half\s+bath\b|powder\s+room\b)/i;
+
+function roomCaptionClassification(
+  caption: string,
+  category: string | null | undefined,
+): boolean {
+  const normalizedCategory = String(category ?? "").trim();
+  if (normalizedCategory) return ROOM_CATEGORY_RE.test(normalizedCategory);
+  return STRUCTURED_ROOM_CAPTION_RE.test(caption);
+}
+
+/**
+ * Remove the generated terminal "(Unit A)" / "(Unit B)" presentation suffix
+ * from a bedroom or bathroom caption.
+ *
+ * `photo_labels` is keyed only by physical folder + filename, while one folder
+ * can back multiple logical units (and even different A/B identities across
+ * properties). The unit suffix must therefore never be persisted there.
+ */
+export function stripUnitRoomCaptionSuffix(
+  caption: string | null | undefined,
+  category?: string | null,
+): string {
+  const text = String(caption ?? "").trim();
+  const match = text.match(UNIT_ROOM_SUFFIX_RE);
+  if (!match) return text;
+  const base = text.slice(0, text.length - match[0].length).trim();
+  return ROOM_CATEGORY_RE.test(String(category ?? "").trim())
+    || STRUCTURED_ROOM_CAPTION_RE.test(base)
+    ? base
+    : text;
+}
+
+/**
+ * Decorate a bedroom/bathroom caption with its logical, natural unit identity.
+ *
+ * The category is authoritative when present (`Bedrooms` / `Bathrooms`); the
+ * narrow caption-prefix fallback covers static rows without category metadata.
+ * Existing unit suffixes are replaced, not compounded, and the suffix itself is
+ * never truncated.
+ */
+export function captionWithUnitRoomSuffix(
+  caption: string | null | undefined,
+  unitLabel: string | null | undefined,
+  category?: string | null,
+): string {
+  const base = stripUnitRoomCaptionSuffix(caption, category);
+  if (!roomCaptionClassification(base, category)) return base;
+
+  const unitMatch = String(unitLabel ?? "").trim().match(UNIT_LETTER_RE);
+  if (!unitMatch) return base;
+  const suffix = ` (Unit ${unitMatch[1].toUpperCase()})`;
+  const maxBaseLength = Math.max(0, MAX_PUBLISHED_PHOTO_CAPTION_LENGTH - suffix.length);
+  const boundedBase = base.slice(0, maxBaseLength).trimEnd();
+  return boundedBase ? `${boundedBase}${suffix}` : base;
+}
 
 /** Caption used when a community photo has no usable caption of its own. */
 export const FALLBACK_DIVIDER_CAPTION = "Shared resort amenities";
@@ -270,7 +335,7 @@ export type LaidOutPhoto<T> = {
  *
  * Returns a flat list; callers map each item to their own entry shape.
  */
-export function planGalleryLayout<T extends { caption: string }>(input: {
+export function planGalleryLayout<T extends { caption: string; category?: string | null }>(input: {
   units: ReadonlyArray<LayoutUnitGallery<T>>;
   community: ReadonlyArray<T>;
   layout?: PhotoGalleryLayout | null;
@@ -288,6 +353,7 @@ export function planGalleryLayout<T extends { caption: string }>(input: {
   const communityRest = community.slice(dividers);
 
   const out: LaidOutPhoto<T>[] = [];
+  const appendUnitRoomSuffix = units.length > 1;
   units.forEach((unit, index) => {
     if (index > 0) {
       const divider = dividerPhotos[index - 1];
@@ -301,7 +367,17 @@ export function planGalleryLayout<T extends { caption: string }>(input: {
       }
     }
     for (const photo of unit.photos ?? []) {
-      out.push({ photo, kind: "unit", unitId: unit.unitId, unitLabel: unit.label });
+      out.push({
+        photo: appendUnitRoomSuffix
+          ? {
+              ...photo,
+              caption: captionWithUnitRoomSuffix(photo.caption, unit.label, photo.category),
+            }
+          : photo,
+        kind: "unit",
+        unitId: unit.unitId,
+        unitLabel: unit.label,
+      });
     }
   });
   for (const photo of communityRest) out.push({ photo, kind: "community" });

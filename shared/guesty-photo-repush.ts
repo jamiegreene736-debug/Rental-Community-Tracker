@@ -14,8 +14,9 @@
 // "Push Photos to Guesty" button:
 //   Unit A → Unit B → … → Community, each gallery hero-first-ordered via
 //   shared/photo-order.ts unless the operator dragged a manual sort_order;
-//   hidden photos dropped; caption = userLabel > label > static label >
-//   humanized filename.
+//   hidden photos dropped; base caption = userLabel > label > static label >
+//   humanized filename; multi-unit bedroom/bathroom captions then receive their
+//   natural logical Unit A/B suffix in planGalleryLayout.
 
 import { orderGallery, type PhotoScope } from "./photo-order";
 import { planGalleryLayout, type PhotoGalleryLayout } from "./photo-gallery-layout";
@@ -39,6 +40,8 @@ export type GuestyPushGallery = {
   labels?: GuestyPushLabelRow[];
   /** Static unit-builder-data captions, filename → label (original folders only). */
   staticLabels?: Record<string, string>;
+  /** Static unit-builder-data categories, filename → category (original folders only). */
+  staticCategories?: Record<string, string>;
   /** Builder unit id — required for `scope: "unit"` so the saved unit order applies. */
   unitId?: string;
   /** Natural-position label ("Unit B (3BR)") used in the divider caption. */
@@ -74,7 +77,7 @@ export function assembleGuestyPushPhotos(
   galleries: GuestyPushGallery[],
   layout?: PhotoGalleryLayout | null,
 ): GuestyPushPhoto[] {
-  type Entry = { localPath: string; caption: string };
+  type Entry = { localPath: string; caption: string; category: string | null };
   const unitGalleries: Array<{ unitId: string; label: string; photos: Entry[] }> = [];
   const community: Entry[] = [];
 
@@ -90,10 +93,13 @@ export function assembleGuestyPushPhotos(
         const caption = row?.userLabel || row?.label
           || gallery.staticLabels?.[filename]
           || captionFromFilename(filename);
-        const category = row?.userCategory || row?.category || null;
+        const category = row?.userCategory || row?.category
+          || gallery.staticCategories?.[filename]
+          || null;
         return {
           filename,
           caption,
+          category,
           // Same ranking signal as the builder: caption + category + filename.
           text: [caption, category, filename].filter(Boolean).join(" "),
           sortOrder: typeof row?.sortOrder === "number" ? row.sortOrder : null,
@@ -102,6 +108,7 @@ export function assembleGuestyPushPhotos(
     const ordered = orderGallery(entries, gallery.scope).map((entry) => ({
       localPath: `/photos/${gallery.folder}/${entry.filename}`,
       caption: entry.caption,
+      category: entry.category,
     }));
     if (gallery.scope === "community") {
       community.push(...ordered);

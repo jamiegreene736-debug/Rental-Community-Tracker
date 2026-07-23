@@ -39,6 +39,10 @@ assert.equal(parseBathroomSuiteNumber("Primary Bathroom"), 1);
 assert.equal(parseBathroomSuiteNumber("Bathroom 2 — Shower/Tub"), 2);
 assert.equal(parseBathroomSuiteNumber("Guest Bathroom"), null);
 assert.equal(parseBathroomSuiteNumber("Half Bath"), null);
+assert.equal(parseBedroomSuiteNumber("Master Bedroom — King (Unit A)"), 1);
+assert.equal(parseBedroomSuiteNumber("Bedroom 2 — Queen (Unit B)"), 2);
+assert.equal(parseBathroomSuiteNumber("Primary Bathroom (Unit A)"), 1);
+assert.equal(parseBathroomSuiteNumber("Bathroom 2 — Alt View (Unit B)"), 2);
 console.log("  ✓ bedroom/bathroom suite parsers");
 
 // ── outdoor grill detection ──────────────────────────────────────────────────
@@ -160,6 +164,19 @@ assert.deepEqual(
   "bedroom suites should pair with ensuite baths; outdoor grill last",
 );
 console.log("  ✓ orderGallery interleaves bedroom + ensuite bath suites");
+
+const suffixedSuites: P[] = [
+  { id: "bath2", text: "Bathroom 2 — Shower/Tub (Unit B)" },
+  { id: "bed2", text: "Bedroom 2 — Queen (Unit B)" },
+  { id: "bath1", text: "Primary Bathroom (Unit B)" },
+  { id: "bed1", text: "Master Bedroom — King (Unit B)" },
+];
+assert.deepEqual(
+  orderGallery(suffixedSuites, "unit").map((p) => p.id),
+  ["bed1", "bath1", "bed2", "bath2"],
+  "unit suffixes must not break suite/bathroom interleaving",
+);
+console.log("  ✓ suffixed captions preserve bedroom + ensuite ordering");
 
 // 2BR unit: many master alt views, then primary bath, bedroom 2, bath 2 — not all baths clustered.
 const unitB2br: P[] = [

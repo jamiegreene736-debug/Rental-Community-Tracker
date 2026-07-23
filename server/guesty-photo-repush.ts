@@ -148,7 +148,7 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
     id: string;
     photoFolder?: string;
     bedrooms?: number | null;
-    photos?: Array<{ filename: string; label: string }>;
+    photos?: Array<{ filename: string; label: string; category: string }>;
   }> = builder ? builder.units : draft!.units;
   const activeFolders = resolveActiveUnitPhotoFolders(propertyId, pushUnits, swaps);
   // The operator's saved layout (which unit leads + the between-units community
@@ -161,6 +161,7 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
     folder: string,
     scope: "unit" | "community",
     staticLabels?: Record<string, string>,
+    staticCategories?: Record<string, string>,
     unitId?: string,
     unitLabel?: string,
   ): Promise<GuestyPushGallery> => {
@@ -174,6 +175,7 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
       files,
       labels: await storage.getPhotoLabelsByFolder(folder).catch(() => []),
       staticLabels,
+      staticCategories,
       unitId,
       unitLabel,
     };
@@ -195,8 +197,18 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
     const staticLabels = !active.replaced && Array.isArray(unit.photos)
       ? Object.fromEntries(unit.photos.map((p) => [p.filename, p.label]))
       : undefined;
+    const staticCategories = !active.replaced && Array.isArray(unit.photos)
+      ? Object.fromEntries(unit.photos.map((p) => [p.filename, p.category]))
+      : undefined;
     galleries.push(
-      await galleryFor(active.activeFolder, "unit", staticLabels, unit.id, unitGalleryLabel(index, unit.bedrooms)),
+      await galleryFor(
+        active.activeFolder,
+        "unit",
+        staticLabels,
+        staticCategories,
+        unit.id,
+        unitGalleryLabel(index, unit.bedrooms),
+      ),
     );
   }
   // Community last.
