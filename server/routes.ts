@@ -2464,7 +2464,31 @@ async function uploadBufferToImgBbWithRetry(
 }
 
 function sanitizePublicPathSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90) || "photo";
+  let sanitized = "";
+  let replacingInvalidRun = false;
+  for (const character of String(value ?? "").slice(0, 256)) {
+    const code = character.charCodeAt(0);
+    const allowed =
+      (code >= 48 && code <= 57)
+      || (code >= 65 && code <= 90)
+      || (code >= 97 && code <= 122)
+      || character === "."
+      || character === "_"
+      || character === "-";
+    if (allowed) {
+      sanitized += character;
+      replacingInvalidRun = false;
+    } else if (sanitized && !replacingInvalidRun) {
+      sanitized += "-";
+      replacingInvalidRun = true;
+    }
+    if (sanitized.length >= 91) break;
+  }
+  let start = 0;
+  let end = sanitized.length;
+  while (start < end && sanitized[start] === "-") start++;
+  while (end > start && sanitized[end - 1] === "-") end--;
+  return sanitized.slice(start, end).slice(0, 90) || "photo";
 }
 
 function hostGuestyPhotoLocally(
@@ -2480,9 +2504,17 @@ function hostGuestyPhotoLocally(
   const ext = mimeType === "image/png" ? ".png" : mimeType === "image/webp" ? ".webp" : ".jpg";
   const filename = `${String(index).padStart(3, "0")}-${Date.now()}-${sourceName}${ext}`;
   const relativePath = `/photos/_guesty-hosted/${folder}/${filename}`;
-  const targetDir = path.join(process.cwd(), "client", "public", "photos", "_guesty-hosted", folder);
+  const hostedRoot = path.resolve(process.cwd(), "client", "public", "photos", "_guesty-hosted");
+  const targetDir = path.resolve(hostedRoot, folder);
+  const targetPath = path.resolve(targetDir, filename);
+  if (
+    !targetDir.startsWith(`${hostedRoot}${path.sep}`)
+    || !targetPath.startsWith(`${targetDir}${path.sep}`)
+  ) {
+    throw new Error("Refusing to host a Guesty photo outside the public photo directory.");
+  }
   fs.mkdirSync(targetDir, { recursive: true });
-  fs.writeFileSync(path.join(targetDir, filename), buffer);
+  fs.writeFileSync(targetPath, buffer);
   return `${publicPhotoBaseUrl(req)}${relativePath}`;
 }
 
@@ -26189,6 +26221,22 @@ Requirements:
     }
   });
 
+  // Expensive whole-gallery writes are operator actions, not polling endpoints.
+  // Bound them per signed-in portal user + IP so repeated requests cannot fan
+  // out image downloads/uploads or long Guesty replacement loops.
+  const guestyPhotoMutationRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 20,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    keyGenerator: (req, res) => {
+      const session = res.locals.portalSession as { username?: string } | undefined;
+      const address = req.ip ?? req.socket.remoteAddress ?? "unknown";
+      return `${session?.username ?? "unauthenticated"}:${ipKeyGenerator(address)}`;
+    },
+    message: { error: "Too many Guesty photo updates. Please wait a minute and try again." },
+  });
+
   // POST /api/builder/push-photos
   // Streams NDJSON events as each photo completes to keep progress flowing.
   // Each line: { type:"photo", index, total, localPath, success, url?, wasUpscaled?, error? }
@@ -26199,7 +26247,7 @@ Requirements:
   // route keeps working after the cut (hosting progress checkpoints + the
   // all-or-nothing final PUT/verify), and the recordGuestyPush ledger stamp at
   // the end is the client's reconcile signal (shared/push-reconcile.ts).
-  app.post("/api/builder/push-photos", async (req, res) => {
+  app.post("/api/builder/push-photos", guestyPhotoMutationRateLimit, async (req, res) => {
     const imgbbKey = process.env.IMGBB_API_KEY;
     const replicateKey = process.env.REPLICATE_API_KEY;
 
@@ -33009,7 +33057,7 @@ Return ONLY compact JSON with this exact shape:
     }
   });
 
-  app.post("/api/builder/normalize-photos", async (req, res) => {
+  app.post("/api/builder/normalize-photos", guestyPhotoMutationRateLimit, async (req, res) => {
     const imgbbKey = process.env.IMGBB_API_KEY;
     if (!imgbbKey) {
       return res.status(500).json({ error: "IMGBB_API_KEY not configured" });

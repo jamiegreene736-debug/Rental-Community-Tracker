@@ -60,6 +60,22 @@ export const GUESTY_PUSH_HISTORY_LISTING_CAP = 200;
 // still backfill an entry it wrote "just now" — anything further in the
 // future is rejected.
 const FUTURE_SKEW_MS = 5 * 60 * 1000;
+const RESERVED_RECORD_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function createGuestyPushListingsStore(): GuestyPushHistoryStore["listings"] {
+  return Object.create(null) as GuestyPushHistoryStore["listings"];
+}
+
+export function isSafeGuestyPushListingKey(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const id = value.trim();
+  return (
+    id.length > 0
+    && id.length <= 128
+    && !RESERVED_RECORD_KEYS.has(id)
+    && /^[a-zA-Z0-9._:-]+$/.test(id)
+  );
+}
 
 const isValidIso = (value: unknown): value is string =>
   typeof value === "string" && Number.isFinite(new Date(value).getTime());
@@ -94,16 +110,16 @@ export function sanitizeGuestyPushEntry(value: unknown): GuestyPushEntry | null 
 }
 
 export function parseGuestyPushHistoryStore(raw: string | null | undefined): GuestyPushHistoryStore {
-  const empty: GuestyPushHistoryStore = { version: 1, listings: {} };
+  const empty: GuestyPushHistoryStore = { version: 1, listings: createGuestyPushListingsStore() };
   if (!raw) return empty;
   try {
     const parsed = JSON.parse(raw) as Partial<GuestyPushHistoryStore> | null;
     if (!parsed || typeof parsed !== "object" || !parsed.listings || typeof parsed.listings !== "object") {
       return empty;
     }
-    const listings: GuestyPushHistoryStore["listings"] = {};
+    const listings = createGuestyPushListingsStore();
     for (const [listingId, rec] of Object.entries(parsed.listings)) {
-      if (!listingId || !rec || typeof rec !== "object") continue;
+      if (!isSafeGuestyPushListingKey(listingId) || !rec || typeof rec !== "object") continue;
       const tabsIn = (rec as { tabs?: unknown }).tabs;
       if (!tabsIn || typeof tabsIn !== "object") continue;
       const tabs: GuestyPushListingHistory = {};
@@ -117,7 +133,12 @@ export function parseGuestyPushHistoryStore(raw: string | null | undefined): Gue
       const updatedAt = isValidIso(updatedAtRaw)
         ? new Date(updatedAtRaw).toISOString()
         : new Date(0).toISOString();
-      listings[listingId] = { tabs, updatedAt };
+      Object.defineProperty(listings, listingId, {
+        value: { tabs, updatedAt },
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
     return { version: 1, listings };
   } catch {
@@ -151,11 +172,19 @@ export function applyGuestyPushRecord(
 ): boolean {
   const id = String(listingId ?? "").trim();
   const clean = sanitizeGuestyPushEntry(entry);
-  if (!id || !clean) return false;
+  if (!isSafeGuestyPushListingKey(id) || !isGuestyPushTab(tab) || !clean) return false;
+  if (Object.getPrototypeOf(store.listings) !== null) {
+    store.listings = Object.assign(createGuestyPushListingsStore(), store.listings);
+  }
   const rec = store.listings[id] ?? { tabs: {}, updatedAt: nowIso };
   rec.tabs[tab] = clean;
   rec.updatedAt = nowIso;
-  store.listings[id] = rec;
+  Object.defineProperty(store.listings, id, {
+    value: rec,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
   return true;
 }
 
@@ -178,7 +207,9 @@ export function applyGuestyPushBackfill(
   let applied = 0;
   let rejected = 0;
   const id = String(listingId ?? "").trim();
-  if (!id || !entries || typeof entries !== "object") return { applied, rejected };
+  if (!isSafeGuestyPushListingKey(id) || !entries || typeof entries !== "object") {
+    return { applied, rejected };
+  }
   for (const [tab, value] of Object.entries(entries as Record<string, unknown>)) {
     if (!isGuestyPushTab(tab)) {
       rejected++;
