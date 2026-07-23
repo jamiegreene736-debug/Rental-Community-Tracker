@@ -2627,7 +2627,7 @@ function AdminDashboard() {
   // unit-number-in-page-text). One verified match on a "clean" platform renders the display-only
   // amber REVIEW badge (subThresholdVerifiedMatches) — below the 2-photo red threshold, so it never
   // raises the red duplicate-photos popup and never feeds the auto-replace machinery.
-  type PhotoMatchRow = { photoUrl: string; listingUrl: string; title: string; source: string; verified?: boolean };
+  type PhotoMatchRow = { photoUrl: string; listingUrl: string; title: string; source: string; verified?: boolean; matchImageUrl?: string };
   type PhotoCheckRow = {
     folder: string;
     airbnbStatus: PhotoStatus;
@@ -7560,16 +7560,39 @@ function AdminDashboard() {
                       <div className="text-xs font-semibold text-muted-foreground">{folder}</div>
                       {matches.map((m, i) => (
                         <div key={`${m.listingUrl}-${i}`} className="flex gap-3 items-start" data-testid={`photo-review-match-${propertyId}-${i}`}>
-                          {m.photoUrl ? (
-                            <a href={m.photoUrl} target="_blank" rel="noreferrer" title="Open our photo full size">
-                              <img
-                                src={m.photoUrl}
-                                alt="Our photo that matched"
-                                className="h-16 w-16 rounded object-cover border"
-                                onError={(e) => { const a = e.currentTarget.closest("a"); if (a) { a.style.display = "none"; } else { e.currentTarget.style.display = "none"; } }}
-                              />
-                            </a>
-                          ) : null}
+                          {/* Side-by-side: OUR photo vs the photo it matched on the flagged
+                              listing (the Lens thumbnail), so the operator can judge a real
+                              repost vs a look-alike at a glance. Each hides itself on load
+                              error (Google thumbnails can expire); legacy rows scanned before
+                              matchImageUrl existed simply show "Ours" until the next rescan. */}
+                          <div className="flex shrink-0 gap-2">
+                            {m.photoUrl ? (
+                              <figure className="m-0 w-16 space-y-0.5 text-center" title="Open our photo full size">
+                                <a href={m.photoUrl} target="_blank" rel="noreferrer">
+                                  <img
+                                    src={m.photoUrl}
+                                    alt="Our photo that matched"
+                                    className="h-16 w-16 rounded object-cover border"
+                                    onError={(e) => { const a = e.currentTarget.closest("figure"); if (a) { a.style.display = "none"; } else { e.currentTarget.style.display = "none"; } }}
+                                  />
+                                </a>
+                                <figcaption className="text-[10px] text-muted-foreground">Ours</figcaption>
+                              </figure>
+                            ) : null}
+                            {m.matchImageUrl ? (
+                              <figure className="m-0 w-16 space-y-0.5 text-center" title="Open the matching photo from the flagged listing full size">
+                                <a href={m.matchImageUrl} target="_blank" rel="noreferrer">
+                                  <img
+                                    src={m.matchImageUrl}
+                                    alt="The matching photo on the flagged listing"
+                                    className="h-16 w-16 rounded object-cover border border-red-300 dark:border-red-800"
+                                    onError={(e) => { const a = e.currentTarget.closest("figure"); if (a) { a.style.display = "none"; } else { e.currentTarget.style.display = "none"; } }}
+                                  />
+                                </a>
+                                <figcaption className="text-[10px] text-red-700 dark:text-red-400">On the listing</figcaption>
+                              </figure>
+                            ) : null}
+                          </div>
                           <div className="min-w-0 flex-1 space-y-1">
                             <div className="text-xs font-medium truncate">{m.title || "Flagged listing"}</div>
                             <a
