@@ -7,7 +7,7 @@ export interface RevenueProjectionMonth {
   month: string; // "YYYY-MM"
   label: string; // "Aug 2026"
   onBooksRevenue: number; // contracted guest revenue for stays this month
-  baselineRevenue: number; // T90 run-rate × days in month (Phase 1 fill)
+  baselineRevenue: number; // T30 run-rate × days in month (fill basis — operator choice 2026-07-23)
   projectedRevenue: number; // max(onBooks, baseline)
   onBooksPct: number; // onBooksRevenue / projectedRevenue (0..1)
   seasonalWeight: number; // baseline seasonal multiplier applied (1 = neutral)
@@ -26,16 +26,16 @@ export interface RevenueProjectionTrailing {
   collectedLast60: number;
   collectedLast90: number;
   collectedLast365: number;
-  collectedDailyAvg90: number;
-  collectedRunRateAnnual: number; // dailyAvg90 × 365
+  collectedDailyAvg30: number;
+  collectedRunRateAnnual: number; // dailyAvg30 × 365
   collectedMomentumPct: number | null; // (last30 − prev30) / prev30
   revenueLast30: number;
   revenuePrev30: number;
   revenueLast60: number;
   revenueLast90: number;
   revenueLast365: number;
-  revenueDailyAvg90: number;
-  revenueRunRateAnnual: number;
+  revenueDailyAvg30: number;
+  revenueRunRateAnnual: number; // dailyAvg30 × 365
   revenueMomentumPct: number | null;
   revenuePrev365: number; // booking revenue in [today-730, today-365) — the prior year
   revenueYoyPct: number | null; // (last365 − prev365) / prev365, null when no prior-year data
@@ -45,7 +45,7 @@ export interface RevenueProjectionTrailing {
 
 // How the far-month baseline was shaped. `applied` = we had enough trailing
 // stay-history to weight the baseline seasonally; otherwise it stays a flat
-// 90-day run rate (Phase 1 behavior).
+// 30-day run rate.
 export interface RevenueProjectionSeasonality {
   applied: boolean;
   monthsOfHistory: number; // calendar months of the past year with realized stay revenue

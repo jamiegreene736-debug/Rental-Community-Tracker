@@ -7,7 +7,7 @@
 //
 // Methodology (Phase 1): each future month is anchored on ON-THE-BOOKS revenue
 // (already contracted) and, for months that aren't booked up yet, filled up to
-// the trailing 90-day run rate — never summed, so a strong near month keeps its
+// the trailing 30-day run rate — never summed, so a strong near month keeps its
 // real figure. Net profit is on-the-books only (contracted stays), estimating a
 // market-rate cost for any slot not yet bought in.
 
@@ -181,7 +181,7 @@ export function RevenueProjectionBand({
                   Revenue is anchored on already-booked stays and filled where a month isn't booked up yet
                   {ready.seasonality.applied
                     ? ` — using a seasonal estimate from your last ${ready.seasonality.monthsOfHistory} months of stay revenue`
-                    : " — using your trailing 90-day run rate"}
+                    : " — using your trailing 30-day run rate"}
                   . Net profit counts contracted stays only, estimating a market-rate cost for slots not yet bought in.
                 </p>
                 <div className="mt-3 max-w-full overflow-x-auto rounded-md border">
@@ -240,8 +240,8 @@ export function RevenueProjectionBand({
             {usd(t.onBooksRevenue12mo)} contracted · {pct(t.onBooksPct12mo)} on the books
           </p>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
-            <span className="text-[11px] text-muted-foreground" title="Trailing 90-day booking run rate, annualized — your current pace for comparison.">
-              90-day run rate: {usd(ready.trailing.revenueRunRateAnnual)}/yr
+            <span className="text-[11px] text-muted-foreground" title="Trailing 30-day booking run rate, annualized — your current pace for comparison.">
+              30-day run rate: {usd(ready.trailing.revenueRunRateAnnual)}/yr
             </span>
             <MomentumChip value={ready.trailing.revenueMomentumPct} label="vs prior 30d" />
             <MomentumChip value={ready.trailing.revenueYoyPct} label="YoY" />
@@ -256,8 +256,8 @@ export function RevenueProjectionBand({
           <p className="mt-1 text-2xl font-bold">{usd(t.projectedCollections12mo)}</p>
           <p className="text-[11px] text-muted-foreground">scheduled guest payments (cash in)</p>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
-            <span className="text-[11px] text-muted-foreground" title="Trailing 90-day collected-cash run rate, annualized.">
-              90-day run rate: {usd(ready.trailing.collectedRunRateAnnual)}/yr
+            <span className="text-[11px] text-muted-foreground" title="Trailing 30-day collected-cash run rate, annualized.">
+              30-day run rate: {usd(ready.trailing.collectedRunRateAnnual)}/yr
             </span>
             <MomentumChip value={ready.trailing.collectedMomentumPct} label="vs prior 30d" />
           </div>

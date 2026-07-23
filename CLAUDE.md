@@ -43,6 +43,23 @@ Before making any changes:
 
 ## Recent operational notes
 
+- 2026-07-23 (dashboard revenue projection: run-rate basis 90d → PAST 30 DAYS): Operator: "instead
+  of using a 90 day average etc use the past 30 days instead." SHIPPED
+  (`claude/back-office-tasks-tab-o6h7dv`): server/revenue-projection-aggregate.ts now derives the
+  headline daily averages from the trailing 30 days (`collectedDailyAvg30`/`revenueDailyAvg30` =
+  last30/30 — fields RENAMED from *DailyAvg90 in shared/revenue-projection-types.ts), the
+  annualized run-rate KPIs are dailyAvg30 × 365, and the 12-month projection's far-month baseline
+  fill is revenueDailyAvg30 × daysInMonth × seasonalWeight. T60/T90/T365 window stats + the
+  30-vs-prior-30 momentum + YoY are unchanged (context only). UI labels flipped to "30-day run
+  rate" (revenue-projection-band.tsx + home.tsx KPI band/tile). DON'T "smooth" this back to /90 —
+  operator explicitly chose the more reactive basis; a source guard in
+  tests/revenue-projection-aggregate.test.ts trips on any 90-day divisor reintroduction. Stale
+  cached snapshots still render (the band reads only surviving fields); the next
+  revenue-projection scheduler tick recomputes on the new basis. Verified:
+  revenue-projection-aggregate 54/0 (expectations recomputed for the 30-day basis + 3 source
+  guards), full `npm test` REAL exit 0, build clean ("30-day run rate" bundle-grepped, old label
+  gone), `npm run check` 334 = baseline.
+
 - 2026-07-22 (Mauna Lani Point draft -13: "3 bedroom condo" that was really the 4BR HOUSE at
   68-1034 — full layer-by-layer diagnosis + fix): Operator: "identify why this went so wrong and
   fix it in every layer." RECONSTRUCTED FROM PROD DB (don't re-chase): (1) 7/12 the replace flow

@@ -51,11 +51,16 @@ console.log("revenue-projection: trailing windows + momentum");
   check("revenueLast30 = 1000 (recent booking only)", t.revenueLast30 === 1000, t.revenueLast30);
   check("revenuePrev30 = 2000 (45-day-ago booking)", t.revenuePrev30 === 2000, t.revenuePrev30);
   check("revenueLast90 = 3000 (both bookings)", t.revenueLast90 === 3000, t.revenueLast90);
-  check("revenueDailyAvg90 = 3000/90", near(t.revenueDailyAvg90, 3000 / 90), t.revenueDailyAvg90);
-  check("revenueRunRateAnnual = round(dailyAvg90*365)", t.revenueRunRateAnnual === Math.round((3000 / 90) * 365), t.revenueRunRateAnnual);
+  // Run-rate basis is the PAST 30 DAYS (operator directive 2026-07-23) — the
+  // 90-day window is still reported, but the daily average and annualized
+  // run-rate derive from last30 only.
+  check("revenueDailyAvg30 = 1000/30", near(t.revenueDailyAvg30, 1000 / 30), t.revenueDailyAvg30);
+  check("revenueRunRateAnnual = round(dailyAvg30*365)", t.revenueRunRateAnnual === Math.round((1000 / 30) * 365), t.revenueRunRateAnnual);
   check("revenueMomentum = (1000-2000)/2000 = -0.5", near(t.revenueMomentumPct ?? NaN, -0.5, 1e-9), t.revenueMomentumPct);
   check("collectedLast30 = 800", t.collectedLast30 === 800, t.collectedLast30);
   check("collectedLast90 = 800", t.collectedLast90 === 800, t.collectedLast90);
+  check("collectedDailyAvg30 = 800/30", near(t.collectedDailyAvg30, 800 / 30), t.collectedDailyAvg30);
+  check("collectedRunRateAnnual = round((800/30)*365)", t.collectedRunRateAnnual === Math.round((800 / 30) * 365), t.collectedRunRateAnnual);
 }
 
 // ── Forward projection: OTB revenue, cost, net profit, estimate ───────────
@@ -143,7 +148,7 @@ console.log("revenue-projection: paidRate preference, cancelled slot, horizon");
   check("no month bucket for out-of-horizon 2028-01", !snap.months.some((m) => m.month === "2028-01"), snap.months.map((m) => m.month));
 }
 
-// ── Baseline fill for empty far months (Phase 1 T90 run-rate) ─────────────
+// ── Baseline fill for empty far months (T30 run-rate) ─────────────────────
 console.log("revenue-projection: baseline fill + on-books split");
 {
   const trailingBookingReservations: ProjectionReservationLike[] = [
@@ -161,12 +166,12 @@ console.log("revenue-projection: baseline fill + on-books split");
     },
   ];
   const snap = aggregateRevenueProjection({ forwardStayReservations, trailingBookingReservations, nowMs: NOW });
-  const dailyAvg = 3000 / 90;
+  const dailyAvg = 3000 / 30; // booked 14 days ago → inside the 30-day basis window
   const aug = monthOf(snap, "2026-08"); // 31 days, has an $8000 booking
   const farJun = monthOf(snap, "2027-06"); // 30 days, no bookings
   const baselineAug = Math.round(dailyAvg * 31);
   const baselineJun = Math.round(dailyAvg * 30);
-  check("far empty month baseline = round(dailyAvg90 * days)", farJun.baselineRevenue === baselineJun, { got: farJun.baselineRevenue, baselineJun });
+  check("far empty month baseline = round(dailyAvg30 * days)", farJun.baselineRevenue === baselineJun, { got: farJun.baselineRevenue, baselineJun });
   check("far empty month projected = baseline (OTB is 0)", farJun.projectedRevenue === baselineJun, farJun.projectedRevenue);
   check("far empty month on-books revenue = 0", farJun.onBooksRevenue === 0, farJun.onBooksRevenue);
   check("far empty month onBooksPct = 0", farJun.onBooksPct === 0, farJun.onBooksPct);
@@ -181,7 +186,7 @@ console.log("revenue-projection: baseline fill + on-books split");
 // ── Phase 2: seasonal baseline from trailing-year stay revenue ────────────
 console.log("revenue-projection: seasonal baseline weighting");
 {
-  // Trailing booking run-rate: $9000 over last 90 days → $100/day.
+  // Trailing booking run-rate: $9000 over the last 30 days → $300/day.
   const trailingBookingReservations: ProjectionReservationLike[] = [
     { _id: "rr", status: "confirmed", createdAt: "2026-07-01T00:00:00Z", money: { totalPrice: 9000 } },
   ];
@@ -213,11 +218,11 @@ console.log("revenue-projection: seasonal baseline weighting");
   const sep = monthOf(snap, "2026-09"); // 30 days, cal month 9 → weight clamped to 0.4
   const feb = monthOf(snap, "2027-02"); // 28 days, cal month 2 → no history → neutral 1
   check("Aug seasonal weight clamped to 2.0", aug.seasonalWeight === 2.0, aug.seasonalWeight);
-  check("Aug baseline = 100/day x 31 x 2.0 = 6200", aug.baselineRevenue === 6200, aug.baselineRevenue);
+  check("Aug baseline = 300/day x 31 x 2.0 = 18600", aug.baselineRevenue === 18600, aug.baselineRevenue);
   check("Sep seasonal weight clamped to 0.4", sep.seasonalWeight === 0.4, sep.seasonalWeight);
-  check("Sep baseline = 100/day x 30 x 0.4 = 1200", sep.baselineRevenue === 1200, sep.baselineRevenue);
+  check("Sep baseline = 300/day x 30 x 0.4 = 3600", sep.baselineRevenue === 3600, sep.baselineRevenue);
   check("Feb (no history) weight neutral 1", feb.seasonalWeight === 1, feb.seasonalWeight);
-  check("Feb baseline = 100/day x 28 x 1 = 2800", feb.baselineRevenue === 2800, feb.baselineRevenue);
+  check("Feb baseline = 300/day x 28 x 1 = 8400", feb.baselineRevenue === 8400, feb.baselineRevenue);
 }
 
 console.log("revenue-projection: seasonality falls back to flat when sparse");
@@ -238,7 +243,7 @@ console.log("revenue-projection: seasonality falls back to flat when sparse");
   });
   check("seasonality NOT applied with <6 months of history", snap.seasonality.applied === false, snap.seasonality);
   const aug = monthOf(snap, "2026-08");
-  check("sparse history → flat baseline (weight 1)", aug.seasonalWeight === 1 && aug.baselineRevenue === 6200 / 2, aug.baselineRevenue);
+  check("sparse history → flat baseline (weight 1)", aug.seasonalWeight === 1 && aug.baselineRevenue === Math.round((9000 / 30) * 31), aug.baselineRevenue);
 }
 
 console.log("revenue-projection: YoY growth");
@@ -262,6 +267,17 @@ console.log("revenue-projection: YoY growth");
     nowMs: NOW,
   });
   check("YoY null when no prior-year data", noPrior.trailing.revenueYoyPct === null, noPrior.trailing.revenueYoyPct);
+}
+
+// Source guard: the run-rate basis is the past 30 days (operator directive
+// 2026-07-23) — reverting the divisor to /90 must trip the suite even if the
+// arithmetic above is refactored.
+{
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../server/revenue-projection-aggregate.ts", import.meta.url), "utf8");
+  check("aggregate derives dailyAvg from last30/30", src.includes("collectedLast30 / 30") && src.includes("revenueLast30 / 30"), null);
+  check("baseline fill uses revenueDailyAvg30", src.includes("revenueDailyAvg30 * daysInMonth"), null);
+  check("no 90-day daily average remains", !/DailyAvg90/.test(src) && !src.includes("Last90 / 90"), null);
 }
 
 console.log(`\nrevenue-projection-aggregate: ${pass} passed, ${fail} failed`);
