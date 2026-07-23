@@ -4322,7 +4322,7 @@ function AdminDashboard() {
                   {revenueSummary ? ` · ${revenueSummary.paymentsTaken5Days ?? 0} payment${(revenueSummary.paymentsTaken5Days ?? 0) === 1 ? "" : "s"}` : ""}
                 </p>
                 <p className="mt-1 text-xs font-medium leading-snug text-foreground" data-testid="text-funds-run-rate">
-                  90-day run rate: {projTrailing ? `${formatCurrency(projTrailing.collectedRunRateAnnual)}/yr` : "—"}
+                  30-day run rate: {projTrailing ? `${formatCurrency(projTrailing.collectedRunRateAnnual)}/yr` : "—"}
                   <span className="font-normal text-muted-foreground"> · 12-mo projection above</span>
                 </p>
                 <p className="mt-1 text-xs font-medium leading-snug text-foreground" data-testid="text-next-deposit">
@@ -4689,7 +4689,7 @@ function AdminDashboard() {
                   {revenueSummary ? ` · ${revenueSummary.bookingCount5Days ?? 0} booking${(revenueSummary.bookingCount5Days ?? 0) === 1 ? "" : "s"}` : ""}
                 </p>
                 <p className="mt-1 text-xs font-medium leading-snug text-foreground" data-testid="text-booking-revenue-forecast">
-                  90-day run rate: {projTrailing ? `${formatCurrency(projTrailing.revenueRunRateAnnual)}/yr` : "—"}
+                  30-day run rate: {projTrailing ? `${formatCurrency(projTrailing.revenueRunRateAnnual)}/yr` : "—"}
                   <span className="font-normal text-muted-foreground"> · 12-mo projection above</span>
                 </p>
               </button>
@@ -4721,7 +4721,7 @@ function AdminDashboard() {
                     <p className="text-xs text-muted-foreground">{revenueSummary?.bookingCount5Days ?? 0} booking{(revenueSummary?.bookingCount5Days ?? 0) === 1 ? "" : "s"}</p>
                   </div>
                   <div className="rounded-md border bg-muted/30 p-3">
-                    <p className="text-xs font-medium text-muted-foreground">90-day run rate</p>
+                    <p className="text-xs font-medium text-muted-foreground">30-day run rate</p>
                     <p className="mt-1 text-lg font-semibold">{projTrailing ? formatCurrency(projTrailing.revenueRunRateAnnual) : "—"}</p>
                     <p className="text-xs text-muted-foreground">annualized · see 12-mo projection at top</p>
                   </div>

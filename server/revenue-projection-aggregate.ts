@@ -10,14 +10,16 @@
 //      the old naive "(last 3 days ÷ 3) × 365" forecast basis. We compute
 //      T30/T60/T90/T365 windows for BOTH collected cash (by payment date) and
 //      booking revenue (by booking date), plus a T30-vs-prior-30 momentum %.
-//      The stable headline is the T90 daily average.
+//      The headline is the T30 daily average (operator choice 2026-07-23:
+//      "instead of using a 90 day average etc use the past 30 days") — the
+//      T30/T60/T90/T365 window stats are still reported for context.
 //
 //   2. FORWARD 12-month projection (the real ask), bucketed by STAY month — NOT
 //      booking date — because that is when revenue is earned and buy-in cost is
 //      incurred. The anchor is ON-THE-BOOKS (OTB): revenue already contracted
 //      for each future month. Since the portfolio is heavily forward-booked,
 //      the near months are largely known, not guessed. For the far months that
-//      are only sparsely booked, Phase 1 fills the gap with a flat T90 run-rate
+//      are only sparsely booked, the fill is a flat T30 run-rate
 //      BASELINE: projectedRevenue[m] = max(OTB[m], baseline[m]). Taking the max
 //      (never a sum) means a near month that is already booking strongly keeps
 //      its real OTB figure and is never inflated, while a far month that nobody
@@ -371,16 +373,20 @@ export function aggregateRevenueProjection(input: {
     }
   }
 
-  const collectedDailyAvg90 = collectedLast90 / 90;
-  const revenueDailyAvg90 = revenueLast90 / 90;
+  // Run-rate basis = the PAST 30 DAYS (operator directive 2026-07-23; was the
+  // T90 average). More reactive to the current pace by design — the 60/90/365
+  // windows remain in the payload for context but do not drive the headline
+  // or the projection baseline.
+  const collectedDailyAvg30 = collectedLast30 / 30;
+  const revenueDailyAvg30 = revenueLast30 / 30;
   const trailing: RevenueProjectionTrailing = {
     collectedLast30,
     collectedPrev30,
     collectedLast60,
     collectedLast90,
     collectedLast365,
-    collectedDailyAvg90,
-    collectedRunRateAnnual: Math.round(collectedDailyAvg90 * 365),
+    collectedDailyAvg30,
+    collectedRunRateAnnual: Math.round(collectedDailyAvg30 * 365),
     collectedMomentumPct:
       collectedPrev30 > 0 ? (collectedLast30 - collectedPrev30) / collectedPrev30 : null,
     revenueLast30,
@@ -388,8 +394,8 @@ export function aggregateRevenueProjection(input: {
     revenueLast60,
     revenueLast90,
     revenueLast365,
-    revenueDailyAvg90,
-    revenueRunRateAnnual: Math.round(revenueDailyAvg90 * 365),
+    revenueDailyAvg30,
+    revenueRunRateAnnual: Math.round(revenueDailyAvg30 * 365),
     revenueMomentumPct:
       revenuePrev30 > 0 ? (revenueLast30 - revenuePrev30) / revenuePrev30 : null,
     revenuePrev365,
@@ -479,7 +485,7 @@ export function aggregateRevenueProjection(input: {
   const months: RevenueProjectionMonth[] = acc.map((b) => {
     const calMonth = Number(b.month.slice(5, 7));
     const seasonalWeight = seasonal.weights[calMonth] ?? 1;
-    const baselineRevenue = Math.round(revenueDailyAvg90 * daysInMonth(b.month) * seasonalWeight);
+    const baselineRevenue = Math.round(revenueDailyAvg30 * daysInMonth(b.month) * seasonalWeight);
     const onBooksRevenue = Math.round(b.onBooksRevenue);
     const projectedRevenue = Math.max(onBooksRevenue, baselineRevenue);
     return {
