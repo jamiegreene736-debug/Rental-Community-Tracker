@@ -1361,6 +1361,22 @@ export const propertyTrailingRevenue = pgTable("property_trailing_revenue", {
 export type PropertyTrailingRevenue = typeof propertyTrailingRevenue.$inferSelect;
 export type InsertPropertyTrailingRevenue = typeof propertyTrailingRevenue.$inferInsert;
 
+// Cached snapshot of the dashboard 12-month revenue projection + trailing
+// run-rate (server/revenue-projection-aggregate.ts). A SINGLE row (id always 1)
+// holding the whole computed snapshot as JSON — the projection is one portfolio-
+// wide object, not per-property, so a columnar schema would only fragment it.
+// The daily scheduler (server/revenue-projection-scheduler.ts) wholesale-replaces
+// this row; the dashboard reads it via GET /api/dashboard/revenue-projection.
+// Kept off the request path because computing it pulls the account-wide Guesty
+// reservation set twice (forward stay window + trailing booking window).
+export const revenueProjection = pgTable("revenue_projection", {
+  id: integer("id").primaryKey().default(1),
+  payload: jsonb("payload").notNull(),
+  computedAt: timestamp("computed_at").defaultNow().notNull(),
+});
+export type RevenueProjectionRow = typeof revenueProjection.$inferSelect;
+export type InsertRevenueProjectionRow = typeof revenueProjection.$inferInsert;
+
 // In-system amenity selection per property, keyed by the app propertyId — a
 // POSITIVE core id OR a NEGATIVE -draftId (same convention as guesty_property_map).
 // This is the ONLY durable home for a property's amenity set: before this table

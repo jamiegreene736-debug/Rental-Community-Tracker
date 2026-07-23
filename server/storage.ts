@@ -19,6 +19,7 @@ import {
   type BookingAlternativePage, bookingAlternativePages,
   type GuestReceipt, type InsertGuestReceipt, guestReceipts,
   type PropertyTrailingRevenue, type InsertPropertyTrailingRevenue, propertyTrailingRevenue,
+  type RevenueProjectionRow, revenueProjection,
   type PropertyAmenities, type InsertPropertyAmenities, propertyAmenities,
   type AutoFillLossOptions, autoFillLossOptions,
   type BulkAutoFillState, bulkAutoFillState,
@@ -391,6 +392,8 @@ export interface IStorage {
   // all rows keyed by propertyId (= operationsPropertyId).
   getPropertyTrailingRevenue(): Promise<PropertyTrailingRevenue[]>;
   replacePropertyTrailingRevenue(rows: InsertPropertyTrailingRevenue[]): Promise<void>;
+  getRevenueProjection(): Promise<RevenueProjectionRow | null>;
+  replaceRevenueProjection(payload: unknown): Promise<void>;
 
   // In-system amenity selection per property (positive core id OR negative
   // -draftId). Written by the photo amenity scan + the bulk-combo listing job.
@@ -1796,6 +1799,21 @@ export class DatabaseStorage implements IStorage {
     await db.transaction(async (tx) => {
       await tx.delete(propertyTrailingRevenue);
       if (rows.length > 0) await tx.insert(propertyTrailingRevenue).values(rows);
+    });
+  }
+
+  // ── Revenue projection snapshot (single row, id = 1) ──
+  async getRevenueProjection(): Promise<RevenueProjectionRow | null> {
+    const [row] = await db.select().from(revenueProjection).where(eq(revenueProjection.id, 1));
+    return row ?? null;
+  }
+
+  // Wholesale-replace the single snapshot row (delete + insert in one txn) so a
+  // reader never sees a half-written payload.
+  async replaceRevenueProjection(payload: unknown): Promise<void> {
+    await db.transaction(async (tx) => {
+      await tx.delete(revenueProjection).where(eq(revenueProjection.id, 1));
+      await tx.insert(revenueProjection).values({ id: 1, payload, computedAt: new Date() });
     });
   }
 

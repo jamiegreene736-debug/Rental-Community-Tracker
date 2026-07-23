@@ -811,6 +811,21 @@ export async function ensureRuntimeSchema(): Promise<void> {
   `);
   console.log("[schema] ensured property_trailing_revenue table");
 
+  // Cached snapshot of the dashboard 12-month revenue projection + trailing
+  // run-rate (server/revenue-projection-aggregate.ts), refreshed daily by the
+  // revenue-projection scheduler. Single row (id = 1). Created here so a fresh
+  // Railway deploy works before `npm run db:push`; GET
+  // /api/dashboard/revenue-projection fails-soft ({ready:false}) until the first
+  // scheduler run populates it.
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS revenue_projection (
+      id integer PRIMARY KEY DEFAULT 1,
+      payload jsonb NOT NULL,
+      computed_at timestamp NOT NULL DEFAULT now()
+    )
+  `);
+  console.log("[schema] ensured revenue_projection table");
+
   // Guest issues tracker + threaded comments for the guest inbox (operator +
   // remote "agent" portal role). Created here so a fresh Railway deploy works
   // before `npm run db:push` runs; the inbox endpoints fail-soft (empty) until
