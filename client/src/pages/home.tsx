@@ -2986,6 +2986,81 @@ function AdminDashboard() {
     return out;
   }, [allProperties, activePhotoFolderByOriginal, communityDraftsDataForRows, photoCheckByFolder, photoMatchExceptionSets]);
 
+  // Resolve each scannable photo folder back to OUR unit's identity — the
+  // unit lane + our unit number + our street address (+ our own source
+  // listing for drafts). The amber photo-review modal renders this beside the
+  // flagged listing's title/URL so the operator can judge "same unit reposted"
+  // vs "look-alike unit" at a glance: if OUR unit is #423 and the flagged
+  // listing says #273, it's a different unit (false match); if they match, it's
+  // very likely a genuine repost (operator ask 2026-07-23). Folder-building
+  // mirrors the photoByProperty loop (active-folder aliases + the draft
+  // conventional-folder fallback) so every folder that can appear in the modal
+  // resolves here too.
+  type OurUnitDescriptor = {
+    propertyName: string;
+    label: string;
+    unitNumber?: string;
+    address?: string;
+    sourceUrl?: string;
+  };
+  const ourUnitByFolder = useMemo(() => {
+    const map = new Map<string, OurUnitDescriptor>();
+    const unitLaneLabel = (index: number) =>
+      index === 0 ? "Unit A" : index === 1 ? "Unit B" : `Unit ${index + 1}`;
+    const draftsByPropertyId = new Map<number, CommunityDraft>();
+    for (const d of communityDraftsDataForRows ?? []) draftsByPropertyId.set(-d.id, d);
+    // First writer wins so a real per-unit folder never gets overwritten by a
+    // sibling's conventional-folder fallback.
+    const set = (folder: string | null | undefined, desc: OurUnitDescriptor) => {
+      if (!folder || map.has(folder)) return;
+      map.set(folder, desc);
+    };
+    for (const p of allProperties) {
+      const builder = getUnitBuilderByPropertyId(p.id);
+      if (builder) {
+        builder.units.forEach((u, index) => {
+          if (!u.photoFolder) return;
+          const active = activePhotoFolderByOriginal.get(`${p.id}:${u.photoFolder}`) ?? u.photoFolder;
+          const desc: OurUnitDescriptor = {
+            propertyName: builder.propertyName || builder.complexName,
+            label: unitLaneLabel(index),
+            unitNumber: u.unitNumber?.trim() || undefined,
+            address: builder.address || undefined,
+          };
+          set(u.photoFolder, desc);
+          set(active, desc);
+        });
+      }
+      const draft = draftsByPropertyId.get(p.id);
+      if (draft) {
+        const communityAddr = [draft.streetAddress, draft.city, draft.state].filter(Boolean).join(", ") || undefined;
+        // Drafts have no separate unit-number column; unit1Address/unit2Address
+        // intentionally keep the Unit/Apt/# suffix, so the address IS our unit
+        // identity. Fall back to the community street address when a per-unit
+        // address wasn't captured.
+        const unitADesc: OurUnitDescriptor = {
+          propertyName: draft.name,
+          label: "Unit A",
+          address: draft.unit1Address || communityAddr,
+          sourceUrl: draft.unit1Url || undefined,
+        };
+        set(draft.unit1PhotoFolder, unitADesc);
+        set(`draft-${draft.id}-unit-a`, unitADesc);
+        if ((draft as any).singleListing !== true) {
+          const unitBDesc: OurUnitDescriptor = {
+            propertyName: draft.name,
+            label: "Unit B",
+            address: draft.unit2Address || communityAddr,
+            sourceUrl: draft.unit2Url || undefined,
+          };
+          set(draft.unit2PhotoFolder, unitBDesc);
+          set(`draft-${draft.id}-unit-b`, unitBDesc);
+        }
+      }
+    }
+    return map;
+  }, [allProperties, activePhotoFolderByOriginal, communityDraftsDataForRows]);
+
   // Duplicate-photos warning popup — one row per unit folder whose photos
   // were FOUND on Airbnb / VRBO / Booking.com. De-duped by folder because a
   // draft alias can surface the same folder under two dashboard rows.
@@ -7617,9 +7692,35 @@ function AdminDashboard() {
                   </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-4 max-h-[55vh] overflow-y-auto">
-                  {rowsByFolder.map(({ folder, matches }) => (
+                  {rowsByFolder.map(({ folder, matches }) => {
+                    const ours = ourUnitByFolder.get(folder);
+                    return (
                     <div key={folder} className="rounded border border-amber-200 dark:border-amber-800 p-3 space-y-3">
-                      <div className="text-xs font-semibold text-muted-foreground">{folder}</div>
+                      {/* OUR unit identity — shown so the operator can compare our
+                          unit number/address against the flagged listing's below.
+                          Same unit number on both sides ⇒ likely a genuine repost;
+                          different ⇒ look-alike / false match. */}
+                      <div className="rounded-md border border-emerald-200 bg-emerald-50/60 px-2.5 py-2 dark:border-emerald-900 dark:bg-emerald-950/30">
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">Our unit</div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                          <span className="text-sm font-semibold text-foreground">{ours?.label ?? "This unit"}</span>
+                          {ours?.unitNumber ? (
+                            <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[11px] font-semibold text-white">#{ours.unitNumber}</span>
+                          ) : null}
+                          {ours?.propertyName ? (
+                            <span className="text-xs text-muted-foreground">· {ours.propertyName}</span>
+                          ) : null}
+                        </div>
+                        {ours?.address ? (
+                          <div className="mt-0.5 text-xs text-foreground/80" data-testid={`our-unit-address-${propertyId}`}>{ours.address}</div>
+                        ) : null}
+                        {ours?.sourceUrl ? (
+                          <a href={ours.sourceUrl} target="_blank" rel="noreferrer" className="mt-0.5 block truncate text-[11px] text-blue-600 underline dark:text-blue-400">
+                            {ours.sourceUrl}
+                          </a>
+                        ) : null}
+                        <div className="mt-1 text-[10px] text-muted-foreground/70">Photo folder: {folder}</div>
+                      </div>
                       {matches.map((m, i) => (
                         <div key={`${m.listingUrl}-${i}`} className="flex gap-3 items-start" data-testid={`photo-review-match-${propertyId}-${i}`}>
                           {/* Side-by-side: OUR photo vs the photo it matched on the flagged
@@ -7680,7 +7781,10 @@ function AdminDashboard() {
                             })()}
                           </div>
                           <div className="min-w-0 flex-1 space-y-1">
-                            <div className="text-xs font-medium truncate">{m.title || "Flagged listing"}</div>
+                            {/* THEIR listing identity — the title carries their unit
+                                number/address; compare it against "Our unit" above. */}
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-red-700 dark:text-red-400">Their listing</div>
+                            <div className="text-xs font-medium truncate" title={m.title || "Flagged listing"}>{m.title || "Flagged listing"}</div>
                             <a
                               href={m.listingUrl}
                               target="_blank"
@@ -7720,7 +7824,8 @@ function AdminDashboard() {
                         </div>
                       ))}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
                 <div className="flex justify-end">
                   <Button type="button" variant="ghost" size="sm" onClick={() => setPhotoReviewModal(null)}>Close</Button>
