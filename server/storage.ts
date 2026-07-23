@@ -2661,6 +2661,30 @@ export class DatabaseStorage implements IStorage {
     return row;
   }
 
+  // Narrow matches-only writer for the review modal's on-demand match-image
+  // resolution. Deliberately does NOT touch checkedAt or any status: that
+  // timestamp drives rescan staleness AND the "photos replaced" verify
+  // comparison, so caching a listing thumbnail must never look like a fresh
+  // scan. Statuses are untouched for the same reason — this only enriches
+  // evidence already stored.
+  async updatePhotoListingCheckMatches(
+    folder: string,
+    matches: { airbnbMatches?: string; vrboMatches?: string; bookingMatches?: string },
+  ): Promise<void> {
+    const [existing] = await db.select()
+      .from(photoListingChecks)
+      .where(eq(photoListingChecks.photoFolder, folder))
+      .orderBy(desc(photoListingChecks.checkedAt))
+      .limit(1);
+    if (!existing) return;
+    const update: Record<string, string> = {};
+    if (matches.airbnbMatches !== undefined) update.airbnbMatches = matches.airbnbMatches;
+    if (matches.vrboMatches !== undefined) update.vrboMatches = matches.vrboMatches;
+    if (matches.bookingMatches !== undefined) update.bookingMatches = matches.bookingMatches;
+    if (Object.keys(update).length === 0) return;
+    await db.update(photoListingChecks).set(update).where(eq(photoListingChecks.id, existing.id));
+  }
+
   async createPhotoListingAlert(data: InsertPhotoListingAlert): Promise<PhotoListingAlert> {
     const [row] = await db.insert(photoListingAlerts).values(data).returning();
     return row;

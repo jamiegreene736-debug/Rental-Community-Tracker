@@ -169,6 +169,7 @@ const storageSrc = read("server/storage.ts");
 const reactionsSrc = read("server/photo-found-reactions.ts");
 const sweepSrc = read("server/unit-audit-sweep.ts");
 const homeSrc = read("client/src/pages/home.tsx");
+const routesSrc = read("server/routes.ts");
 const alertsSrc = read("server/operator-alerts.ts");
 
 check(
@@ -193,6 +194,33 @@ check(
   homeSrc.includes("m.matchImageUrl") &&
     homeSrc.includes("The matching photo on the flagged listing") &&
     homeSrc.includes(">On the listing</figcaption>"),
+);
+
+// ── 2026-07-23: legacy matches (no matchImageUrl) resolve the listing photo on demand ──
+check(
+  "scanner exposes a bounded, memoized on-demand match-image resolver",
+  scannerSrc.includes("export async function resolveMatchImageUrl") &&
+    scannerSrc.includes("matchImageResolveCache"),
+);
+check(
+  "the resolver only ever hands Lens the photo URL WE stored for that match (never a client-supplied URL)",
+  routesSrc.includes('app.post("/api/photo-listing-check/match-image"') &&
+    routesSrc.includes("const ourPhotoUrl = String(match?.photoUrl ?? \"\");") &&
+    routesSrc.includes("resolveMatchImageUrl(ourPhotoUrl, listingUrl)"),
+);
+check(
+  "a resolved listing photo is cached back onto the row WITHOUT bumping checkedAt (that timestamp drives rescan staleness + replace-verify)",
+  routesSrc.includes("updatePhotoListingCheckMatches") &&
+    storageSrc.includes("async updatePhotoListingCheckMatches") &&
+    // The method may READ checkedAt (orderBy picks the newest row); it must never
+    // ASSIGN it — `checkedAt:` is the write form used by upsertPhotoListingCheck.
+    !/async updatePhotoListingCheckMatches[\s\S]{0,1200}?checkedAt:/.test(storageSrc),
+);
+check(
+  "review modal auto-resolves missing listing photos on open and never renders silent emptiness",
+  homeSrc.includes("resolveMatchImage(folder, m.listingUrl)") &&
+    homeSrc.includes("photo-review-listing-image-missing-") &&
+    homeSrc.includes("No image"),
 );
 
 check(

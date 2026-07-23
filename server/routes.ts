@@ -51331,6 +51331,60 @@ Return ONLY compact JSON with this exact shape:
       res.status(500).json({ error: e?.message ?? "Failed to save match exception" });
     }
   });
+  // Resolve the OFFENDING listing's own matched photo for one stored match, so
+  // the review modal can show it beside ours. Matches stored before
+  // matchImageUrl existed have none; a folder rescan is NOT a substitute (Lens
+  // results drift, so the same hit often no longer ranks and the evidence would
+  // be lost). SSRF-safe by construction: the URL handed to Lens is the photoUrl
+  // WE stored for that match, never anything the client sends — the body only
+  // selects which stored match to resolve. Result is written back so the next
+  // open is free; checkedAt is deliberately left alone (see storage note).
+  app.post("/api/photo-listing-check/match-image", async (req, res) => {
+    try {
+      const folder = String((req.body as any)?.folder ?? "").trim();
+      const listingUrl = String((req.body as any)?.listingUrl ?? "").trim();
+      if (!folder || !listingUrl) return res.status(400).json({ error: "folder and listingUrl are required" });
+      const { normalizeListingUrlForMatch } = await import("@shared/photo-match-exceptions");
+      const wanted = normalizeListingUrlForMatch(listingUrl);
+      if (!wanted) return res.status(422).json({ error: "listingUrl could not be normalized" });
+
+      const row = await storage.getPhotoListingCheckByFolder(folder);
+      if (!row) return res.status(404).json({ error: "No scan row for that folder" });
+
+      const columns = [
+        { key: "airbnbMatches" as const, raw: row.airbnbMatches },
+        { key: "vrboMatches" as const, raw: row.vrboMatches },
+        { key: "bookingMatches" as const, raw: row.bookingMatches },
+      ];
+      for (const col of columns) {
+        let parsed: any[];
+        try { parsed = JSON.parse(col.raw || "[]"); } catch { continue; }
+        if (!Array.isArray(parsed)) continue;
+        const idx = parsed.findIndex((m) => normalizeListingUrlForMatch(m?.listingUrl) === wanted);
+        if (idx < 0) continue;
+        const match = parsed[idx];
+        // Already resolved (fresh scan, or a previous click) — no Lens spend.
+        if (typeof match?.matchImageUrl === "string" && match.matchImageUrl) {
+          return res.json({ ok: true, matchImageUrl: match.matchImageUrl, cached: true });
+        }
+        const ourPhotoUrl = String(match?.photoUrl ?? "");
+        if (!ourPhotoUrl) return res.status(422).json({ error: "Stored match has no photo URL to search with" });
+        const { resolveMatchImageUrl } = await import("./photo-listing-scanner");
+        const out = await resolveMatchImageUrl(ourPhotoUrl, listingUrl);
+        if (!out.ok) return res.status(502).json({ error: out.error ?? "Lens lookup failed" });
+        if (!out.matchImageUrl) {
+          return res.json({ ok: true, matchImageUrl: null, unavailable: true });
+        }
+        parsed[idx] = { ...match, matchImageUrl: out.matchImageUrl };
+        await storage.updatePhotoListingCheckMatches(folder, { [col.key]: JSON.stringify(parsed) } as any);
+        return res.json({ ok: true, matchImageUrl: out.matchImageUrl, cached: false });
+      }
+      return res.status(404).json({ error: "That listing is not in the stored matches for this folder" });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to resolve the listing photo" });
+    }
+  });
+
   app.post("/api/photo-listing-check/match-exceptions/remove", async (req, res) => {
     try {
       const folder = String((req.body as any)?.folder ?? "").trim();

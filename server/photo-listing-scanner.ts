@@ -57,7 +57,7 @@ import { canonicalOtaUrlCandidates, otaPlatformForUrl } from "@shared/ota-host-m
 import { isSiblingUnitLookalikeHit } from "@shared/sibling-unit-lookalike";
 import { getAuthorizedChannelUrls, isAuthorizedUrl } from "./authorized-urls";
 import { confirmedMatchSetForFolder } from "./photo-match-exceptions";
-import { isConfirmedMatchUrl } from "@shared/photo-match-exceptions";
+import { isConfirmedMatchUrl, normalizeListingUrlForMatch } from "@shared/photo-match-exceptions";
 import { isCommunityOrSharedPhotoCandidate, isStrongLensMatch, lensMatchConfidence } from "./photo-match-guardrails";
 import {
   communityEvidenceInResult,
@@ -1144,6 +1144,49 @@ export async function getPhotoCheckBudget(): Promise<{ used: number; cap: number
   // "no ceiling", which the endpoint and client treat as "never budget-blocked".
   if (PHOTO_CHECK_DAILY_CAP == null) return { used, cap: null, remaining: null };
   return { used, cap: PHOTO_CHECK_DAILY_CAP, remaining: Math.max(0, PHOTO_CHECK_DAILY_CAP - used) };
+}
+
+// ── On-demand match-image resolution (2026-07-23) ────────────────────────────
+// Matches stored before matchImageUrl existed carry no listing photo, and the
+// review modal then had nothing to show — indistinguishable, to the operator,
+// from a broken feature. Re-running the FOLDER scan is not a fix: Lens results
+// drift, so a rescan frequently no longer returns the same hit and would drop
+// the evidence entirely. Instead this resolves the listing's own matched image
+// for ONE stored match, on operator demand (opening the review modal), by
+// re-querying Lens for that exact photo and taking the thumbnail of the hit
+// that points at the same listing. Best-effort by nature: Lens may no longer
+// rank that listing, in which case we honestly report "unavailable" rather
+// than rendering nothing. Bounded: one SearchAPI call per unresolved match,
+// memoized per process so re-opening the modal is free.
+const matchImageResolveCache = new Map<string, string | null>();
+
+export async function resolveMatchImageUrl(
+  ourPhotoUrl: string,
+  listingUrl: string,
+): Promise<{ ok: boolean; matchImageUrl: string | null; error?: string }> {
+  const wanted = normalizeListingUrlForMatch(listingUrl);
+  if (!ourPhotoUrl || !wanted) return { ok: false, matchImageUrl: null, error: "Missing photo or listing URL" };
+  const key = `${ourPhotoUrl}|${wanted}`;
+  if (matchImageResolveCache.has(key)) {
+    return { ok: true, matchImageUrl: matchImageResolveCache.get(key) ?? null };
+  }
+  const lens = await callGoogleLens(ourPhotoUrl);
+  if (!lens.ok) return { ok: false, matchImageUrl: null, error: lens.error };
+  let found: string | null = null;
+  for (const row of lens.rows) {
+    const link = String((row as any).link || "");
+    if (!link) continue;
+    // Match the stored listing through the SAME normalizer the exception
+    // allowlist uses, and through the canonical candidates, so a regional
+    // domain (abritel.fr / airbnb.co.uk) still resolves to its canonical row.
+    const candidates = [link, ...canonicalOtaUrlCandidates(link)];
+    const hit = candidates.some((c) => normalizeListingUrlForMatch(c) === wanted);
+    if (!hit) continue;
+    const thumb = String((row as any).thumbnail ?? (row as any).image ?? "");
+    if (thumb) { found = thumb; break; }
+  }
+  matchImageResolveCache.set(key, found);
+  return { ok: true, matchImageUrl: found };
 }
 
 export async function runPhotoListingCheckForFolders(
