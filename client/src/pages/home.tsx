@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 // In-tab SPA navigation for the warning-popup action buttons. These were
 // window.open(..., "_blank") — a NEW TAB has no in-app history, so the page
@@ -3933,6 +3933,51 @@ function AdminDashboard() {
     platform: "airbnb" | "vrbo" | "booking";
     platformName: string;
   } | null>(null);
+  // On-demand listing-photo resolution for the review modal. Matches scanned
+  // before matchImageUrl existed have no listing photo stored; the modal then
+  // rendered nothing, which reads as "the feature is broken" rather than "this
+  // row predates it". Keyed `${folder}|${listingUrl}`; "pending" while the Lens
+  // lookup runs, a URL when resolved, null when Lens no longer ranks that
+  // listing (honest "unavailable" — the operator still gets the listing link).
+  const [resolvedMatchImages, setResolvedMatchImages] = useState<Record<string, string | null | "pending">>({});
+  const resolveMatchImage = useCallback(async (folder: string, listingUrl: string) => {
+    const key = `${folder}|${listingUrl}`;
+    let already = false;
+    setResolvedMatchImages((prev) => {
+      if (key in prev) { already = true; return prev; }
+      return { ...prev, [key]: "pending" };
+    });
+    if (already) return;
+    try {
+      const r = await fetch("/api/photo-listing-check/match-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder, listingUrl }),
+        credentials: "include",
+      });
+      const data = await r.json().catch(() => ({}));
+      setResolvedMatchImages((prev) => ({ ...prev, [key]: r.ok && data?.matchImageUrl ? String(data.matchImageUrl) : null }));
+    } catch {
+      setResolvedMatchImages((prev) => ({ ...prev, [key]: null }));
+    }
+  }, []);
+  // When the review modal opens, resolve the listing photo for every match that
+  // has none stored (rows scanned before matchImageUrl existed). One bounded
+  // Lens lookup per match, server-memoized and written back, so this is a
+  // one-time cost per match rather than per modal open.
+  useEffect(() => {
+    if (!photoReviewModal) return;
+    const { propertyId, platform } = photoReviewModal;
+    for (const folder of photoByProperty.get(propertyId)?.folders ?? []) {
+      const row = photoCheckByFolder.get(folder);
+      if (!row) continue;
+      const status = platform === "airbnb" ? row.airbnbStatus : platform === "vrbo" ? row.vrboStatus : row.bookingStatus;
+      const matches = platform === "airbnb" ? row.airbnbMatches : platform === "vrbo" ? row.vrboMatches : row.bookingMatches;
+      for (const m of subThresholdVerifiedMatchRows(status, matches ?? [], photoMatchExceptionSets.get(folder))) {
+        if (!m.matchImageUrl && m.listingUrl) void resolveMatchImage(folder, m.listingUrl);
+      }
+    }
+  }, [photoReviewModal, photoByProperty, photoCheckByFolder, photoMatchExceptionSets, resolveMatchImage]);
   const confirmReviewNotMatchMutation = useMutation({
     mutationFn: async (vars: { folder: string; url: string; title: string; propertyName: string }) => {
       const r = await apiRequest("POST", "/api/photo-listing-check/match-exceptions", {
@@ -7579,19 +7624,43 @@ function AdminDashboard() {
                                 <figcaption className="text-[10px] text-muted-foreground">Ours</figcaption>
                               </figure>
                             ) : null}
-                            {m.matchImageUrl ? (
-                              <figure className="m-0 w-16 space-y-0.5 text-center" title="Open the matching photo from the flagged listing full size">
-                                <a href={m.matchImageUrl} target="_blank" rel="noreferrer">
-                                  <img
-                                    src={m.matchImageUrl}
-                                    alt="The matching photo on the flagged listing"
-                                    className="h-16 w-16 rounded object-cover border border-red-300 dark:border-red-800"
-                                    onError={(e) => { const a = e.currentTarget.closest("figure"); if (a) { a.style.display = "none"; } else { e.currentTarget.style.display = "none"; } }}
-                                  />
-                                </a>
-                                <figcaption className="text-[10px] text-red-700 dark:text-red-400">On the listing</figcaption>
-                              </figure>
-                            ) : null}
+                            {(() => {
+                              // Prefer the image stamped at scan time; otherwise use the
+                              // on-demand resolution kicked off when this modal opened.
+                              const resolved = resolvedMatchImages[`${folder}|${m.listingUrl}`];
+                              const listingImg = m.matchImageUrl || (typeof resolved === "string" ? resolved : "");
+                              if (listingImg) {
+                                return (
+                                  <figure className="m-0 w-16 space-y-0.5 text-center" title="Open the matching photo from the flagged listing full size">
+                                    <a href={listingImg} target="_blank" rel="noreferrer">
+                                      <img
+                                        src={listingImg}
+                                        alt="The matching photo on the flagged listing"
+                                        className="h-16 w-16 rounded object-cover border border-red-300 dark:border-red-800"
+                                        onError={(e) => { const a = e.currentTarget.closest("figure"); if (a) { a.style.display = "none"; } else { e.currentTarget.style.display = "none"; } }}
+                                      />
+                                    </a>
+                                    <figcaption className="text-[10px] text-red-700 dark:text-red-400">On the listing</figcaption>
+                                  </figure>
+                                );
+                              }
+                              // Never render silent emptiness here — an absent listing photo
+                              // is indistinguishable from a broken feature. Say which it is.
+                              return (
+                                <figure className="m-0 w-16 space-y-0.5 text-center">
+                                  <div
+                                    className="flex h-16 w-16 items-center justify-center rounded border border-dashed border-muted-foreground/40 px-1 text-center text-[9px] leading-tight text-muted-foreground"
+                                    title={resolved === "pending"
+                                      ? "Looking up the photo on the flagged listing…"
+                                      : "Google Lens no longer ranks this listing for our photo, so its image can't be retrieved. Open the listing to compare."}
+                                    data-testid={`photo-review-listing-image-missing-${propertyId}-${i}`}
+                                  >
+                                    {resolved === "pending" ? "Loading…" : "No image"}
+                                  </div>
+                                  <figcaption className="text-[10px] text-muted-foreground">On the listing</figcaption>
+                                </figure>
+                              );
+                            })()}
                           </div>
                           <div className="min-w-0 flex-1 space-y-1">
                             <div className="text-xs font-medium truncate">{m.title || "Flagged listing"}</div>
