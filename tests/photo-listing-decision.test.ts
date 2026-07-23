@@ -178,7 +178,21 @@ check(
 
 check(
   "scanner tags fully-verified hits with verified: true (feeds the dashboard review tier)",
-  scannerSrc.includes("verifiedHits.push({ photoUrl, listingUrl: link, title, source, verified: true })"),
+  scannerSrc.includes("verifiedHits.push({ photoUrl, listingUrl: link, title, source, verified: true, matchImageUrl })"),
+);
+
+// ── 2026-07-22: the review modal shows the photo the hit matched ON the listing ──
+check(
+  "scanner captures the offending listing's Lens match image into every stored Match",
+  scannerSrc.includes("matchImageUrl?: string") &&
+    scannerSrc.includes("const matchImageUrl = String((h as any).thumbnail ?? (h as any).image ?? \"\") || undefined;") &&
+    scannerSrc.includes("strongHits.push({ photoUrl, listingUrl: link, title, source, matchImageUrl })"),
+);
+check(
+  "review modal renders the listing's matched photo next to ours (matchImageUrl) so a human can compare",
+  homeSrc.includes("m.matchImageUrl") &&
+    homeSrc.includes("The matching photo on the flagged listing") &&
+    homeSrc.includes(">On the listing</figcaption>"),
 );
 
 check(

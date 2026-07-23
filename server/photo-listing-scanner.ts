@@ -235,7 +235,12 @@ export type PlatformStatus = "clean" | "found" | "unknown";
 // display-only amber REVIEW tier for sub-threshold rows (1 verified photo < MIN_MATCHES) — see
 // subThresholdVerifiedMatches in shared/photo-listing-decision.ts. Old rows without the flag
 // simply never show the review badge (fail toward the pre-2026-07-12 behavior).
-export type Match = { photoUrl: string; listingUrl: string; title: string; source: string; verified?: boolean };
+// `photoUrl` is OUR photo (served from our own /photos/<folder>); `matchImageUrl` is the
+// offending listing's own matched image — the Google Lens thumbnail of the photo the hit was
+// found on. The dashboard review modal renders the two side-by-side so a human can eyeball a
+// real repost vs a look-alike without opening the OTA page. It is a Google-hosted thumbnail that
+// can expire / be hotlink-blocked, so it is always OPTIONAL and the UI hides it on load error.
+export type Match = { photoUrl: string; listingUrl: string; title: string; source: string; verified?: boolean; matchImageUrl?: string };
 type LensCallResult = { ok: true; rows: any[] } | { ok: false; error: string };
 type PhotoCandidate = {
   filename: string;
@@ -865,6 +870,11 @@ export async function runPhotoListingCheckForFolder(
         // contains OUR image) are never suppressed, and the VERIFIED path
         // below (page text mentions OUR unit) is unaffected — real theft
         // still gets caught.
+        // The offending listing's own matched image (Lens thumbnail). Captured
+        // here so it can ride along on every stored Match and the dashboard
+        // review modal can show it next to our photo. Reused by the identity
+        // gate below for the dHash so we don't read the field twice.
+        const matchImageUrl = String((h as any).thumbnail ?? (h as any).image ?? "") || undefined;
         const siblingLookalike = communityOk && isSiblingUnitLookalikeHit({
           title,
           link,
@@ -883,7 +893,7 @@ export async function runPhotoListingCheckForFolder(
         // VERIFIED path (verifiedHits below) is unaffected.
         let imageIdentityOk = true;
         if (communityOk && !siblingLookalike && !PHOTO_LISTING_IDENTITY_GATE_DISABLED) {
-          const thumb = String((h as any).thumbnail ?? (h as any).image ?? "");
+          const thumb = matchImageUrl ?? "";
           let thumbHash: string | null = null;
           if (thumb) {
             if (thumbnailHashCache.has(thumb)) {
@@ -898,9 +908,9 @@ export async function runPhotoListingCheckForFolder(
             console.log(`[photo-listing-scanner] ${folder}: agreement hit is a visual LOOK-ALIKE, not our image — dropping ${link} ("${title.slice(0, 50)}")`);
           }
         }
-        if (communityOk && !siblingLookalike && imageIdentityOk) strongHits.push({ photoUrl, listingUrl: link, title, source });
+        if (communityOk && !siblingLookalike && imageIdentityOk) strongHits.push({ photoUrl, listingUrl: link, title, source, matchImageUrl });
         const ok = await verify(link, title, source);
-        if (ok) verifiedHits.push({ photoUrl, listingUrl: link, title, source, verified: true });
+        if (ok) verifiedHits.push({ photoUrl, listingUrl: link, title, source, verified: true, matchImageUrl });
       }
       if (verifiedHits.length > 0) {
         tally[hostKey].photoHitCount += 1;
