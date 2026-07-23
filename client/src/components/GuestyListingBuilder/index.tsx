@@ -82,6 +82,11 @@ async function readPhotosPushLedgerEntry(listingId: string): Promise<PushLedgerE
   }
 }
 
+function createPhotoPushOperationId(): string {
+  return globalThis.crypto?.randomUUID?.()
+    ?? `photo-${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+}
+
 // ─── CSS — Light theme ────────────────────────────────────────────────────────
 const CSS = `
   .glb {
@@ -1170,6 +1175,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const [connError, setConnError] = useState<string | null>(null);
   const [listings, setListings] = useState<GuestyListing[]>([]);
   const [selectedId, setSelectedId] = useState("");
+  // Long-running photo mutations can outlive a listing selection. Async
+  // completions must prove they still belong to the visible listing before
+  // writing shared count/progress state.
+  const selectedIdRef = useRef(selectedId);
+  const photoPushUiOperationRef = useRef<string | null>(null);
+  const collageUiOperationRef = useRef(0);
+  const guestyPhotoMutationActiveRef = useRef(false);
+  selectedIdRef.current = selectedId;
   // Cached guesty-property-map. We fetch it for the auto-select effect
   // and re-use it on dropdown change to navigate to the listing's
   // mapped property (rather than just changing the push target while
@@ -2665,6 +2678,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // Live photo count from Guesty for the selected listing
   const [guestyPhotoCount, setGuestyPhotoCount] = useState<number | null>(null);
   const [guestyPhotoCountLoading, setGuestyPhotoCountLoading] = useState(false);
+  const [guestyPhotoCountError, setGuestyPhotoCountError] = useState<string | null>(null);
+  const [guestyPhotoCountCheckedAt, setGuestyPhotoCountCheckedAt] = useState<string | null>(null);
+  const guestyPhotoCountRequestRef = useRef(0);
+  const guestyAmenitiesRequestRef = useRef(0);
 
   // The cover-collage picture URL on Guesty (by caption === "Cover Collage").
   // Used to render the collage as a tile in the PhotoCurator so the
@@ -2672,94 +2689,236 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // the Photos tab. Null when there's no collage on the listing.
   const [guestyCoverCollageUrl, setGuestyCoverCollageUrl] = useState<string | null>(null);
 
-  // URLs successfully pushed in the most recent push-photos run, with
-  // captions preserved. The cover-collage push uses this (when non-
-  // empty) to prepend the collage on top of the caller's known-good
-  // list — side-stepping Guesty's read-after-write consistency lag on
-  // GET-after-PUT, which was losing ~3-5 photos in practice.
-  const [lastPushedPictures, setLastPushedPictures] = useState<Array<{ original: string; caption: string }>>([]);
-
-  const savePushSummary = useCallback((summary: PushSummary) => {
-    setLastPushSummary(summary);
+  const savePushSummary = useCallback((summary: PushSummary, makeVisible = true) => {
+    if (makeVisible && selectedIdRef.current === summary.listingId) setLastPushSummary(summary);
     try { localStorage.setItem(`nexstay_push_${summary.listingId}`, JSON.stringify(summary)); } catch { /* non-fatal */ }
   }, []);
 
-  const readGuestyPictures = useCallback(async (listingId: string): Promise<{ pictures: any[]; collageUrl: string | null }> => {
-    const encodedId = encodeURIComponent(listingId);
-    const read = async (suffix: string) => {
-      const response = await fetch(`/api/guesty-proxy/listings/${encodedId}${suffix}`);
-      if (!response.ok) throw new Error(`Guesty listing read failed (${response.status})`);
-      return response.json();
-    };
-
-    let listing = await read("?fields=pictures");
-    let pictures: any[] = Array.isArray(listing?.pictures) ? listing.pictures : [];
-    if (!Array.isArray(listing?.pictures)) {
-      // Some Guesty responses omit fields when a projection is rejected or
-      // stale; fall back to the full listing before showing a zero count.
-      listing = await read("");
-      pictures = Array.isArray(listing?.pictures) ? listing.pictures : [];
-    }
-
-    const collage = pictures.find((p) => (p?.caption || "") === "Cover Collage");
-    return { pictures, collageUrl: collage?.original || collage?.url || null };
+  const markGuestyPhotoCountUnverified = useCallback((listingId: string, message: string) => {
+    if (selectedIdRef.current !== listingId) return;
+    guestyPhotoMutationActiveRef.current = false;
+    ++guestyPhotoCountRequestRef.current;
+    setGuestyPhotoCount(null);
+    setGuestyPhotoCountLoading(false);
+    setGuestyPhotoCountCheckedAt(null);
+    setGuestyPhotoCountError(message);
   }, []);
 
-  // Load persisted summary & fetch live photo count when listing selection changes
+  const beginGuestyPhotoCountMutation = useCallback((listingId: string) => {
+    if (
+      selectedIdRef.current !== listingId
+      || guestyPhotoMutationActiveRef.current
+    ) return false;
+    guestyPhotoMutationActiveRef.current = true;
+    ++guestyPhotoCountRequestRef.current;
+    setGuestyPhotoCount(null);
+    setGuestyPhotoCountLoading(true);
+    setGuestyPhotoCountCheckedAt(null);
+    setGuestyPhotoCountError(null);
+    return true;
+  }, []);
+
+  const finishGuestyPhotoCountMutation = useCallback((listingId: string) => {
+    if (selectedIdRef.current !== listingId) return false;
+    guestyPhotoMutationActiveRef.current = false;
+    // Invalidate a focus/visibility read that might have started immediately
+    // before the mutation fence was raised.
+    ++guestyPhotoCountRequestRef.current;
+    return true;
+  }, []);
+
+  const readGuestyGalleryStatus = useCallback(async (listingId: string): Promise<{
+    count: number;
+    collageUrl: string | null;
+    checkedAt: string;
+  }> => {
+    const response = await fetch(
+      `/api/builder/guesty-photo-gallery-status?listingId=${encodeURIComponent(listingId)}`,
+      { cache: "no-store" },
+    );
+    const data = await response.json().catch(() => ({})) as any;
+    if (!response.ok || typeof data?.count !== "number") {
+      throw new Error(data?.error || `Guesty gallery read failed (${response.status})`);
+    }
+    return {
+      count: data.count,
+      collageUrl: typeof data.collageUrl === "string" ? data.collageUrl : null,
+      checkedAt: typeof data.checkedAt === "string" ? data.checkedAt : new Date().toISOString(),
+    };
+  }, []);
+
+  // Clear listing-scoped mutation UI only when the selected listing changes.
+  // Amenity-catalog hydration changes guestyNamesToProfileKeys' identity and
+  // must never detach an otherwise healthy long-running photo push.
   useEffect(() => {
-    if (!selectedId) { setLastPushSummary(null); setGuestyPhotoCount(null); setGuestyCoverCollageUrl(null); setLastPushedPictures([]); setGuestyLiveAmenities(null); return; }
+    ++guestyPhotoCountRequestRef.current;
+    ++guestyAmenitiesRequestRef.current;
+    photoPushUiOperationRef.current = null;
+    collageUiOperationRef.current++;
+    guestyPhotoMutationActiveRef.current = false;
+    // Every completion/progress panel below is listing-scoped. Clear it at
+    // the selection boundary so Listing B can never inherit Listing A's green
+    // replacement receipt while its own live read is still pending.
+    setPushGuestyConfirm(null);
+    setReconciledPushSummary(null);
+    setPushResults([]);
+    setUpscaleError(null);
+    setUpscalePhase("idle");
+    setSavingToGuesty(false);
+    setPushReconcileNote(null);
+    setPushVerifyNote(null);
+    setCollagePhase("idle");
+    setCollageError(null);
+    setCollagePreviewUrl(null);
+    setCollagePicks(null);
+    setCollageMeta(null);
+    if (!selectedId) {
+      setLastPushSummary(null);
+      setGuestyPhotoCount(null);
+      setGuestyPhotoCountError(null);
+      setGuestyPhotoCountCheckedAt(null);
+      setGuestyCoverCollageUrl(null);
+      setGuestyPhotoCountLoading(false);
+      setGuestyLiveAmenities(null);
+      setFetchingLiveAmenities(false);
+      return;
+    }
     // Restore from localStorage
-    let storedSummary: PushSummary | null = null;
     try {
       const stored = localStorage.getItem(`nexstay_push_${selectedId}`);
       if (stored) {
-        storedSummary = JSON.parse(stored);
-        setLastPushSummary(storedSummary);
+        setLastPushSummary(JSON.parse(stored));
       }
       else setLastPushSummary(null);
     } catch { setLastPushSummary(null); }
-    // Fetch live listing data — photo count + current amenities
     setGuestyPhotoCount(null);
-    setGuestyPhotoCountLoading(true);
+    setGuestyPhotoCountError(null);
+    setGuestyPhotoCountCheckedAt(null);
+    setGuestyCoverCollageUrl(null);
     setGuestyLiveAmenities(null);
     setFetchingLiveAmenities(true);
-    // Photo count comes from the listing; amenities from properties-api (Popular Amenities panel).
-    Promise.all([
-      readGuestyPictures(selectedId).catch(() => null),
-      fetch(`/api/builder/guesty-amenities?listingId=${selectedId}`).then(r => r.json()).catch(() => null),
-    ])
-      .then(([photoRead, amen]) => {
-        const liveCount = photoRead?.pictures.length ?? 0;
-        const fallbackCount = storedSummary?.successCount && storedSummary.successCount > 0
-          ? storedSummary.successCount
-          : null;
-        setGuestyPhotoCount(liveCount > 0 ? liveCount : fallbackCount);
-        setGuestyCoverCollageUrl(photoRead?.collageUrl ?? null);
+  }, [selectedId]);
+
+  // Load the selected listing's authoritative live photo count. This effect
+  // depends only on selection + the stable read function, never amenity maps.
+  useEffect(() => {
+    if (!selectedId || guestyPhotoMutationActiveRef.current) return;
+    const photoCountRequestId = ++guestyPhotoCountRequestRef.current;
+    setGuestyPhotoCount(null);
+    setGuestyPhotoCountLoading(true);
+    setGuestyPhotoCountError(null);
+    setGuestyPhotoCountCheckedAt(null);
+    // Photo count comes only from a no-store Guesty read; a browser receipt is
+    // useful history but can never be labeled as the live Guesty total.
+    void readGuestyGalleryStatus(selectedId)
+      .then((status) => {
+        if (
+          guestyPhotoCountRequestRef.current !== photoCountRequestId
+          || selectedIdRef.current !== selectedId
+        ) return;
+        setGuestyPhotoCount(status.count);
+        setGuestyCoverCollageUrl(status.collageUrl);
+        setGuestyPhotoCountCheckedAt(status.checkedAt);
+      })
+      .catch((error: any) => {
+        if (
+          guestyPhotoCountRequestRef.current !== photoCountRequestId
+          || selectedIdRef.current !== selectedId
+        ) return;
+        setGuestyPhotoCount(null);
+        setGuestyCoverCollageUrl(null);
+        setGuestyPhotoCountError(error?.message ?? "Guesty gallery count could not be verified.");
+      })
+      .finally(() => {
+        if (
+          guestyPhotoCountRequestRef.current === photoCountRequestId
+          && selectedIdRef.current === selectedId
+        ) setGuestyPhotoCountLoading(false);
+      });
+  }, [selectedId, readGuestyGalleryStatus]);
+
+  // Amenities may need a second pass when the Guesty-name catalog hydrates,
+  // but that pass is isolated from all photo mutation/count state.
+  useEffect(() => {
+    if (!selectedId) return;
+    const amenitiesRequestId = ++guestyAmenitiesRequestRef.current;
+    setGuestyLiveAmenities(null);
+    setFetchingLiveAmenities(true);
+    void fetch(`/api/builder/guesty-amenities?listingId=${selectedId}`)
+      .then((response) => response.json())
+      .then((amen: any) => {
+        if (
+          guestyAmenitiesRequestRef.current !== amenitiesRequestId
+          || selectedIdRef.current !== selectedId
+        ) return;
         const canonical: string[] = Array.isArray(amen?.amenities) ? amen.amenities : [];
         const other: string[] = Array.isArray(amen?.otherAmenities) ? amen.otherAmenities : [];
         setGuestyLiveAmenities(guestyNamesToProfileKeys([...canonical, ...other]));
       })
-      .catch(() => { setGuestyPhotoCount(null); setGuestyCoverCollageUrl(null); setGuestyLiveAmenities(new Set()); })
-      .finally(() => { setGuestyPhotoCountLoading(false); setFetchingLiveAmenities(false); });
-  }, [selectedId, guestyNamesToProfileKeys, readGuestyPictures]);
-
-  // Refresh live count + cover-collage URL after a successful push
-  const refreshGuestyPhotoCount = useCallback(() => {
-    if (!selectedId) return;
-    readGuestyPictures(selectedId)
-      .then(({ pictures, collageUrl }) => {
-        const fallbackCount = lastPushSummary?.listingId === selectedId && lastPushSummary.successCount > 0
-          ? lastPushSummary.successCount
-          : null;
-        setGuestyPhotoCount(pictures.length > 0 ? pictures.length : fallbackCount);
-        setGuestyCoverCollageUrl(collageUrl);
+      .catch(() => {
+        if (
+          guestyAmenitiesRequestRef.current === amenitiesRequestId
+          && selectedIdRef.current === selectedId
+        ) setGuestyLiveAmenities(new Set());
       })
-      .catch(() => {});
-  }, [selectedId, lastPushSummary, readGuestyPictures]);
+      .finally(() => {
+        if (
+          guestyAmenitiesRequestRef.current === amenitiesRequestId
+          && selectedIdRef.current === selectedId
+        ) setFetchingLiveAmenities(false);
+      });
+  }, [selectedId, guestyNamesToProfileKeys]);
+
+  // Refresh one explicit listing. Delayed timers retain their originating
+  // listing ID and become no-ops after a selection change.
+  const refreshGuestyPhotoCountFor = useCallback(async (listingId: string) => {
+    if (
+      !listingId
+      || selectedIdRef.current !== listingId
+      || guestyPhotoMutationActiveRef.current
+    ) return;
+    const requestId = ++guestyPhotoCountRequestRef.current;
+    setGuestyPhotoCountLoading(true);
+    setGuestyPhotoCountError(null);
+    try {
+      const status = await readGuestyGalleryStatus(listingId);
+      if (
+        guestyPhotoCountRequestRef.current !== requestId
+        || selectedIdRef.current !== listingId
+      ) return;
+      setGuestyPhotoCount(status.count);
+      setGuestyCoverCollageUrl(status.collageUrl);
+      setGuestyPhotoCountCheckedAt(status.checkedAt);
+    } catch (error: any) {
+      if (
+        guestyPhotoCountRequestRef.current !== requestId
+        || selectedIdRef.current !== listingId
+      ) return;
+      setGuestyPhotoCount(null);
+      setGuestyPhotoCountCheckedAt(null);
+      setGuestyPhotoCountError(error?.message ?? "Guesty gallery count could not be verified.");
+    } finally {
+      if (
+        guestyPhotoCountRequestRef.current === requestId
+        && selectedIdRef.current === listingId
+      ) setGuestyPhotoCountLoading(false);
+    }
+  }, [readGuestyGalleryStatus]);
+
+  const refreshGuestyPhotoCount = useCallback(async () => {
+    const listingId = selectedIdRef.current;
+    if (!listingId) return;
+    await refreshGuestyPhotoCountFor(listingId);
+  }, [refreshGuestyPhotoCountFor]);
 
   const cancelPush = useCallback(() => {
+    const cancelledActivePush =
+      pushAbortRef.current !== null
+      && photoPushUiOperationRef.current !== null
+      && guestyPhotoMutationActiveRef.current;
     pushAbortRef.current?.abort();
     pushAbortRef.current = null;
+    photoPushUiOperationRef.current = null;
     setSavingToGuesty(false);
     setUpscalePhase("idle");
     setUpscaleCurrent(0);
@@ -2770,7 +2929,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setReconciledPushSummary(null);
     setPushGuestyConfirm(null);
     setPushVerifyNote(null);
-  }, []);
+    const listingId = selectedIdRef.current;
+    if (cancelledActivePush && listingId) {
+      markGuestyPhotoCountUnverified(
+        listingId,
+        "Photo push cancelled in this browser. Re-check Guesty after the server finishes any in-progress work.",
+      );
+    }
+  }, [markGuestyPhotoCountUnverified]);
 
   // ── Cover collage ──────────────────────────────────────────────────────
   // BOTH paths POST /api/builder/auto-cover-collage, which composes the 2-up,
@@ -2873,6 +3039,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     selection?: CoverCollageSelection,
   ) => {
     if (!selectedId) return;
+    const listingId = selectedId;
+    if (!beginGuestyPhotoCountMutation(listingId)) return;
+    const uiOperation = ++collageUiOperationRef.current;
+    const isActiveCollage = () =>
+      selectedIdRef.current === listingId
+      && collageUiOperationRef.current === uiOperation;
     setCollagePhase("generating");
     setCollageError(null);
     setCollagePreviewUrl(null);
@@ -2885,7 +3057,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           patio: selection.right as NonNullable<GuestyPropertyData["photos"]>[0],
         }
       : pickCollagePhotos(allPhotos);
-    if (!picks) { setCollageError("No photos available"); setCollagePhase("error"); return; }
+    if (!picks) {
+      setCollageError("No photos available");
+      setCollagePhase("error");
+      finishGuestyPhotoCountMutation(listingId);
+      void refreshGuestyPhotoCountFor(listingId);
+      return;
+    }
     // Show the operator their own pick immediately — the request below is the
     // only wait, and it must never look like a different pair is being built.
     setCollagePicks({ community: picks.community.caption || picks.community.url, patio: picks.patio.caption || picks.patio.url });
@@ -2895,12 +3073,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          listingId: selectedId,
+          listingId,
+          propertyId,
+          syncGalleryFromSystem: propertyId != null,
           photos: (allPhotos ?? []).map((p) => ({ url: p.url, caption: p.caption, source: p.source })),
           // Explicit pair — the server composes exactly these and never
           // degrades to a vision/heuristic pick.
           picks: { left: { url: picks.community.url }, right: { url: picks.patio.url } },
-          existingPhotos: lastPushedPictures.length > 0 ? lastPushedPictures : undefined,
         }),
       });
       if (!resp.ok) {
@@ -2908,20 +3087,39 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         throw new Error(err.error || `Server error ${resp.status}`);
       }
       const result = await resp.json() as any;
+      if (!isActiveCollage()) return;
       setCollageMeta({
         method: result.method === "manual" ? "manual" : result.method === "vision" ? "vision" : "heuristic",
         reasoning: null,
       });
+      if (result.replacementConfirmed !== true || typeof result.totalPhotos !== "number") {
+        throw new Error("Guesty did not confirm the exact gallery with the new cover collage.");
+      }
+      if (!finishGuestyPhotoCountMutation(listingId)) return;
       setGuestyPhotoCount(result.totalPhotos);
+      setGuestyPhotoCountLoading(false);
+      setGuestyPhotoCountError(null);
+      setGuestyPhotoCountCheckedAt(new Date().toISOString());
+      if (!isActiveCollage()) return;
       if (result.collageUrl) {
         setGuestyCoverCollageUrl(result.collageUrl);
         setCollagePreviewUrl(result.collageUrl);
       }
       setCollagePhase("done");
     } catch (e: any) {
-      setCollageError(e.message); setCollagePhase("error");
+      if (!isActiveCollage()) return;
+      const message = e?.message ?? "Cover collage update failed.";
+      markGuestyPhotoCountUnverified(listingId, message);
+      setCollageError(message); setCollagePhase("error");
     }
-  }, [selectedId, lastPushedPictures]);
+  }, [
+    beginGuestyPhotoCountMutation,
+    finishGuestyPhotoCountMutation,
+    markGuestyPhotoCountUnverified,
+    propertyId,
+    refreshGuestyPhotoCountFor,
+    selectedId,
+  ]);
 
   // One-click AI collage: ship the tab's VISIBLE photos to the server, which
   // has Claude vision pick the pair (destination shot LEFT, living space
@@ -2932,6 +3130,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     candidates: Array<{ url: string; caption?: string; source?: string }>,
   ) => {
     if (!selectedId) return;
+    const listingId = selectedId;
+    if (!beginGuestyPhotoCountMutation(listingId)) return;
+    const uiOperation = ++collageUiOperationRef.current;
+    const isActiveCollage = () =>
+      selectedIdRef.current === listingId
+      && collageUiOperationRef.current === uiOperation;
     setCollagePhase("picking");
     setCollageError(null);
     setCollagePreviewUrl(null);
@@ -2942,11 +3146,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          listingId: selectedId,
+          listingId,
+          propertyId,
+          syncGalleryFromSystem: propertyId != null,
           photos: candidates,
-          // Race-free pictures list when we just pushed (same contract as the
-          // manual upload-collage call).
-          existingPhotos: lastPushedPictures.length > 0 ? lastPushedPictures : undefined,
         }),
       });
       if (!resp.ok) {
@@ -2954,6 +3157,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         throw new Error(err.error || `Server error ${resp.status}`);
       }
       const result = await resp.json() as any;
+      if (!isActiveCollage()) return;
       const pickLabel = (p: any, fallback: string) =>
         (typeof p?.caption === "string" && p.caption) || (typeof p?.url === "string" && p.url.split("/").pop()) || fallback;
       setCollagePicks({
@@ -2964,16 +3168,33 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         method: result.method === "vision" ? "vision" : "heuristic",
         reasoning: typeof result.reasoning === "string" ? result.reasoning : null,
       });
+      if (result.replacementConfirmed !== true || typeof result.totalPhotos !== "number") {
+        throw new Error("Guesty did not confirm the exact gallery with the new cover collage.");
+      }
+      if (!finishGuestyPhotoCountMutation(listingId)) return;
       setGuestyPhotoCount(result.totalPhotos);
+      setGuestyPhotoCountLoading(false);
+      setGuestyPhotoCountError(null);
+      setGuestyPhotoCountCheckedAt(new Date().toISOString());
+      if (!isActiveCollage()) return;
       if (result.collageUrl) {
         setGuestyCoverCollageUrl(result.collageUrl);
         setCollagePreviewUrl(result.collageUrl);
       }
       setCollagePhase("done");
     } catch (e: any) {
-      setCollageError(e.message); setCollagePhase("error");
+      if (!isActiveCollage()) return;
+      const message = e?.message ?? "Cover collage update failed.";
+      markGuestyPhotoCountUnverified(listingId, message);
+      setCollageError(message); setCollagePhase("error");
     }
-  }, [selectedId, lastPushedPictures]);
+  }, [
+    beginGuestyPhotoCountMutation,
+    finishGuestyPhotoCountMutation,
+    markGuestyPhotoCountUnverified,
+    propertyId,
+    selectedId,
+  ]);
 
   // ── Photo reorder: persist the operator's drag-to-reorder for one gallery ──
   // A gallery = one folder (a unit, or the community folder). The new order is
@@ -3028,6 +3249,25 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (!selectedId || !photos?.length) {
       return { successCount: 0, total: photos?.length ?? 0, shortfall: 0, error: "No photos available to push." };
     }
+    const listingId = selectedId;
+    if (!beginGuestyPhotoCountMutation(listingId)) {
+      return {
+        successCount: 0,
+        total: photos.length,
+        shortfall: photos.length,
+        error: "Another Guesty photo update is already running.",
+      };
+    }
+    const operationId = createPhotoPushOperationId();
+    photoPushUiOperationRef.current = operationId;
+    const isCurrentListing = () =>
+      selectedIdRef.current === listingId
+      && photoPushUiOperationRef.current === operationId;
+    const scheduleLiveCountRefresh = (delayMs: number) => {
+      window.setTimeout(() => {
+        if (isCurrentListing()) void refreshGuestyPhotoCountFor(listingId);
+      }, delayMs);
+    };
     setUpscalePhase("pushing");
     setUpscaleTotal(photos.length);
     setUpscaleCurrent(0);
@@ -3042,7 +3282,6 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setPushVerifyNote(null);
     // Reset the known-pushed-pictures list at the start of each push so
     // a follow-up cover-collage operation only sees URLs from THIS run.
-    setLastPushedPictures([]);
 
     const origin = window.location.origin;
 
@@ -3069,7 +3308,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     // reconcile trick, 2026-07-14): only an entry with a server timestamp
     // strictly newer than this baseline counts as THIS push's outcome —
     // server-time vs server-time, so client clock skew can never matter.
-    const baselineMs = pushEntryTimeMs(await readPhotosPushLedgerEntry(selectedId));
+    const baselineMs = pushEntryTimeMs(await readPhotosPushLedgerEntry(listingId));
     const pushStartedAtMs = Date.now();
 
     try {
@@ -3083,7 +3322,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       const resp = await fetch("/api/builder/push-photos", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ guestyListingId: selectedId, photos: photosPayload, upscale: withUpscale }),
+        body: JSON.stringify({
+          guestyListingId: listingId,
+          photos: photosPayload,
+          upscale: withUpscale,
+          operationId,
+        }),
         signal: controller.signal,
       });
 
@@ -3093,9 +3337,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         // ledger reconcile below is only for INDEFINITE stream loss.
         const err = await resp.json().catch(() => ({})) as any;
         const message = err.error || `Server error ${resp.status}`;
-        setUpscaleError(message);
-        setUpscalePhase("error");
-        pushAbortRef.current = null;
+        if (isCurrentListing()) {
+          markGuestyPhotoCountUnverified(listingId, message);
+          setUpscaleError(message);
+          setUpscalePhase("error");
+        }
+        if (pushAbortRef.current === controller) pushAbortRef.current = null;
         return { successCount: 0, total: photos.length, shortfall: photos.length, error: message };
       }
 
@@ -3116,6 +3363,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           try {
             const event = JSON.parse(line) as {
               type: "photo" | "checkpoint" | "saving" | "verify" | "done";
+              operationId?: string;
               index?: number;
               total?: number;
               saved?: number;
@@ -3125,6 +3373,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               wasUpscaled?: boolean;
               error?: string;
               successCount?: number;
+              hostedCount?: number;
               verifiedCount?: number;
               shortfall?: number;
               upscaledCount?: number;
@@ -3140,11 +3389,53 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               collagePinned?: boolean;
               previousTotal?: number | null;
               removedCount?: number | null;
+              guestyError?: string;
               // "verify" event fields
               attempt?: number;
               expected?: number;
               got?: number;
             };
+
+            if (!isCurrentListing()) {
+              // The server operation still belongs to listingId, but the
+              // visible component now belongs to another listing. Drain the
+              // stream without leaking A's progress/count into B. Preserve a
+              // local terminal result so we do not enter a redundant ledger
+              // reconcile after a normal done event.
+              if (event.type === "done") {
+                const sc = event.verifiedCount ?? event.successCount ?? 0;
+                const tot = event.total ?? 0;
+                const guestyError = event.guestyError;
+                const guestyTotal = typeof event.guestyTotal === "number" ? event.guestyTotal : null;
+                const replacementConfirmed =
+                  event.replacementConfirmed === true
+                  && guestyTotal != null
+                  && !guestyError;
+                finalResult = {
+                  successCount: sc,
+                  total: tot,
+                  shortfall: event.shortfall ?? 0,
+                  error: guestyError
+                    || (!replacementConfirmed ? "Guesty did not confirm the exact replacement gallery." : undefined)
+                    || (sc === 0 && tot > 0 ? "All photos failed." : undefined),
+                };
+                if (sc > 0 && replacementConfirmed) {
+                  savePushSummary({
+                    listingId,
+                    timestamp: Date.now(),
+                    successCount: sc,
+                    total: tot,
+                    upscaledCount: event.upscaledCount ?? 0,
+                    failed: Math.max(0, tot - sc),
+                    guestyTotal,
+                    collagePinned: event.collagePinned === true,
+                    previousTotal: typeof event.previousTotal === "number" ? event.previousTotal : null,
+                    removedCount: typeof event.removedCount === "number" ? event.removedCount : null,
+                  }, false);
+                }
+              }
+              continue;
+            }
 
             if (event.type === "photo") {
               setUpscaleCurrent(event.index ?? 0);
@@ -3155,19 +3446,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 success: event.success ?? false,
                 error: event.error,
               }]);
-              // Accumulate the ImgBB URL + its caption for the follow-up
-              // cover-collage flow. Preserving the same 1-based index the
-              // server emits keeps the ordering intact, which is the order
-              // the push PUTs to Guesty — so the collage prepend gets
-              // added to a list that matches what's actually live.
-              if (event.success && event.url && typeof event.index === "number") {
-                const caption = photos[event.index - 1]?.caption ?? "";
-                setLastPushedPictures(prev => [...prev, { original: event.url!, caption }]);
-              }
             } else if (event.type === "checkpoint") {
-              // Intermediate save — update Guesty photo count so user can see progress
+              // Hosting progress only. Guesty's gallery remains unchanged
+              // until every source photo is ready for the exact replacement.
               setCheckpointCount(c => c + 1);
-              refreshGuestyPhotoCount();
             } else if (event.type === "saving") {
               setSavingToGuesty(true);
             } else if (event.type === "verify") {
@@ -3189,7 +3471,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               setSavingToGuesty(false);
               setPushVerifyNote(null);
               setUpscaledCount(event.upscaledCount ?? 0);
-              const guestyError = (event as any).guestyError as string | undefined;
+              const guestyError = event.guestyError;
               if (guestyError) setUpscaleError(`Guesty save failed: ${guestyError}`);
               const trimmed = event.trimmed ?? 0;
               if (trimmed > 0) {
@@ -3208,35 +3490,50 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               const sc = event.verifiedCount ?? event.successCount ?? 0;
               const shortfall = event.shortfall ?? 0;
               const tot = event.total ?? 0;
-              const succeeded = sc > 0 && !guestyError;
               const guestyTotal = typeof event.guestyTotal === "number" ? event.guestyTotal : null;
+              const replacementConfirmed = event.replacementConfirmed === true;
+              const succeeded =
+                sc > 0
+                && !guestyError
+                && replacementConfirmed
+                && guestyTotal != null;
               const staleExtra = typeof event.staleExtra === "number" ? event.staleExtra : 0;
               const previousTotal = typeof event.previousTotal === "number" ? event.previousTotal : null;
               const removedCount = typeof event.removedCount === "number" ? event.removedCount : null;
+              const terminalError = succeeded
+                ? undefined
+                : guestyError
+                  || (sc === 0 && tot > 0
+                    ? "All photos failed — check per-photo errors below"
+                    : "Guesty did not confirm the exact replacement gallery.");
               finalResult = {
                 successCount: sc,
                 total: tot,
                 shortfall,
-                error: guestyError || (sc === 0 && tot > 0 ? "All photos failed — check per-photo errors below" : undefined),
+                error: terminalError,
               };
-              if (!guestyError) {
-                // Prefer the server's actual read-back of the live gallery
-                // (includes the pinned collage) over the net pushed count.
-                setGuestyPhotoCount(guestyTotal ?? sc);
+              if (succeeded) {
+                finishGuestyPhotoCountMutation(listingId);
+                setGuestyPhotoCount(guestyTotal);
+                setGuestyPhotoCountCheckedAt(new Date().toISOString());
+                setGuestyPhotoCountLoading(false);
+                setGuestyPhotoCountError(null);
                 setPushGuestyConfirm({
                   pushed: sc,
                   expectedTotal: typeof event.expectedTotal === "number" ? event.expectedTotal : null,
                   guestyTotal,
-                  replacementConfirmed: event.replacementConfirmed === true,
+                  replacementConfirmed,
                   staleExtra,
                   collagePinned: event.collagePinned === true,
                   previousTotal,
                   removedCount,
                 });
-              }
-              setUpscalePhase(sc === 0 && tot > 0 ? "error" : "done");
-              if (sc === 0 && tot > 0 && !guestyError) {
-                setUpscaleError("All photos failed — check per-photo errors below");
+                setUpscalePhase("done");
+              } else {
+                markGuestyPhotoCountUnverified(listingId, terminalError!);
+                setPushGuestyConfirm(null);
+                setUpscaleError(`Guesty save failed: ${terminalError}`);
+                setUpscalePhase("error");
               }
               if (shortfall > 0) {
                 toast({
@@ -3246,7 +3543,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   duration: 12000,
                 });
               }
-              if (!guestyError && staleExtra > 0 && guestyTotal != null) {
+              if (!succeeded && staleExtra > 0 && guestyTotal != null) {
                 toast({
                   title: `Guesty still reports ${guestyTotal} photos`,
                   description: `This push should leave ${event.expectedTotal ?? sc} on the listing, but Guesty's last read still showed ${staleExtra} extra old photo${staleExtra === 1 ? "" : "s"}. Guesty reads can lag ~1 min — re-check shortly, and re-push if the old photos persist.`,
@@ -3255,9 +3552,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 });
               }
               // Persist summary to localStorage and refresh live count
-              if (succeeded && selectedId) {
+              if (succeeded) {
                 savePushSummary({
-                  listingId: selectedId,
+                  listingId,
                   timestamp: Date.now(),
                   successCount: sc,
                   total: tot,
@@ -3269,8 +3566,8 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                   removedCount,
                 });
                 // Guesty processes uploaded photos asynchronously — wait 3s then poll
-                setTimeout(() => refreshGuestyPhotoCount(), 3000);
-                setTimeout(() => refreshGuestyPhotoCount(), 8000);
+                scheduleLiveCountRefresh(3000);
+                scheduleLiveCountRefresh(8000);
               }
             }
           } catch { /* malformed line — skip */ }
@@ -3279,7 +3576,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     } catch (err: any) {
       if (err?.name === "AbortError") {
         // User cancelled — state is already reset by cancelPush()
-        pushAbortRef.current = null;
+        if (pushAbortRef.current === controller) pushAbortRef.current = null;
         return { successCount: 0, total: photos.length, shortfall: photos.length, error: "Photo push cancelled." };
       }
       // A fetch/read error mid-stream is INDEFINITE: the common cause is the
@@ -3291,7 +3588,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     }
 
     if (finalResult) {
-      pushAbortRef.current = null;
+      if (pushAbortRef.current === controller) pushAbortRef.current = null;
       return finalResult;
     }
 
@@ -3300,9 +3597,11 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     // every push, success AND failure, so a fresh ledger entry is the
     // authoritative outcome even though the HTTP response died. Deadline
     // scales with how many photos the server still had in flight.
-    setSavingToGuesty(false);
-    setPushVerifyNote(null);
-    setPushReconcileNote(photoPushStreamLostMessage(lastSeenIndex, photos.length, Date.now() - pushStartedAtMs));
+    if (isCurrentListing()) {
+      setSavingToGuesty(false);
+      setPushVerifyNote(null);
+      setPushReconcileNote(photoPushStreamLostMessage(lastSeenIndex, photos.length, Date.now() - pushStartedAtMs));
+    }
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const reconcileDeadline = Date.now() + photoPushReconcileDeadlineMs(Math.max(0, photos.length - lastSeenIndex));
     try {
@@ -3312,12 +3611,19 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           // already reset the UI state.
           return { successCount: 0, total: photos.length, shortfall: photos.length, error: "Photo push cancelled." };
         }
-        const outcome = freshPushOutcome(baselineMs, await readPhotosPushLedgerEntry(selectedId));
+        const outcome = freshPushOutcome(
+          baselineMs,
+          await readPhotosPushLedgerEntry(listingId),
+          operationId,
+        );
         if (outcome) {
           if (outcome.status === "error") {
             const message = outcome.summary || "The photo push failed on the server — see the tab's push history.";
-            setUpscaleError(message);
-            setUpscalePhase("error");
+            if (isCurrentListing()) {
+              markGuestyPhotoCountUnverified(listingId, message);
+              setUpscaleError(message);
+              setUpscalePhase("error");
+            }
             return { successCount: 0, total: photos.length, shortfall: photos.length, error: message };
           }
           // Ledger-confirmed success. The per-photo events after the cut died
@@ -3327,10 +3633,29 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           const counts = parsePhotosPushSummary(outcome.summary);
           const successCount = counts ? counts.verified : Math.max(lastSeenIndex, 1);
           const shortfall = counts ? Math.max(0, counts.pushed - counts.verified) : 0;
-          setReconciledPushSummary(outcome.summary || `${successCount} photos pushed`);
-          setUpscalePhase("done");
+          const ledgerConfirmed =
+            counts != null
+            && counts.verified > 0
+            && counts.verified === counts.pushed
+            && counts.liveTotal != null;
+          if (isCurrentListing()) {
+            if (ledgerConfirmed) {
+              finishGuestyPhotoCountMutation(listingId);
+              setGuestyPhotoCount(counts.liveTotal);
+              setGuestyPhotoCountLoading(false);
+              setGuestyPhotoCountError(null);
+              setGuestyPhotoCountCheckedAt(new Date().toISOString());
+              setReconciledPushSummary(outcome.summary);
+              setUpscalePhase("done");
+            } else {
+              const message = "The server completed the photo push, but its exact live Guesty count could not be recovered.";
+              markGuestyPhotoCountUnverified(listingId, message);
+              setUpscaleError(message);
+              setUpscalePhase("error");
+            }
+          }
           savePushSummary({
-            listingId: selectedId,
+            listingId,
             timestamp: Date.now(),
             successCount,
             total: photos.length,
@@ -3344,23 +3669,42 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           });
           // Guesty processes uploaded photos asynchronously — poll the live
           // count the same way the normal done path does.
-          setTimeout(() => refreshGuestyPhotoCount(), 3000);
-          setTimeout(() => refreshGuestyPhotoCount(), 8000);
-          return { successCount, total: photos.length, shortfall };
+          if (ledgerConfirmed) {
+            scheduleLiveCountRefresh(3000);
+            scheduleLiveCountRefresh(8000);
+            return { successCount, total: photos.length, shortfall };
+          }
+          return {
+            successCount: 0,
+            total: photos.length,
+            shortfall: photos.length,
+            error: "The exact live Guesty count could not be recovered from the completed push.",
+          };
         }
         if (Date.now() >= reconcileDeadline) {
           const message = pushReconcileTimeoutMessage("photos");
-          setUpscaleError(message);
-          setUpscalePhase("error");
+          if (isCurrentListing()) {
+            markGuestyPhotoCountUnverified(listingId, message);
+            setUpscaleError(message);
+            setUpscalePhase("error");
+          }
           return { successCount: 0, total: photos.length, shortfall: photos.length, error: message };
         }
         await sleep(PUSH_RECONCILE_POLL_MS);
       }
     } finally {
-      setPushReconcileNote(null);
-      pushAbortRef.current = null;
+      if (isCurrentListing()) setPushReconcileNote(null);
+      if (pushAbortRef.current === controller) pushAbortRef.current = null;
     }
-  }, [selectedId, refreshGuestyPhotoCount, savePushSummary, toast]);
+  }, [
+    beginGuestyPhotoCountMutation,
+    finishGuestyPhotoCountMutation,
+    markGuestyPhotoCountUnverified,
+    refreshGuestyPhotoCountFor,
+    savePushSummary,
+    selectedId,
+    toast,
+  ]);
 
   // ── Check connection + load listings ──────────────────────────────────────
   useEffect(() => {
@@ -3405,6 +3749,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           setPropertyMap(maps);
           const match = propertyId ? maps.find((m) => m.propertyId === propertyId) : null;
           if (match?.guestyListingId) {
+            selectedIdRef.current = match.guestyListingId;
             setSelectedId(match.guestyListingId);
             setConn((current) => current === "checking" || current === "rate-limited" ? "connected" : current);
             setConnError((current) => current === "RATE_LIMITED" ? null : current);
@@ -3431,12 +3776,14 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     if (!propertyId || propertyMap.length === 0) return;
     const match = propertyMap.find((m) => m.propertyId === propertyId);
     if (match?.guestyListingId) {
+      selectedIdRef.current = match.guestyListingId;
       setSelectedId(match.guestyListingId);
       if (conn === "checking" || conn === "rate-limited") {
         setConn("connected");
         setConnError(null);
       }
     } else {
+      selectedIdRef.current = "";
       setSelectedId("");
     }
   }, [conn, propertyId, propertyMap]);
@@ -3508,6 +3855,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
         .then(async (resp) => {
           if (!resp.ok) throw new Error("Guesty property map repair failed");
           rememberPropertyMap(propertyId, matchId);
+          selectedIdRef.current = matchId;
           setSelectedId(matchId);
           toast({
             title: "Guesty listing matched",
@@ -3540,6 +3888,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     const id = guestyListingId(uniqueMatches[0]);
     if (!id) return;
     rememberPropertyMap(propertyId, id);
+    selectedIdRef.current = id;
     setSelectedId(id);
     fetch("/api/guesty-property-map", {
       method: "POST",
@@ -3708,6 +4057,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       });
       const fresh = await guestyService.getListings(200, 0);
       setListings(fresh.results || []);
+      selectedIdRef.current = result.listingId;
       setSelectedId(result.listingId);
 
       let syncPropertyId = propertyId;
@@ -6040,6 +6390,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       pushStampsRefreshedAtRef.current = now;
       void refreshScannerSchedule();
       void reloadServerPushHistory();
+      void refreshGuestyPhotoCount();
     };
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
@@ -6047,7 +6398,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", refresh);
     };
-  }, [refreshScannerSchedule, reloadServerPushHistory]);
+  }, [refreshGuestyPhotoCount, refreshScannerSchedule, reloadServerPushHistory]);
 
   useEffect(() => {
     if (!propertyId) return;
@@ -6160,6 +6511,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     return () => { cancelled = true; };
   }, [propertyId]);
 
+  const expectedGuestyPhotoCount = photos.length + (guestyCoverCollageUrl ? 1 : 0);
+  const guestyPhotoCountDelta = guestyPhotoCount == null
+    ? null
+    : guestyPhotoCount - expectedGuestyPhotoCount;
+  const guestyPhotoCountMatches = guestyPhotoCountDelta === 0;
+
   return (
     <>
       <style>{CSS}</style>
@@ -6202,6 +6559,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
               value={selectedId}
               onChange={(e) => {
                 const newId = e.target.value;
+                selectedIdRef.current = newId;
                 setGuestyLiveAmenities(null);
                 // If the picked listing maps to a property that isn't the
                 // one currently in the URL, navigate there — otherwise the
@@ -6229,7 +6587,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                 }
               }}
               data-testid="select-guesty-listing"
-              disabled={conn !== "connected"}
+              disabled={
+                conn !== "connected"
+                || upscalePhase === "pushing"
+                || collagePhase === "picking"
+                || collagePhase === "generating"
+                || normalizePhase === "running"
+              }
             >
               <option value="">— Select an existing listing to view or update —</option>
               {listingOptions.map((l) => {
@@ -7079,11 +7443,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           {selectedId && t === "photos" && (
                             guestyPhotoCountLoading
                               ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#d1d5db", display: "inline-block" }} title="Checking Guesty…" />
+                              : guestyPhotoCountError
+                              ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#dc2626", display: "inline-block" }} title={`Guesty count could not be verified: ${guestyPhotoCountError}`} />
                               : guestyPhotoCount === null
-                              ? null
-                              : guestyPhotoCount > 0
-                              ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#16a34a", display: "inline-block" }} title={`${guestyPhotoCount} photos in Guesty`} />
-                              : <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#dc2626", display: "inline-block" }} title="No photos in Guesty yet" />
+                              ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#d1d5db", display: "inline-block" }} title="Guesty count has not been verified" />
+                              : guestyPhotoCountMatches
+                              ? <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#16a34a", display: "inline-block" }} title={`Live count matches: our gallery ${expectedGuestyPhotoCount}, Guesty ${guestyPhotoCount}`} />
+                              : <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#d97706", display: "inline-block" }} title={`Gallery mismatch: our gallery ${expectedGuestyPhotoCount}, Guesty ${guestyPhotoCount}`} />
                           )}
                           {pushTab && (
                             <span
@@ -9376,7 +9742,13 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 <button
                                   className="glb-btn glb-btn-primary"
                                   onClick={() => upscaleAndUpload(photos, doUpscale)}
-                                  disabled={!selectedId || photos.length === 0}
+                                  disabled={
+                                    !selectedId
+                                    || photos.length === 0
+                                    || collagePhase === "picking"
+                                    || collagePhase === "generating"
+                                    || normalizePhase === "running"
+                                  }
                                   data-testid="btn-upscale-upload"
                                   style={{ fontSize: 13 }}
                                 >
@@ -9401,18 +9773,52 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 )}
 
                                 {/* Live Guesty photo count pill */}
-                                {selectedId && (
-                                  <span style={{
-                                    display: "inline-flex", alignItems: "center", gap: 5,
-                                    fontSize: 11, padding: "2px 8px", borderRadius: 12,
-                                    background: guestyPhotoCountLoading ? "#f3f4f6" : (guestyPhotoCount ?? 0) > 0 ? "#dcfce7" : "#fee2e2",
-                                    color: guestyPhotoCountLoading ? "#9ca3af" : (guestyPhotoCount ?? 0) > 0 ? "#15803d" : "#b91c1c",
-                                    fontWeight: 500,
-                                  }}>
-                                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: guestyPhotoCountLoading ? "#9ca3af" : (guestyPhotoCount ?? 0) > 0 ? "#16a34a" : "#dc2626", display: "inline-block" }} />
-                                    {guestyPhotoCountLoading ? "Checking Guesty…" : `${guestyPhotoCount ?? 0} photos in Guesty`}
-                                  </span>
-                                )}
+                                {selectedId && (() => {
+                                  const palette = guestyPhotoCountLoading
+                                    ? { bg: "#f3f4f6", fg: "#6b7280", dot: "#9ca3af" }
+                                    : guestyPhotoCountError
+                                      ? { bg: "#fee2e2", fg: "#b91c1c", dot: "#dc2626" }
+                                      : guestyPhotoCount === null
+                                        ? { bg: "#f3f4f6", fg: "#6b7280", dot: "#9ca3af" }
+                                      : guestyPhotoCountMatches
+                                        ? { bg: "#dcfce7", fg: "#15803d", dot: "#16a34a" }
+                                        : { bg: "#fef3c7", fg: "#92400e", dot: "#d97706" };
+                                  const statusText = guestyPhotoCountLoading
+                                    ? "Checking Guesty…"
+                                    : guestyPhotoCountError
+                                      ? "Couldn’t verify Guesty count"
+                                      : guestyPhotoCount === null
+                                        ? "Guesty count not verified"
+                                        : guestyPhotoCountMatches
+                                          ? `Our gallery: ${expectedGuestyPhotoCount} · Guesty live count: ${guestyPhotoCount}`
+                                          : guestyPhotoCountDelta! > 0
+                                            ? `Our gallery: ${expectedGuestyPhotoCount} · Guesty live count: ${guestyPhotoCount} · ${guestyPhotoCountDelta} extra`
+                                            : `Our gallery: ${expectedGuestyPhotoCount} · Guesty live count: ${guestyPhotoCount} · ${Math.abs(guestyPhotoCountDelta!)} missing`;
+                                  return (
+                                    <span
+                                      data-testid="guesty-photo-count-status"
+                                      title={guestyPhotoCountError ?? (guestyPhotoCountCheckedAt ? `Count checked directly with Guesty at ${new Date(guestyPhotoCountCheckedAt).toLocaleString()}` : undefined)}
+                                      style={{
+                                        display: "inline-flex", alignItems: "center", gap: 5,
+                                        fontSize: 11, padding: "2px 8px", borderRadius: 12,
+                                        background: palette.bg, color: palette.fg, fontWeight: 500,
+                                      }}
+                                    >
+                                      <span style={{ width: 6, height: 6, borderRadius: "50%", background: palette.dot, display: "inline-block" }} />
+                                      {statusText}
+                                      {!guestyPhotoCountLoading && (
+                                        <button
+                                          type="button"
+                                          onClick={() => void refreshGuestyPhotoCount()}
+                                          aria-label="Re-check Guesty photo count"
+                                          style={{ border: 0, background: "transparent", color: "inherit", padding: 0, cursor: "pointer", lineHeight: 1 }}
+                                        >
+                                          ↻
+                                        </button>
+                                      )}
+                                    </span>
+                                  );
+                                })()}
                               </div>
 
                               {/* Normalize existing Guesty photos (rotate/resize/compress in-place) */}
@@ -9843,22 +10249,31 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                               {/* Cover collage lives inside PhotoCurator now —
                                   see the banner at the top of the tile grid. */}
 
-                              {/* Persisted last-push summary — shown after refresh */}
-                              {upscalePhase === "idle" && lastPushSummary && lastPushSummary.listingId === selectedId && (
-                                <div style={{ fontSize: 12, color: "#374151", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 6, padding: "6px 10px", marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
-                                  <span style={{ color: "#16a34a", fontWeight: 600 }}>✓ Last push:</span>
-                                  {lastPushSummary.successCount}/{lastPushSummary.total} photos
-                                  {lastPushSummary.upscaledCount > 0 && ` (${lastPushSummary.upscaledCount} upscaled)`}
-                                  {typeof lastPushSummary.guestyTotal === "number" && (
-                                    <span style={{ color: "#15803d" }} data-testid="last-push-guesty-total">
-                                      · {lastPushSummary.guestyTotal} now live in Guesty{lastPushSummary.collagePinned ? " (incl. cover collage)" : ""}
-                                      {typeof lastPushSummary.removedCount === "number" && lastPushSummary.removedCount > 0
-                                        && ` · ${lastPushSummary.removedCount} old photo${lastPushSummary.removedCount === 1 ? "" : "s"} removed`}
-                                    </span>
-                                  )}
-                                  {lastPushSummary.failed > 0 && <span style={{ color: "#b45309" }}> — {lastPushSummary.failed} failed</span>}
+                              {/* Same newest durable/browser-union receipt as the
+                                  Photos tab chip. Never render an older, separate
+                                  localStorage summary beneath a newer server stamp. */}
+                              {upscalePhase === "idle" && mergedPushLog.photos && (
+                                <div
+                                  data-testid="last-photo-push-receipt"
+                                  style={{
+                                    fontSize: 12,
+                                    color: mergedPushLog.photos.status === "success" ? "#166534" : "#991b1b",
+                                    background: mergedPushLog.photos.status === "success" ? "#f0fdf4" : "#fef2f2",
+                                    border: `1px solid ${mergedPushLog.photos.status === "success" ? "#bbf7d0" : "#fecaca"}`,
+                                    borderRadius: 6,
+                                    padding: "6px 10px",
+                                    marginBottom: 8,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 8,
+                                  }}
+                                >
+                                  <span style={{ fontWeight: 600 }}>
+                                    {mergedPushLog.photos.status === "success" ? "✓ Last Guesty photo push:" : "✗ Last Guesty photo push:"}
+                                  </span>
+                                  <span>{mergedPushLog.photos.message || (mergedPushLog.photos.status === "success" ? "Verified" : "Failed")}</span>
                                   <span style={{ color: "#9ca3af", marginLeft: "auto" }}>
-                                    {new Date(lastPushSummary.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                                    {formatDataPushTime(mergedPushLog.photos.pushedAt)}
                                   </span>
                                 </div>
                               )}
@@ -9989,7 +10404,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                 {savingToGuesty
                                   ? "Saving final batch to Guesty…"
                                   : checkpointCount > 0
-                                  ? `✓ ${checkpointCount * 5} photos already saved to Guesty — uploading remainder…`
+                                  ? `✓ ${checkpointCount * 5} photos prepared — Guesty stays unchanged until the full gallery is ready…`
                                   : doUpscale
                                   ? "Hosting for Guesty (AI-upscaling photos under 1920px, ~30s each). Progress saved to Guesty every 5 photos."
                                   : "Hosting for Guesty — a few seconds per photo. Progress saved to Guesty every 5 photos."}
@@ -10050,7 +10465,15 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                           onResetSectionOrder={resetSectionOrder}
                           communityPhotoVerdicts={communityPhotoVerdicts}
                           coverCollageEnabled={photos.length >= 2}
-                          coverCollageDisabledReason={!selectedId ? "Select a Guesty listing above to push the collage as cover." : null}
+                          coverCollageDisabledReason={
+                            !selectedId
+                              ? "Select a Guesty listing above to push the collage as cover."
+                              : upscalePhase === "pushing"
+                                ? "Wait for the current Guesty photo push to finish."
+                                : normalizePhase === "running"
+                                  ? "Wait for Guesty photo normalization to finish."
+                                  : null
+                          }
                           coverCollageCurrentUrl={guestyCoverCollageUrl}
                           onRequestCoverCollage={(selection) => { setCollagePhase("idle"); generateCoverCollage(photos, selection); }}
                           onRequestAutoCoverCollage={(candidates) => { generateAutoCoverCollage(candidates); }}

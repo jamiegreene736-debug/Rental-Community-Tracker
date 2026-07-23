@@ -10,6 +10,7 @@ import {
   applyGuestyPushRecord,
   parseGuestyPushHistoryStore,
   serializeGuestyPushHistoryStore,
+  normalizeGuestyPushOperationId,
   type GuestyPushHistoryStore,
   type GuestyPushListingHistory,
   type GuestyPushStatus,
@@ -41,11 +42,18 @@ export function recordGuestyPush(
   tab: GuestyPushTab,
   status: GuestyPushStatus,
   summary: string,
+  operationId?: string,
 ): void {
   const id = String(listingId ?? "").trim();
   if (!id) return;
+  const cleanOperationId = normalizeGuestyPushOperationId(operationId);
   void mutateStore((store, nowIso) => {
-    applyGuestyPushRecord(store, id, tab, { pushedAt: nowIso, status, summary }, nowIso);
+    applyGuestyPushRecord(store, id, tab, {
+      pushedAt: nowIso,
+      status,
+      summary,
+      ...(cleanOperationId ? { operationId: cleanOperationId } : {}),
+    }, nowIso);
   });
 }
 

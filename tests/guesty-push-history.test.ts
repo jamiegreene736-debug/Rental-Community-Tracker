@@ -54,6 +54,24 @@ check(
   "sanitize caps summary length",
   (sanitizeGuestyPushEntry({ pushedAt: NOW, status: "error", summary: "x".repeat(999) })?.summary.length ?? 0) === GUESTY_PUSH_SUMMARY_MAX_CHARS,
 );
+check(
+  "sanitize preserves a valid operation correlation ID",
+  sanitizeGuestyPushEntry({
+    pushedAt: NOW,
+    status: "success",
+    summary: "31 photos pushed",
+    operationId: "photo-operation-123",
+  })?.operationId === "photo-operation-123",
+);
+check(
+  "sanitize drops an invalid operation ID without discarding the ledger entry",
+  sanitizeGuestyPushEntry({
+    pushedAt: NOW,
+    status: "success",
+    summary: "31 photos pushed",
+    operationId: "bad operation id with spaces",
+  })?.operationId == null,
+);
 
 check("parse fail-softs on junk", Object.keys(parseGuestyPushHistoryStore("{not json").listings).length === 0);
 check("parse fail-softs on null", Object.keys(parseGuestyPushHistoryStore(null).listings).length === 0);
@@ -209,7 +227,7 @@ check(
   "routes: cover-collage push records to the ledger (both callers via the wrapper)",
   routesFlat.includes(`summarizeCoverCollagePush(result.totalPhotos)`) &&
   routesFlat.includes(`recordGuestyPush( listingId, "photos", result.ok ? "success" : "error"`) &&
-  routesFlat.includes("await pushCoverCollageToGuestyUnrecorded(listingId, rawBase64, existingPhotos)"),
+  routesFlat.includes("await pushCoverCollageToGuestyUnrecorded(listingId, rawBase64)"),
 );
 check("routes: proxy classifies bedding/bookable writes", routes.includes("classifyGuestyProxyListingWrite(req.method, guestyPath, req.body)"));
 check("routes: GET history endpoint exists", routes.includes(`app.get("/api/builder/guesty-push-history"`));

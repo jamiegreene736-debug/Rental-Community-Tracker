@@ -41,6 +41,9 @@ export type GuestyPushEntry = {
   pushedAt: string; // ISO timestamp
   status: GuestyPushStatus;
   summary: string; // operator-facing, e.g. "81 amenities pushed"
+  /** Correlates a long-running push with the browser that started it. Older
+   * ledger entries and non-streaming push types legitimately omit this. */
+  operationId?: string;
 };
 
 export type GuestyPushListingHistory = Partial<Record<GuestyPushTab, GuestyPushEntry>>;
@@ -61,6 +64,12 @@ const FUTURE_SKEW_MS = 5 * 60 * 1000;
 const isValidIso = (value: unknown): value is string =>
   typeof value === "string" && Number.isFinite(new Date(value).getTime());
 
+export function normalizeGuestyPushOperationId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const id = value.trim();
+  return /^[a-zA-Z0-9._:-]{8,128}$/.test(id) ? id : null;
+}
+
 export function isGuestyPushTab(value: unknown): value is GuestyPushTab {
   return typeof value === "string" && (GUESTY_PUSH_TABS as readonly string[]).includes(value);
 }
@@ -75,10 +84,12 @@ export function sanitizeGuestyPushEntry(value: unknown): GuestyPushEntry | null 
   if (!status) return null;
   const summarySource =
     typeof v.summary === "string" ? v.summary : typeof v.message === "string" ? v.message : "";
+  const operationId = normalizeGuestyPushOperationId(v.operationId);
   return {
     pushedAt: new Date(v.pushedAt as string).toISOString(),
     status,
     summary: summarySource.trim().slice(0, GUESTY_PUSH_SUMMARY_MAX_CHARS),
+    ...(operationId ? { operationId } : {}),
   };
 }
 

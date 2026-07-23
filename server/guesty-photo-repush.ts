@@ -6,7 +6,7 @@
 // CURRENT gallery (active folders: replacement folder when swapped, else the
 // unit's own; community last) and drives the existing
 // POST /api/builder/push-photos via loopback — reusing its ImgBB hosting,
-// collage pinning, 100-photo cap, checkpointed PUTs, and the verify-and-retry
+// collage pinning, 100-photo cap, all-or-nothing PUT, and exact verify/retry
 // loop. That PUT replaces the entire pictures[] array, which is what deletes
 // the stale photos from Guesty (and, via Guesty's fan-out, from the OTAs).
 //
@@ -41,7 +41,7 @@ import { isVirtualStagingCandidateFilename } from "@shared/virtual-staging";
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 const photosRoot = () => path.join(process.cwd(), "client/public/photos");
 
-// A full push (upscale + ImgBB + checkpointed Guesty PUTs + verify loop) runs
+// A full push (upscale + ImgBB + exact Guesty replacement/verify loop) runs
 // 1-3 min for a 30-50 photo gallery; 15 min is a generous ceiling.
 const PUSH_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -82,6 +82,8 @@ export type GuestyPhotoRepushResult = {
   photoCount?: number;
   successCount?: number;
   verifiedCount?: number;
+  guestyTotal?: number | null;
+  replacementConfirmed?: boolean;
   collagePinned?: boolean;
   strictGalleryVerified?: boolean;
   error?: string;
@@ -230,6 +232,7 @@ async function runRepush(
   reason: string,
   waitForLabelsFolder?: string,
   requiredCoverCollageUrl?: string,
+  upscale = true,
 ): Promise<GuestyPhotoRepushResult> {
   const base: GuestyPhotoRepushResult = { ok: false, propertyId };
   let assembled: Awaited<ReturnType<typeof assemblePushPhotosForProperty>>;
@@ -255,7 +258,7 @@ async function runRepush(
       body: JSON.stringify({
         guestyListingId,
         photos,
-        upscale: true,
+        upscale,
         ...(requiredCoverCollageUrl ? { requiredCoverCollageUrl } : {}),
       }),
       signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
@@ -267,6 +270,8 @@ async function runRepush(
     let successCount = 0;
     let verifiedCount = 0;
     let expectedPushCount = 0;
+    let guestyTotal: number | null = null;
+    let replacementConfirmed = false;
     let collagePinned = false;
     let strictGalleryVerified = false;
     let sawDone = false;
@@ -288,6 +293,8 @@ async function runRepush(
             successCount = Number(ev.successCount ?? 0);
             verifiedCount = Number(ev.verifiedCount ?? 0);
             expectedPushCount = Number(ev.total ?? 0);
+            guestyTotal = typeof ev.guestyTotal === "number" ? ev.guestyTotal : null;
+            replacementConfirmed = ev.replacementConfirmed === true;
             collagePinned = ev.collagePinned === true;
             strictGalleryVerified = ev.strictGalleryVerified === true;
           }
@@ -301,7 +308,8 @@ async function runRepush(
     const ok = sawDone
       && expectedPushCount > 0
       && successCount === expectedPushCount
-      && verifiedCount >= successCount
+      && verifiedCount === successCount
+      && replacementConfirmed
       && (!requiredCoverCollageUrl || (collagePinned && strictGalleryVerified));
     console.log(`[guesty-photo-repush] ${propertyName}: ${ok ? "✓" : "✗"} ${successCount}/${expectedPushCount || photos.length} pushed, ${verifiedCount} verified on Guesty`);
     const incompleteError = !sawDone
@@ -310,8 +318,10 @@ async function runRepush(
         ? "push stream reported no target photos"
         : successCount !== expectedPushCount
           ? `only ${successCount}/${expectedPushCount} photos were pushed`
-          : verifiedCount < successCount
+          : verifiedCount !== successCount
             ? `only ${verifiedCount}/${successCount} pushed photos were verified on Guesty`
+            : !replacementConfirmed
+              ? `Guesty did not confirm the exact ${expectedPushCount + (collagePinned ? 1 : 0)}-photo replacement gallery`
             : requiredCoverCollageUrl && (!collagePinned || !strictGalleryVerified)
               ? "the exact audit-generated Cover Collage and ordered gallery were not verified on Guesty"
               : null;
@@ -323,6 +333,8 @@ async function runRepush(
       photoCount: photos.length,
       successCount,
       verifiedCount,
+      guestyTotal,
+      replacementConfirmed,
       collagePinned,
       strictGalleryVerified,
       ...(ok ? {} : { error: incompleteError ?? "Guesty gallery push was incomplete" }),
@@ -351,13 +363,22 @@ export function repushGuestyPhotosForProperty(
     /** Full-audit identity boundary: require this exact generated collage URL
      * first in the exact ordered Guesty readback before reporting ok. */
     requiredCoverCollageUrl?: string;
+    /** Cover-collage synchronization can skip AI upscaling while still running
+     * the same validation, hosting, replacement, and exact read-back path. */
+    upscale?: boolean;
   } = {},
 ): Promise<GuestyPhotoRepushResult> {
   const reason = opts.reason ?? "manual";
   const tail = pushTails.get(propertyId) ?? Promise.resolve();
   const run = tail
     .catch(() => undefined)
-    .then(() => runRepush(propertyId, reason, opts.waitForLabelsFolder, opts.requiredCoverCollageUrl));
+    .then(() => runRepush(
+      propertyId,
+      reason,
+      opts.waitForLabelsFolder,
+      opts.requiredCoverCollageUrl,
+      opts.upscale ?? true,
+    ));
   pushTails.set(propertyId, run);
   void run.finally(() => {
     if (pushTails.get(propertyId) === run) pushTails.delete(propertyId);
