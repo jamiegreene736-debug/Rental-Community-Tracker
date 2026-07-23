@@ -235,7 +235,7 @@ assert.match(
 );
 assert.match(
   routesSource,
-  /stagingFolder = `\.\$\{folder\}\.staging[\s\S]*downloadAndPrioritize\(\{[\s\S]*folder: stagingFolder[\s\S]*fs\.promises\.rename\(stagingPath, folderPath\)/,
+  /stagingFolder = `\.\$\{folder\}\.staging[\s\S]*downloadAndPrioritize\(\{[\s\S]*folder: stagingFolder[\s\S]*commitPhotoFolderStage\(folderPath, stagingPath, backupPath/,
   "unit replacement photo hydration must stage downloads and only swap into the final folder after proof checks pass",
 );
 assert.match(

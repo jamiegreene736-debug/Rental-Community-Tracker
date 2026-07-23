@@ -20,14 +20,19 @@ import { storage } from "./storage";
 import { computeDhash } from "./photo-hashing";
 import { fetchSearchApiWithFallback } from "./searchapi";
 import { MIN_INDEPENDENT_UNIT_PHOTOS } from "./unit-photo-resolver";
+import { replacementPhotoFolderRef } from "@shared/photo-folder-utils";
+import { extractListingUnitIdentity } from "@shared/real-estate-listing-discovery";
+import { fetchRemoteImage } from "./remote-image-fetch";
 import {
   evaluateGalleryNovelty,
   filterSameUnitSerpRows,
+  chooseSameUnitHuntAnchor,
   sameUnitCandidateVerdict,
   sameUnitHuntExhaustionProven,
   sameUnitHuntIdentity,
   sameUnitHuntQueries,
   sameUnitHuntSearchComplete,
+  sameUnitSourceUrlsMatch,
   summarizeSameUnitHuntFailure,
   canonicalKeysForExclusion,
   SAME_UNIT_HUNT_MAX_CANDIDATES_DEFAULT,
@@ -70,17 +75,90 @@ function publicPhotoDir(folder: string): string {
  * whose failures it swallows (returns null), so a transient transport blip at
  * click time would otherwise turn into a false-permanent "no saved source
  * listing" failure WITH the replace-unit recommendation. The folder's
- * _source.json is the durable single-writer record — read it directly.
+ * _source.json is the durable single-writer record for ordinary folders. A
+ * replacement folder is additionally reconciled against its committed swap,
+ * which remains the authority for the physical unit's identity.
  */
-export async function readFolderSourceUrl(folder: string): Promise<string | null> {
+export async function readFolderSourceUrl(
+  folder: string,
+  options: {
+    /** Avoid a second, potentially inconsistent DB read inside one hunt. */
+    replacementAuthority?: ReplacementPhotoSourceAuthority | null;
+  } = {},
+): Promise<string | null> {
+  let savedUrl: string | null = null;
   try {
     const raw = await fs.promises.readFile(path.join(publicPhotoDir(folder), "_source.json"), "utf8");
     const doc = JSON.parse(raw) as { sourceListing?: { url?: unknown } };
     const url = doc?.sourceListing?.url;
-    return typeof url === "string" && /^https?:\/\//i.test(url) ? url : null;
-  } catch {
-    return null;
+    savedUrl = typeof url === "string" && /^https?:\/\//i.test(url) ? url : null;
+  } catch {}
+
+  const replacementRef = replacementPhotoFolderRef(folder);
+  const authorityWasProvided = Object.prototype.hasOwnProperty.call(
+    options,
+    "replacementAuthority",
+  );
+  const authority = replacementRef
+    ? authorityWasProvided
+      ? options.replacementAuthority ?? null
+      : await authoritativeReplacementPhotoSource(folder)
+    : null;
+  if (!authority) {
+    // A replacement folder without a readable committed swap has no trusted
+    // physical-unit identity. A stale source document must not become the
+    // authority merely because the database lookup is unavailable.
+    return replacementRef ? null : savedUrl;
   }
+  if (
+    savedUrl
+    && sameUnitSourceUrlsMatch(authority.sourceUrl, savedUrl, {
+      expectedUnitClaim: authority.unitClaim,
+    })
+  ) {
+    return savedUrl;
+  }
+  if (savedUrl) {
+    console.warn(
+      `[photo-source] ${folder}: saved source contradicts the committed replacement; recovering the committed source`,
+    );
+  }
+  return authority.sourceUrl;
+}
+
+export type ReplacementPhotoSourceAuthority = {
+  sourceUrl: string;
+  unitClaim: string | null;
+};
+
+/**
+ * The latest committed swap is the identity authority for a replacement
+ * folder. Pending swaps and _source.json metadata may never override it.
+ */
+export async function authoritativeReplacementPhotoSource(
+  folder: string,
+): Promise<ReplacementPhotoSourceAuthority | null> {
+  const ref = replacementPhotoFolderRef(folder);
+  if (!ref) return null;
+  const swaps = await storage.getUnitSwaps(ref.propertyId).catch(() => []);
+  const match = swaps.find((swap) =>
+    swap.oldUnitId === ref.oldUnitId
+    && swap.committed === true
+    && /^https?:\/\//i.test(swap.newSourceUrl),
+  );
+  if (!match) return null;
+  return {
+    sourceUrl: match.newSourceUrl,
+    unitClaim: extractListingUnitIdentity(
+      match.newAddress,
+      match.newUnitLabel,
+      match.newSourceUrl,
+    ),
+  };
+}
+
+export async function authoritativeReplacementPhotoSourceUrl(folder: string): Promise<string | null> {
+  return (await authoritativeReplacementPhotoSource(folder))?.sourceUrl ?? null;
 }
 
 /**
@@ -137,11 +215,13 @@ export async function hashRemotePhotoUrls(
       next += 1;
       const url = bounded[index];
       try {
-        const resp = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-        if (!resp.ok) continue;
-        const buf = Buffer.from(await resp.arrayBuffer());
-        if (buf.length === 0 || buf.length > MAX_REMOTE_IMAGE_BYTES) continue;
-        results[index] = await computeDhash(buf);
+        const remote = await fetchRemoteImage(url, {
+          timeoutMs,
+          minBytes: 1,
+          maxBytes: MAX_REMOTE_IMAGE_BYTES,
+        });
+        if (!remote) continue;
+        results[index] = await computeDhash(remote.buffer);
       } catch {
         // null stays — unverified, never counted as new OR duplicate.
       }
@@ -267,9 +347,44 @@ export async function runSameUnitPhotoHunt(input: SameUnitHuntInput): Promise<Sa
   const folder = String(input.currentFolder ?? "").trim();
   // Server-side anchor fallback: the client's source-URL GET fails soft, so a
   // transport blip must not become a false-permanent "no saved source" +
-  // replace recommendation. The folder's _source.json is authoritative.
-  let anchorUrl = String(input.currentSourceUrl ?? "").trim();
-  if (!anchorUrl && folder) anchorUrl = (await readFolderSourceUrl(folder)) ?? "";
+  // replace recommendation. Replacement folders also reconcile the saved
+  // document against the committed swap before it becomes an anchor.
+  const clientAnchorUrl = String(input.currentSourceUrl ?? "").trim();
+  const replacementRef = folder ? replacementPhotoFolderRef(folder) : null;
+  const folderAuthority = folder
+    ? await authoritativeReplacementPhotoSource(folder)
+    : null;
+  const folderAnchorUrl = folder
+    ? await readFolderSourceUrl(folder, {
+        replacementAuthority: folderAuthority,
+      })
+    : null;
+  const anchorUrl = chooseSameUnitHuntAnchor({
+    replacementFolder: !!replacementRef,
+    authorityAvailable: !!folderAuthority,
+    folderUrl: folderAnchorUrl,
+    clientUrl: clientAnchorUrl,
+  });
+  if (
+    folderAnchorUrl
+    && clientAnchorUrl
+    && !sameUnitSourceUrlsMatch(folderAnchorUrl, clientAnchorUrl, {
+      expectedUnitClaim: folderAuthority?.unitClaim,
+    })
+  ) {
+    console.warn(
+      `[same-unit-hunt] ${folder}: ignoring a client source URL that contradicts the server-side folder identity`,
+    );
+  }
+  if (replacementRef && !anchorUrl) {
+    return {
+      ...failure("no-anchor", [], false, {
+        anchor: "missing",
+        searchIncomplete: true,
+      }),
+      message: "The committed replacement identity could not be verified right now. The existing gallery was kept; retry when the database connection is healthy.",
+    };
+  }
   if (!anchorUrl) {
     // Permanent state (no anchor will appear without operator action) — the
     // honest advice IS "replace the unit or paste a URL", so the flag is set.
@@ -339,6 +454,21 @@ export async function runSameUnitPhotoHunt(input: SameUnitHuntInput): Promise<Sa
       });
       continue;
     }
+    const resolvedSourceUrl = gallery.sourceUrl || candidate.url;
+    if (!sameUnitSourceUrlsMatch(anchorUrl, resolvedSourceUrl, {
+      expectedUnitClaim: folderAuthority?.unitClaim ?? identity.unitClaim,
+    })) {
+      console.warn(
+        `[same-unit-hunt] rejecting scraper-resolved source that changed unit identity: ${resolvedSourceUrl}`,
+      );
+      checked.push({
+        url: resolvedSourceUrl,
+        portal: candidate.portal,
+        verdict: "unverifiable",
+        totalCount: gallery.photos.length,
+      });
+      continue;
+    }
     progress(`Comparing ${candidate.portal} photos against the current gallery (${i + 1}/${candidates.length})`, base + 6);
     const candidateHashes = await hashRemotePhotoUrls(gallery.photos.map((p) => p.url));
     const novelty = evaluateGalleryNovelty(existingHashes, candidateHashes);
@@ -356,7 +486,7 @@ export async function runSameUnitPhotoHunt(input: SameUnitHuntInput): Promise<Sa
     if (verdict === "accept") {
       return {
         outcome: "accepted",
-        sourceUrl: gallery.sourceUrl || candidate.url,
+        sourceUrl: resolvedSourceUrl,
         portal: candidate.portal,
         photos: gallery.photos,
         newPhotoCount: novelty.newCount,

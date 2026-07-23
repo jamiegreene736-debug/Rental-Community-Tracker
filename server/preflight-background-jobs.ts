@@ -1,5 +1,8 @@
 import { findNewDiscoveryResultRejection, preflightPhotoDiscoveryAttempts } from "@shared/preflight-photo-discovery";
-import { condoCommunityExpected, replacementPropertyTypeRejection } from "@shared/listing-property-type";
+import {
+  condoCommunityExpected,
+  replacementPropertyTypeRejection,
+} from "@shared/listing-property-type";
 import { parseListingAddressFromUrl } from "@shared/listing-url-address";
 import { getUnitBuilderByPropertyId } from "../client/src/data/unit-builder-data";
 import {
@@ -24,6 +27,7 @@ import {
   sameUnitPhotoHuntEnabled,
   type SameUnitHuntAccepted,
 } from "./same-unit-photo-hunt";
+import { issuePhotoPersistProof } from "./photo-persist-proof";
 
 type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
@@ -624,9 +628,12 @@ async function runPreflightPhotoFetchJob(
       const gateDraft = await storage.getCommunityDraft(input.draftId);
       expectCondoUnits = condoCommunityExpected(gateDraft?.propertyType, gateDraft?.unitTypes);
     } else if (Number.isFinite(input.propertyId) && input.propertyId > 0) {
-      expectCondoUnits = condoCommunityExpected(getUnitBuilderByPropertyId(input.propertyId)?.propertyType ?? null, null);
+      const propertyType = getUnitBuilderByPropertyId(input.propertyId)?.propertyType ?? null;
+      expectCondoUnits = condoCommunityExpected(propertyType, null);
     }
-  } catch { expectCondoUnits = false; }
+  } catch {
+    expectCondoUnits = false;
+  }
   const rescrapeSourceUrl = !findNewSource
     && typeof input.rescrapeSourceUrl === "string" && /^https?:\/\//i.test(input.rescrapeSourceUrl)
     ? input.rescrapeSourceUrl.trim()
@@ -934,9 +941,16 @@ async function runPreflightPhotoFetchJob(
         message: "Replacing this unit's gallery from the new source",
         progress: 86,
       });
+      const photoProofToken = issuePhotoPersistProof(
+        sourceUrl,
+        photos.map((photo) => photo.url),
+      );
       const persistData = await postJson(`${base}/api/builder/rescrape-unit-photos`, {
         folder: targetFolder,
         sourceUrl,
+        // One-time server-held proof lets persistence reuse the exact gallery
+        // that passed identity/novelty checks without accepting arbitrary URLs.
+        photoProofToken,
       }, 300_000);
       const savedStatic = Number(persistData?.savedCount ?? 0);
       if (savedStatic < MIN_INDEPENDENT_UNIT_PHOTOS) {

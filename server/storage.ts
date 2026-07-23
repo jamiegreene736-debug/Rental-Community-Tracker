@@ -62,6 +62,7 @@ import {
   deleteBuyInWithCheckoutGuard,
   detachBuyInWithCheckoutGuard,
 } from "./buy-in-checkout-claims";
+import { planPhotoLabelMerge } from "./photo-label-merge";
 
 function listingUrlKey(url: string | null | undefined): string {
   if (!url) return "";
@@ -2400,12 +2401,87 @@ export class DatabaseStorage implements IStorage {
   // carry rows for a PREVIOUS gallery whose photo_NN.jpg filenames collide
   // with the fresh set.
   async movePhotoLabelsToFolder(fromFolder: string, toFolder: string): Promise<number> {
-    await db.delete(photoLabels).where(eq(photoLabels.folder, toFolder));
-    const rows = await db.update(photoLabels)
-      .set({ folder: toFolder })
-      .where(eq(photoLabels.folder, fromFolder))
-      .returning();
-    return rows.length;
+    return db.transaction(async (tx) => {
+      await tx.delete(photoLabels).where(eq(photoLabels.folder, toFolder));
+      const rows = await tx.update(photoLabels)
+        .set({ folder: toFolder })
+        .where(eq(photoLabels.folder, fromFolder))
+        .returning();
+      return rows.length;
+    });
+  }
+
+  /**
+   * Promote staged model metadata without erasing operator decisions already
+   * attached to the live filenames. Unlike movePhotoLabelsToFolder, this path
+   * preserves human captions/categories, hidden state, manual order, channel
+   * usage, and destination-only virtual-staging rows.
+   */
+  async mergeStagedPhotoLabelsIntoFolder(
+    fromFolder: string,
+    toFolder: string,
+    liveFilenames: readonly string[],
+  ): Promise<number> {
+    return db.transaction(async (tx) => {
+      const stagedRows = await tx.select().from(photoLabels)
+        .where(eq(photoLabels.folder, fromFolder));
+      const destinationRows = await tx.select().from(photoLabels)
+        .where(eq(photoLabels.folder, toFolder));
+      const destinationByFilename = new Map(destinationRows.map((row) => [row.filename, row]));
+      const stagedFilenames = new Set(stagedRows.map((row) => row.filename));
+      const {
+        obsoleteIds: obsoleteDestinationIds,
+        unlabeledLiveIds,
+      } = planPhotoLabelMerge(destinationRows, stagedFilenames, liveFilenames);
+
+      for (const staged of stagedRows) {
+        const generatedFields = {
+          label: staged.label,
+          category: staged.category,
+          confidence: staged.confidence,
+          model: staged.model,
+          perceptualHash: staged.perceptualHash,
+          bedroomClusterId: staged.bedroomClusterId,
+          bedroomBedType: staged.bedroomBedType,
+          generatedAt: staged.generatedAt,
+        };
+        const existing = destinationByFilename.get(staged.filename);
+        if (existing) {
+          await tx.update(photoLabels)
+            .set(generatedFields)
+            .where(eq(photoLabels.id, existing.id));
+        } else {
+          await tx.insert(photoLabels).values({
+            folder: toFolder,
+            filename: staged.filename,
+            ...generatedFields,
+          });
+        }
+      }
+
+      if (obsoleteDestinationIds.length > 0) {
+        await tx.delete(photoLabels).where(inArray(photoLabels.id, obsoleteDestinationIds));
+      }
+      if (unlabeledLiveIds.length > 0) {
+        // With no labeler configured, the files are new but there are no
+        // staged model rows. Keep human overrides while clearing generated
+        // captions/hashes that belonged to the previous bytes at this index.
+        await tx.update(photoLabels)
+          .set({
+            label: "",
+            category: null,
+            confidence: null,
+            model: null,
+            perceptualHash: null,
+            bedroomClusterId: null,
+            bedroomBedType: null,
+            generatedAt: new Date(),
+          })
+          .where(inArray(photoLabels.id, unlabeledLiveIds));
+      }
+      await tx.delete(photoLabels).where(eq(photoLabels.folder, fromFolder));
+      return stagedRows.length;
+    });
   }
 
   // Delete the label for a single file (used when a photo is curated away so the

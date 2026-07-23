@@ -36,6 +36,7 @@ import {
 import { groupSameBedroomsViaVision, type SameRoomRep } from "./bedroom-same-room-vision";
 import { storage } from "./storage";
 import { isVirtualStagingCandidateFilename } from "../shared/virtual-staging";
+import { fetchRemoteImage } from "./remote-image-fetch";
 
 // Category priority. Lower index = higher priority (kept first).
 // Matches the vocabulary the unit-kind prompt returns in photo-labeler.ts.
@@ -155,15 +156,13 @@ const LABEL_CONCURRENCY = 8;
 // to one saved file.
 async function downloadOne(srcUrl: string, destPath: string): Promise<string | null> {
   try {
-    const r = await fetch(srcUrl, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; VacationRentalBot/1.0)" },
-      signal: AbortSignal.timeout(15000),
+    const remote = await fetchRemoteImage(srcUrl, {
+      timeoutMs: 15_000,
+      minBytes: 5_000,
     });
-    if (!r.ok) return null;
-    const buf = Buffer.from(await r.arrayBuffer());
-    if (buf.length < 5000) return null;
-    const hash = crypto.createHash("md5").update(buf).digest("hex");
-    await fs.promises.writeFile(destPath, buf);
+    if (!remote) return null;
+    const hash = crypto.createHash("md5").update(remote.buffer).digest("hex");
+    await fs.promises.writeFile(destPath, remote.buffer);
     return hash;
   } catch {
     return null;

@@ -120,6 +120,65 @@ export function normalizedUnitKey(claim: string | null | undefined): string {
 }
 
 /**
+ * Prove that two listing URLs identify the same physical unit.
+ *
+ * Exact canonical URLs are safe even when a portal uses an opaque path.
+ * Cross-portal matches fail closed unless both URLs carry the same numbered
+ * street root and the same normalized unit claim. A unit-bearing listing can
+ * never match a unit-less page in the same building.
+ */
+export function sameUnitSourceUrlsMatch(
+  authoritativeUrl: string | null | undefined,
+  candidateUrl: string | null | undefined,
+  options: {
+    /** Stronger unit evidence supplied by the committed swap or operator record. */
+    expectedUnitClaim?: string | null;
+    /** Only set after positively establishing that this is a unique-address home. */
+    allowUnitlessStreetMatch?: boolean;
+  } = {},
+): boolean {
+  const authoritative = String(authoritativeUrl ?? "").trim();
+  const candidate = String(candidateUrl ?? "").trim();
+  if (!authoritative || !candidate) return false;
+  const authoritativeKey = canonicalListingUrlKey(authoritative);
+  const candidateKey = canonicalListingUrlKey(candidate);
+  if (authoritativeKey && authoritativeKey === candidateKey) return true;
+
+  const expected = sameUnitHuntIdentity({ sourceUrl: authoritative });
+  const actual = sameUnitHuntIdentity({ sourceUrl: candidate });
+  if (!expected?.streetRoot || !actual?.streetRoot) return false;
+  if (expected.streetRoot.toLowerCase() !== actual.streetRoot.toLowerCase()) return false;
+
+  const expectedUnit = normalizedUnitKey(options.expectedUnitClaim)
+    || normalizedUnitKey(expected.unitClaim);
+  const actualUnit = normalizedUnitKey(actual.unitClaim);
+  if (expectedUnit || actualUnit) {
+    return !!expectedUnit && expectedUnit === actualUnit;
+  }
+  return options.allowUnitlessStreetMatch === true;
+}
+
+/**
+ * Choose the hunt anchor without letting a stale browser value outrank server
+ * identity. Replacement folders require both a readable committed authority
+ * and the server-reconciled folder URL; ordinary folders may fall back to the
+ * client value when their source document is missing.
+ */
+export function chooseSameUnitHuntAnchor(input: {
+  replacementFolder: boolean;
+  authorityAvailable: boolean;
+  folderUrl?: string | null;
+  clientUrl?: string | null;
+}): string | null {
+  const folderUrl = String(input.folderUrl ?? "").trim();
+  if (input.replacementFolder) {
+    if (!input.authorityAvailable || !folderUrl) return null;
+    return folderUrl;
+  }
+  return folderUrl || String(input.clientUrl ?? "").trim() || null;
+}
+
+/**
  * SERP queries hunting the SAME unit on every real-estate portal: the full
  * slug address (which carries the unit token) on each portal, plus the
  * community street address + unit-claim variants. Reuses PR #1059's

@@ -184,6 +184,7 @@ import {
   startPreflightRescrapeJob,
   type PreflightAuditUnitInput,
 } from "./preflight-background-jobs";
+import { consumePhotoPersistProof } from "./photo-persist-proof";
 import {
   getCommunityPhotoRepullJob,
   startCommunityPhotoRepullJob,
@@ -355,6 +356,17 @@ import {
 import { discoverCommunityStreetAddress } from "./community-address-discovery";
 import { labelPhoto, inferKindFromFolder, listPhotoFiles, probeInteriorCoverage, labelPhotoFromUrl } from "./photo-labeler";
 import { downloadAndPrioritize, relabelFolderPhotos } from "./photo-pipeline";
+import {
+  acquirePhotoFolderWriteLock,
+  commitPhotoFolderStage,
+  preparePhotoFolderStage,
+} from "./photo-folder-transaction";
+import { fetchRemoteImage } from "./remote-image-fetch";
+import {
+  authoritativeReplacementPhotoSource,
+  readFolderSourceUrl,
+} from "./same-unit-photo-hunt";
+import { sameUnitSourceUrlsMatch } from "@shared/same-unit-photo-hunt";
 import {
   harvestRealtyApiCommunityListings,
   isRealtyApiDiscoveryEnabled,
@@ -33862,47 +33874,81 @@ Return ONLY compact JSON with this exact shape:
     }
 
     const folderPath = path.join(process.cwd(), "client/public/photos", communityFolder);
-    await fs.promises.mkdir(folderPath, { recursive: true });
-
-    // Clear existing files in folder
-    const existing = await fs.promises.readdir(folderPath).catch(() => []);
-    for (const f of existing) {
-      if (/\.(jpg|jpeg|png|webp)$/i.test(f)) {
-        await fs.promises.unlink(path.join(folderPath, f)).catch(() => {});
-      }
-    }
-
     const saved: string[] = [];
     const failed: string[] = [];
-
-    for (let i = 0; i < imageUrls.length; i++) {
-      const url = imageUrls[i];
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const releaseFolderLock = await acquirePhotoFolderWriteLock(folderPath);
+    try {
+      const transactionToken = `${Date.now()}-${randomBytes(4).toString("hex")}`;
+      const stagingFolder = `.${communityFolder}.staging-${transactionToken}`;
+      const stagingPath = path.join(path.dirname(folderPath), stagingFolder);
+      const backupPath = path.join(
+        path.dirname(folderPath),
+        `.${communityFolder}.backup-${transactionToken}`,
+      );
+      const cleanupStage = async () => {
+        await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => {});
+        await storage.deletePhotoLabelsByFolder(stagingFolder).catch(() => {});
+      };
+      await preparePhotoFolderStage(folderPath, stagingPath);
       try {
-        const imgResp = await fetch(url, {
-          headers: { "User-Agent": "Mozilla/5.0 (compatible; VacationRentalBot/1.0)" },
-          signal: AbortSignal.timeout(10000),
+        const boundedUrls = imageUrls
+          .filter((url): url is string => typeof url === "string" && /^https?:\/\//i.test(url))
+          .slice(0, 60);
+        for (let i = 0; i < boundedUrls.length; i++) {
+          const url = boundedUrls[i];
+          const remote = await fetchRemoteImage(url, {
+            timeoutMs: 10_000,
+            minBytes: 5_000,
+          });
+          if (!remote) {
+            failed.push(url);
+            continue;
+          }
+          const contentType = remote.contentType ?? "";
+          const ext = contentType.includes("png")
+            ? "png"
+            : contentType.includes("webp")
+              ? "webp"
+              : "jpg";
+          const filename = `${String(i + 1).padStart(2, "0")}-community.${ext}`;
+          await fs.promises.writeFile(path.join(stagingPath, filename), remote.buffer);
+          saved.push(filename);
+        }
+        if (saved.length === 0) {
+          await cleanupStage();
+          return res.status(409).json({
+            error: "None of the selected community photos downloaded successfully. The existing gallery was kept.",
+            keptExisting: true,
+            failed,
+          });
+        }
+        await commitPhotoFolderStage(folderPath, stagingPath, backupPath, async () => {
+          await storage.mergeStagedPhotoLabelsIntoFolder(
+            stagingFolder,
+            communityFolder,
+            saved,
+          );
         });
-        if (!imgResp.ok) { failed.push(url); continue; }
-        const contentType = imgResp.headers.get("content-type") || "";
-        const ext = contentType.includes("png") ? "png" : contentType.includes("webp") ? "webp" : "jpg";
-        const filename = `${String(i + 1).padStart(2, "0")}-community.${ext}`;
-        const buffer = Buffer.from(await imgResp.arrayBuffer());
-        if (buffer.length < 5000) { failed.push(url); continue; } // skip tiny/broken images
-        await fs.promises.writeFile(path.join(folderPath, filename), buffer);
-        saved.push(filename);
-      } catch {
-        failed.push(url);
+      } catch (error) {
+        await cleanupStage();
+        throw error;
       }
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message ?? "Failed to save community photos",
+        keptExisting: true,
+      });
+    } finally {
+      releaseFolderLock();
     }
 
     // Auto-label the newly-saved photos with Claude Vision so the photo
     // tab renders accurate captions without the user having to manually
     // hit the relabel-all button after adding a community.
-    const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (anthropicKey && saved.length > 0) {
       // Fire-and-forget so the save response isn't blocked on 5-6 Claude calls.
       (async () => {
-        await storage.deletePhotoLabelsByFolder(communityFolder).catch(() => {});
         for (const filename of saved) {
           try {
             const result = await labelPhoto(
@@ -33935,22 +33981,25 @@ Return ONLY compact JSON with this exact shape:
   // _source.json so future rescrapes are one click, and kicks off Claude labeling.
   //
   // sourceUrl resolution order (caller can omit the URL after the first scrape):
-  //   1. body.sourceUrl (explicit override)
+  //   0. committed unit swap identity (validates every replacement-folder URL)
+  //   1. body.sourceUrl (explicit same-unit override)
   //   2. _source.json → sourceListing.url (stamped by a previous rescrape)
   //   3. unit_swaps.newSourceUrl (if this folder was swapped in via pre-flight)
   //   4. COMMUNITY_SOURCE_URLS[<communityName>] (for community-* folders)
   // If none are available, responds 409 with { needsUrl: true } so the UI
   // knows to prompt exactly once.
   app.post("/api/builder/rescrape-unit-photos", async (req, res) => {
-    const { folder, sourceUrl: suppliedUrl, limit } = req.body as {
+    const { folder, sourceUrl: suppliedUrl, photoProofToken: rawPhotoProofToken, limit } = req.body as {
       folder?: string;
       sourceUrl?: string;
+      photoProofToken?: string;
       limit?: number;
     };
     if (!folder || !/^[\w-]+$/.test(folder)) {
       return res.status(400).json({ error: "Invalid folder" });
     }
     const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+    const releaseFolderLock = await acquirePhotoFolderWriteLock(folderPath);
     try {
       const stat = await fs.promises.stat(folderPath).catch(() => null);
       if (!stat || !stat.isDirectory()) {
@@ -33966,6 +34015,28 @@ Return ONLY compact JSON with this exact shape:
         ? suppliedUrl : null;
       let urlSource: "supplied" | "_source.json" | "unit_swap" | "community_map" | null =
         sourceUrl ? "supplied" : null;
+      const authoritativeSwap = await authoritativeReplacementPhotoSource(folder);
+      const authoritativeSwapUrl = authoritativeSwap?.sourceUrl ?? null;
+      if (replacementPhotoFolderRef(folder) && !authoritativeSwapUrl) {
+        return res.status(409).json({
+          error: "This replacement folder's committed unit identity could not be verified. The existing gallery and source were kept; retry when the database is available.",
+          keptExisting: true,
+          identityUnavailable: true,
+        });
+      }
+      if (
+        sourceUrl
+        && authoritativeSwapUrl
+        && !sameUnitSourceUrlsMatch(authoritativeSwapUrl, sourceUrl, {
+          expectedUnitClaim: authoritativeSwap?.unitClaim,
+        })
+      ) {
+        return res.status(409).json({
+          error: "The requested photo source belongs to a different unit than this folder's committed replacement. The existing gallery and source were kept.",
+          keptExisting: true,
+          identityMismatch: true,
+        });
+      }
 
       const sourcePath = path.join(folderPath, "_source.json");
       let sourceDoc: any = {};
@@ -33976,11 +34047,29 @@ Return ONLY compact JSON with this exact shape:
       if (!sourceUrl) {
         const prev = sourceDoc?.sourceListing?.url;
         if (typeof prev === "string" && /^https?:\/\//i.test(prev)) {
-          sourceUrl = prev; urlSource = "_source.json";
+          if (
+            !authoritativeSwapUrl
+            || sameUnitSourceUrlsMatch(authoritativeSwapUrl, prev, {
+              expectedUnitClaim: authoritativeSwap?.unitClaim,
+            })
+          ) {
+            sourceUrl = prev;
+            urlSource = "_source.json";
+          } else {
+            console.warn(
+              `[rescrape] ${folder}: ignoring saved source that contradicts the committed replacement`,
+            );
+          }
         }
       }
 
       // unit_swaps lookup — if pre-flight replaced this unit, the URL is on file.
+      if (!sourceUrl) {
+        if (authoritativeSwapUrl) {
+          sourceUrl = authoritativeSwapUrl;
+          urlSource = "unit_swap";
+        }
+      }
       if (!sourceUrl) {
         try {
           const refs: Array<{ propertyId: number; unitId?: string }> =
@@ -34016,6 +34105,9 @@ Return ONLY compact JSON with this exact shape:
           error: "No source URL on file for this folder. Paste the listing URL and I'll save it for next time.",
         });
       }
+      const findPhasePhotoUrls = typeof rawPhotoProofToken === "string"
+        ? consumePhotoPersistProof(rawPhotoProofToken, sourceUrl)
+        : [];
 
       const listingFacts: ListingFacts = {};
       // Opt INTO the residential-IP sidecar (Load-Bearing #45): this endpoint is
@@ -34027,7 +34119,25 @@ Return ONLY compact JSON with this exact shape:
       // short and is inert/fast when the worker is offline. STRICTLY own-listing:
       // this scrapes the single resolved sourceUrl and never substitutes another
       // listing (the "Re-pull all photos" path already opts in the same way).
-      const scraped = await scrapeListingPhotos(sourceUrl, undefined, listingFacts, SCRAPE_WITH_SIDECAR);
+      let scraped = await scrapeListingPhotos(sourceUrl, undefined, listingFacts, SCRAPE_WITH_SIDECAR);
+      // The find phase already proved these exact CDN URLs. If the listing page
+      // bot-walls on the immediate persistence re-scrape, retain that verified
+      // set instead of turning a successful hunt into a zero-photo failure.
+      if (
+        scraped.length < MIN_INDEPENDENT_UNIT_PHOTOS
+        && findPhasePhotoUrls.length >= MIN_INDEPENDENT_UNIT_PHOTOS
+      ) {
+        const seen = new Set(scraped.map((photo) => photo.url.replace(/[?#].*$/, "")));
+        const fallbacks = findPhasePhotoUrls
+          .filter((url) => {
+            const key = url.replace(/[?#].*$/, "");
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .map((url) => ({ url, title: "", source: "", sourceLink: sourceUrl }));
+        scraped = [...scraped, ...fallbacks];
+      }
       if (!scraped.length) {
         return res.status(502).json({ error: "Scraper returned zero photos. The page may have bot-detection or changed layout." });
       }
@@ -34078,16 +34188,117 @@ Return ONLY compact JSON with this exact shape:
           }
         }
       }
-      const result = await downloadAndPrioritize({
-        folder,
-        folderPath,
-        scrapedUrls: scraped.map((s) => s.url),
-        maxKeep,
-        anthropicKey,
-        kind: inferKindFromFolder(folder),
-        requiredBedrooms: expectedBedrooms,
-        requiredBathrooms: expectedBathrooms,
-      });
+      const transactionToken = `${Date.now()}-${randomBytes(4).toString("hex")}`;
+      const stagingFolder = `.${folder}.staging-${transactionToken}`;
+      const stagingPath = path.join(path.dirname(folderPath), stagingFolder);
+      const backupPath = path.join(path.dirname(folderPath), `.${folder}.backup-${transactionToken}`);
+      const cleanupStage = async () => {
+        await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => {});
+        await storage.deletePhotoLabelsByFolder(stagingFolder).catch(() => {});
+      };
+      await preparePhotoFolderStage(folderPath, stagingPath);
+
+      let result: Awaited<ReturnType<typeof downloadAndPrioritize>>;
+      try {
+        result = await downloadAndPrioritize({
+          folder: stagingFolder,
+          folderPath: stagingPath,
+          scrapedUrls: scraped.map((s) => s.url),
+          maxKeep,
+          anthropicKey,
+          kind: inferKindFromFolder(folder),
+          requiredBedrooms: expectedBedrooms,
+          requiredBathrooms: expectedBathrooms,
+        });
+
+        const requiredSaved = folder.startsWith("community-")
+          ? 1
+          : MIN_INDEPENDENT_UNIT_PHOTOS;
+        if (result.kept < requiredSaved) {
+          await cleanupStage();
+          const currentFiles = await listPhotoFiles(folderPath).catch(() => [] as string[]);
+          return res.status(409).json({
+            error: `Only ${result.kept} photo${result.kept === 1 ? "" : "s"} downloaded successfully; at least ${requiredSaved} are required before replacing this gallery. The existing gallery and source were kept.`,
+            keptExisting: true,
+            scrapedCount: scraped.length,
+            downloaded: result.downloaded,
+            savedCount: result.kept,
+            currentCount: currentFiles.length,
+          });
+        }
+
+        // A label upsert failure used to be swallowed inside the pipeline,
+        // leaving new photo_NN files paired with stale metadata. When labeling
+        // is enabled, every kept photo must have staged metadata before commit.
+        if (anthropicKey) {
+          const stagedLabels = await storage.getPhotoLabelsByFolder(stagingFolder);
+          const stagedFilenames = new Set(stagedLabels.map((row) => row.filename));
+          const missingLabels = result.keptFilenames.filter((filename) => !stagedFilenames.has(filename));
+          if (missingLabels.length > 0) {
+            await cleanupStage();
+            return res.status(409).json({
+              error: "The new photos downloaded, but their labels could not be saved. The existing gallery and source were kept.",
+              keptExisting: true,
+              savedCount: result.kept,
+              missingLabels,
+            });
+          }
+        }
+
+        // Stamp only the disposable stage. The live source remains untouched
+        // until the photos and their metadata have both cleared every guard.
+        const persistedProof = buildUnitPhotoResolverProof({
+          photos: result.keptSourceUrls.map((photoUrl) => ({ url: photoUrl })),
+          sourceUrl,
+          foundVia: "rescrape",
+          requestedBedrooms: expectedBedrooms ?? null,
+          facts: listingFacts,
+          contentFingerprints: result.keptContentFingerprints,
+        });
+        if (persistedProof.status === "rejected") {
+          await cleanupStage();
+          return res.status(409).json({
+            error: summarizeUnitPhotoProof("Re-pulled gallery", persistedProof),
+            keptExisting: true,
+            savedCount: result.kept,
+          });
+        }
+        sourceDoc.sourceListing = {
+          url: sourceUrl,
+          platform: /zillow\.com/i.test(sourceUrl) ? "zillow" : /homes\.com/i.test(sourceUrl) ? "homes.com" : /vrbo\.com/i.test(sourceUrl) ? "vrbo" : /airbnb\.com/i.test(sourceUrl) ? "airbnb" : "other",
+          scrapedDate: new Date().toISOString().slice(0, 10),
+        };
+        sourceDoc.unitPhotoResolverProof = {
+          ...persistedProof,
+          savedPhotoCount: result.kept,
+          savedPhotos: result.keptFilenames.map((filename, index) => ({
+            filename,
+            sourceUrl: result.keptSourceUrls[index] ?? null,
+            contentFingerprint: result.keptContentFingerprints[index] ?? null,
+          })),
+        };
+        // A full-community receipt proves the previous bytes/source only.
+        // Re-pulled galleries must be reviewed again.
+        delete sourceDoc.stagedCommunityAudit;
+        sourceDoc.verificationStatus = "needs-review";
+        sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
+        sourceDoc.verifiedBy = "rescrape";
+        await fs.promises.writeFile(
+          path.join(stagingPath, "_source.json"),
+          JSON.stringify(sourceDoc, null, 2),
+        );
+
+        await commitPhotoFolderStage(folderPath, stagingPath, backupPath, async () => {
+          await storage.mergeStagedPhotoLabelsIntoFolder(
+            stagingFolder,
+            folder,
+            result.keptFilenames,
+          );
+        });
+      } catch (error) {
+        await cleanupStage();
+        throw error;
+      }
 
       // The UI-facing bed/bath counts. Prefer the listing's own declared
       // numbers over photo-derived inference — Zillow knows what the unit
@@ -34096,17 +34307,6 @@ Return ONLY compact JSON with this exact shape:
       // we don't over-suppress the detected rooms.
       const displayBedroomCount = Math.max(result.bedroomCount, listingFacts.bedrooms ?? 0);
       const displayBathroomCount = Math.max(result.bathroomCount, listingFacts.bathrooms ?? 0);
-
-      // Stamp the URL back into _source.json so the next rescrape is one click.
-      sourceDoc.sourceListing = {
-        url: sourceUrl,
-        platform: /zillow\.com/i.test(sourceUrl) ? "zillow" : /homes\.com/i.test(sourceUrl) ? "homes.com" : /vrbo\.com/i.test(sourceUrl) ? "vrbo" : /airbnb\.com/i.test(sourceUrl) ? "airbnb" : "other",
-        scrapedDate: new Date().toISOString().slice(0, 10),
-      };
-      sourceDoc.verificationStatus = "needs-review";
-      sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
-      sourceDoc.verifiedBy = "rescrape";
-      await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
 
       res.json({
         folder,
@@ -34130,6 +34330,8 @@ Return ONLY compact JSON with this exact shape:
     } catch (err: any) {
       console.error(`[rescrape] ${folder}: ${err?.message ?? err}`);
       res.status(500).json({ error: err?.message ?? "rescrape failed" });
+    } finally {
+      releaseFolderLock();
     }
   });
 
@@ -34259,12 +34461,34 @@ Return ONLY compact JSON with this exact shape:
     const folder = req.params.folder;
     if (!folder || !/^[\w-]+$/.test(folder)) return res.status(400).json({ error: "invalid folder" });
     const sourcePath = path.join(process.cwd(), "client/public/photos", folder, "_source.json");
+    let doc: any = null;
     try {
-      const doc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8"));
-      res.json({ folder, source: doc });
-    } catch {
-      res.json({ folder, source: null });
+      doc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8"));
+    } catch {}
+    const resolvedUrl = await readFolderSourceUrl(folder);
+    if (replacementPhotoFolderRef(folder) && !resolvedUrl) {
+      return res.status(409).json({
+        folder,
+        source: null,
+        identityUnavailable: true,
+        error: "The committed replacement identity could not be verified.",
+      });
     }
+    const savedUrl = typeof doc?.sourceListing?.url === "string" ? doc.sourceListing.url : null;
+    const sourceRecovered = !!(
+      resolvedUrl
+      && (!savedUrl || !sameUnitSourceUrlsMatch(resolvedUrl, savedUrl))
+    );
+    if (resolvedUrl) {
+      doc = {
+        ...(doc ?? {}),
+        sourceListing: {
+          ...(doc?.sourceListing ?? {}),
+          url: resolvedUrl,
+        },
+      };
+    }
+    res.json({ folder, source: doc, sourceRecovered });
   });
 
   app.post("/api/photos/rotate", async (req, res) => {
@@ -34280,9 +34504,11 @@ Return ONLY compact JSON with this exact shape:
     if (![90, 180, 270].includes(degrees)) {
       return res.status(400).json({ error: "degrees must be 90, 180, or 270" });
     }
-    const filePath = path.join(process.cwd(), "client/public/photos", folder, filename);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: "photo not found" });
+    const folderPath = path.join(process.cwd(), "client/public/photos", folder);
+    const filePath = path.join(folderPath, filename);
+    const releaseFolderLock = await acquirePhotoFolderWriteLock(folderPath);
     try {
+      if (!fs.existsSync(filePath)) return res.status(404).json({ error: "photo not found" });
       const input = await fs.promises.readFile(filePath);
       const oriented = await sharp(input, { failOn: "none" }).rotate().toBuffer();
       let pipeline = sharp(oriented, { failOn: "none" }).rotate(degrees);
@@ -34299,6 +34525,8 @@ Return ONLY compact JSON with this exact shape:
       res.json({ ok: true, folder, filename, degrees });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    } finally {
+      releaseFolderLock();
     }
   });
 
@@ -36318,12 +36546,6 @@ Return ONLY compact JSON with this exact shape:
   }): Promise<SameCommunityReplacementExclusions> => {
     const safeFolder = String(args.communityFolder ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
     const communityName = String(args.communityName ?? "").trim();
-    const propertyId = Number(args.propertyId);
-    const targetUnitId = String(args.targetUnitId ?? "").trim();
-    const currentPropertyId = Number.isFinite(propertyId) && propertyId !== 0 ? propertyId : null;
-    const currentDraftId = currentPropertyId != null && currentPropertyId < 0
-      ? Math.abs(currentPropertyId)
-      : null;
     const out: SameCommunityReplacementExclusions = { urlKeys: new Set(), unitClaims: new Set(), sources: [] };
 
     const addUrl = (url: unknown, source: ReplacementExclusionSource, label: string) => {
@@ -36352,7 +36574,6 @@ Return ONLY compact JSON with this exact shape:
 
     try {
       for (const draft of await storage.getCommunityDrafts()) {
-        if (currentDraftId === draft.id) continue;
         if (!sameCommunity(null, draft.name)) continue;
         const label = `draft #${draft.id} ${draft.name}`;
         addUrl(draft.unit1Url, "draft", `${label} Unit A`);
@@ -36365,13 +36586,9 @@ Return ONLY compact JSON with this exact shape:
     }
 
     try {
-      const latestBySlot = new Map<string, Awaited<ReturnType<typeof storage.getAllUnitSwaps>>[number]>();
       for (const swap of await storage.getAllUnitSwaps()) {
-        const slotKey = `${swap.propertyId}:${swap.oldUnitId}`;
-        if (!latestBySlot.has(slotKey)) latestBySlot.set(slotKey, swap);
-      }
-      for (const swap of latestBySlot.values()) {
-        if (currentPropertyId === swap.propertyId && targetUnitId && swap.oldUnitId === targetUnitId) continue;
+        // Exclude every historical, pending, and committed identity. A newer
+        // pending row must not mask the older committed unit that is still live.
         if (!sameCommunity(swap.communityFolder, null, swap.propertyId)) continue;
         const label = `property ${swap.propertyId} ${swap.oldUnitId}`;
         addUrl(swap.newSourceUrl, "unit-swap", label);
@@ -36383,7 +36600,6 @@ Return ONLY compact JSON with this exact shape:
 
     for (const [pidRaw, config] of Object.entries(PROPERTY_UNIT_CONFIGS)) {
       const pid = Number(pidRaw);
-      if (currentPropertyId === pid) continue;
       if (!sameCommunity(null, config.community, pid)) continue;
       for (const unit of config.units) {
         addClaims(unit.unitLabel || unit.unitId, null, null, "static-listing", `property ${pid} ${unit.unitId}`);
@@ -36391,7 +36607,6 @@ Return ONLY compact JSON with this exact shape:
     }
 
     for (const builder of unitBuilderData) {
-      if (currentPropertyId === builder.propertyId) continue;
       if (!sameCommunity(builder.communityPhotoFolder, builder.complexName, builder.propertyId)) continue;
       for (const unit of builder.units) {
         addClaims(unit.unitNumber, null, null, "static-listing", `property ${builder.propertyId} ${unit.id}`);
@@ -38179,23 +38394,18 @@ Return ONLY compact JSON with this exact shape:
       return true;
     };
 
-    // A0: collect up to MAX_VIABLE_UNITS clean units in ONE pass instead of
-    // returning the first. The expensive discovery sweep is already paid for, so
-    // each additional viable unit only costs its own scrape+vision+reverse checks
-    // — far cheaper than a fresh "Try another" that re-discovers — and the
-    // operator gets a LIST to choose from. The existing per-candidate route-budget
-    // guards (hasRouteBudget) already break the loop and return whatever we have
-    // before this can overrun the route, so a slow community still returns
-    // promptly with however many it found. `unit` stays element 0 for any caller
-    // that ignores `units`. Env-tunable; minimum 1 = original single-result behavior.
-    const MAX_VIABLE_UNITS = Math.max(
-      1,
-      Number.isFinite(Number(process.env.REPLACEMENT_MAX_VIABLE_UNITS))
-        ? Number(process.env.REPLACEMENT_MAX_VIABLE_UNITS)
-        : collectAllOptions
-          ? 8
-          : (expandedSearch ? 5 : 4),
-    );
+    // Exhaustive callers collect several clean units in one pass. Interactive
+    // callers stop at the first fully verified result so the dialog does not
+    // keep spending minutes after it already has a usable answer. Existing
+    // route-budget guards still bound either mode; `unit` remains element 0.
+    const MAX_VIABLE_UNITS = collectAllOptions
+      ? Math.max(
+          1,
+          Number.isFinite(Number(process.env.REPLACEMENT_MAX_VIABLE_UNITS))
+            ? Number(process.env.REPLACEMENT_MAX_VIABLE_UNITS)
+            : 8,
+        )
+      : 1;
     const foundUnits: Array<Record<string, unknown>> = [];
 
     let budgetStopped = false;
@@ -38530,6 +38740,30 @@ Return ONLY compact JSON with this exact shape:
               sourceUrl, source, address, unit: unitNumber || "?",
               verdict: "skipped-photo-found",
               reason: `Two or more private/unit photos matched ${photoFoundOn.host}.`,
+              platformCheck,
+            });
+            continue;
+          }
+
+          // Equivalent-source and sidecar rescue can rewrite the listing URL,
+          // address, and unit after the inexpensive first identity guard. Check
+          // the final identity again before it can enter the options list.
+          const finalBlockedUnitClaim = findReplacementBlockedUnitClaim(
+            unitNumber,
+            address,
+            sameCommunityExclusions,
+          );
+          if (finalBlockedUnitClaim) {
+            console.error(
+              `[find-unit] [${source}] final source ${sourceUrl} unit ${finalBlockedUnitClaim} is already used by ${communityName} — skipping`,
+            );
+            attempts.push({
+              sourceUrl,
+              source,
+              address,
+              unit: unitNumber || "?",
+              verdict: "skipped-internal-duplicate",
+              reason: `Unit ${finalBlockedUnitClaim} is already used by an existing ${communityName} listing.`,
               platformCheck,
             });
             continue;
@@ -39003,26 +39237,30 @@ Return ONLY compact JSON with this exact shape:
     const url = swap.newSourceUrl;
     const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
     if (!/^https?:\/\//i.test(url)) return { ok: false, folder, savedCount: 0, error: "Replacement source URL is invalid" };
-    const existingSavedCount = await unitSwapPhotoFolderSavedCount(folder, url);
-    // Strict automatic replacement always rebuilds a disposable stage and
-    // re-runs the live community audit. A prior receipt is provenance, not a
-    // permanent pass: the folder may have changed since it was written.
-    if (existingSavedCount !== null && opts.requireFullCommunityAudit !== true) {
-      return { ok: true, folder, savedCount: existingSavedCount };
-    }
-
     const photosBase = path.join(process.cwd(), "client/public/photos");
     const folderPath = path.join(photosBase, folder);
-    const stagingFolder = `.${folder}.staging-${Date.now()}-${randomBytes(4).toString("hex")}`;
-    const stagingPath = path.join(photosBase, stagingFolder);
-    const cleanupStaging = async () => {
-      await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => {});
-      await storage.deletePhotoLabelsByFolder(stagingFolder).catch(() => {});
-    };
+    const releaseFolderLock = await acquirePhotoFolderWriteLock(folderPath);
     try {
-      const listingFacts: ListingFacts = {};
-      const scrapeOpts = opts.useSidecar === true ? SCRAPE_WITH_SIDECAR : SCRAPE_WITHOUT_SIDECAR;
-      let scraped = await scrapeListingPhotos(url, undefined, listingFacts, scrapeOpts);
+      const existingSavedCount = await unitSwapPhotoFolderSavedCount(folder, url);
+      // Strict automatic replacement always rebuilds a disposable stage and
+      // re-runs the live community audit. A prior receipt is provenance, not a
+      // permanent pass: the folder may have changed since it was written.
+      if (existingSavedCount !== null && opts.requireFullCommunityAudit !== true) {
+        return { ok: true, folder, savedCount: existingSavedCount };
+      }
+
+      const transactionToken = `${Date.now()}-${randomBytes(4).toString("hex")}`;
+      const stagingFolder = `.${folder}.staging-${transactionToken}`;
+      const stagingPath = path.join(photosBase, stagingFolder);
+      const backupPath = path.join(photosBase, `.${folder}.backup-${transactionToken}`);
+      const cleanupStaging = async () => {
+        await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => {});
+        await storage.deletePhotoLabelsByFolder(stagingFolder).catch(() => {});
+      };
+      try {
+        const listingFacts: ListingFacts = {};
+        const scrapeOpts = opts.useSidecar === true ? SCRAPE_WITH_SIDECAR : SCRAPE_WITHOUT_SIDECAR;
+        let scraped = await scrapeListingPhotos(url, undefined, listingFacts, scrapeOpts);
       // FIND-PHASE PHOTO PASS-THROUGH (2026-07-06): the commit re-scrape can
       // fail even when the FIND phase scraped the same gallery minutes
       // earlier — the Mauna Lani commit hit Apify 403 + ScrapingBee monthly
@@ -39201,8 +39439,6 @@ Return ONLY compact JSON with this exact shape:
         await fs.promises.writeFile(sourcePath, JSON.stringify(sourceDoc, null, 2));
       }
 
-      await fs.promises.rm(folderPath, { recursive: true, force: true });
-      await fs.promises.rename(stagingPath, folderPath);
       // The pipeline labeled/hashed/bedroom-clustered the NEW photos under the
       // STAGING folder name, and the destination may still hold rows from a
       // PREVIOUS replacement gallery whose photo_NN.jpg names collide with the
@@ -39212,8 +39448,8 @@ Return ONLY compact JSON with this exact shape:
       // the 2026-07-12 Ilikai receipt read "0/2 bedrooms" + 13 phantom
       // cross-folder dupes off June labels after a July re-swap. Re-key the
       // staging rows into place, replacing the destination's rows wholesale.
-      await storage.movePhotoLabelsToFolder(stagingFolder, folder).catch((error) => {
-        console.warn(`[unit-swap rescrape] ${folder}: label move failed ${error?.message ?? error}`);
+      await commitPhotoFolderStage(folderPath, stagingPath, backupPath, async () => {
+        await storage.movePhotoLabelsToFolder(stagingFolder, folder);
       });
       await queueMissingPhotoLabels(folder, "unit-swap").catch((error) => {
         console.warn(`[unit-swap rescrape] ${folder}: label queue failed ${error?.message ?? error}`);
@@ -39231,10 +39467,13 @@ Return ONLY compact JSON with this exact shape:
         bedroomsFound: result.bedroomCount,
         coverage: result.coverage,
       };
-    } catch (e: any) {
-      await cleanupStaging();
-      console.error(`[unit-swap rescrape] ${folder} failed: ${e?.message ?? e}`);
-      return { ok: false, folder, savedCount: 0, error: e?.message ?? "Replacement photo scrape failed" };
+      } catch (e: any) {
+        await cleanupStaging();
+        console.error(`[unit-swap rescrape] ${folder} failed: ${e?.message ?? e}`);
+        return { ok: false, folder, savedCount: 0, error: e?.message ?? "Replacement photo scrape failed" };
+      }
+    } finally {
+      releaseFolderLock();
     }
   };
 
@@ -49145,21 +49384,19 @@ Return ONLY compact JSON with this exact shape:
       idx: number,
     ): Promise<{ url: string; filename: string; contentFingerprint: string } | null> => {
       try {
-        const resp = await fetch(url, { headers: { "User-Agent": "NexStay/1.0" } });
-        if (!resp.ok) return null;
-        const buf = Buffer.from(await resp.arrayBuffer());
-        if (buf.length === 0) return null;
+        const remote = await fetchRemoteImage(url, { timeoutMs: 15_000, minBytes: 1 });
+        if (!remote) return null;
         // Photos.zillowstatic.com URLs end in .jpg/.jpeg/.png/.webp;
         // honor the original extension for content-type accuracy
         // when Express serves the file. Defaults to .jpg when the
         // URL has nothing parseable.
         const ext = (url.match(/\.(jpe?g|png|webp)\b/i)?.[1] ?? "jpg").toLowerCase().replace("jpeg", "jpg");
         const filename = `${String(idx).padStart(2, "0")}.${ext}`;
-        await fs.promises.writeFile(path.join(folderPath, filename), buf);
+        await fs.promises.writeFile(path.join(folderPath, filename), remote.buffer);
         return {
           url,
           filename,
-          contentFingerprint: `sha256:${createHash("sha256").update(buf).digest("hex")}`,
+          contentFingerprint: `sha256:${createHash("sha256").update(remote.buffer).digest("hex")}`,
         };
       } catch (e: any) {
         console.warn(`[draft-photos] download failed for ${url}: ${e.message}`);
@@ -51107,30 +51344,93 @@ Return ONLY compact JSON with this exact shape:
         emit({ type: "error", phase: "scrape", message: "Scraper returned 0 photos." });
         return res.end();
       }
-      const swapResult = await downloadAndPrioritize({
-        folder,
-        folderPath,
-        scrapedUrls: scraped.map((s) => s.url),
-        maxKeep: unitGalleryMaxKeep(scraped.length),
-        anthropicKey: process.env.ANTHROPIC_API_KEY,
-        kind: inferKindFromFolder(folder),
-        requiredBedrooms: listingFacts.bedrooms ?? candidate.bedrooms ?? lead.bedrooms,
-        requiredBathrooms: listingFacts.bathrooms ?? undefined,
-      });
+      const releaseFolderLock = await acquirePhotoFolderWriteLock(folderPath);
+      let swapResult: Awaited<ReturnType<typeof downloadAndPrioritize>>;
       try {
-        const sourcePath = path.join(folderPath, "_source.json");
-        let doc: any = {};
-        try { doc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8")); } catch {}
-        doc.sourceListing = {
-          url: candidate.url,
-          platform: /zillow/i.test(candidate.url) ? "zillow" : "other",
-          scrapedDate: new Date().toISOString().slice(0, 10),
+        const transactionToken = `${Date.now()}-${randomBytes(4).toString("hex")}`;
+        const stagingFolder = `.${folder}.staging-${transactionToken}`;
+        const stagingPath = path.join(path.dirname(folderPath), stagingFolder);
+        const backupPath = path.join(path.dirname(folderPath), `.${folder}.backup-${transactionToken}`);
+        const cleanupStage = async () => {
+          await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => {});
+          await storage.deletePhotoLabelsByFolder(stagingFolder).catch(() => {});
         };
-        doc.verificationStatus = "needs-review";
-        doc.verifiedDate = new Date().toISOString().slice(0, 10);
-        doc.verifiedBy = "alert-remediate";
-        await fs.promises.writeFile(sourcePath, JSON.stringify(doc, null, 2));
-      } catch { /* non-fatal */ }
+        await preparePhotoFolderStage(folderPath, stagingPath);
+        try {
+          swapResult = await downloadAndPrioritize({
+            folder: stagingFolder,
+            folderPath: stagingPath,
+            scrapedUrls: scraped.map((s) => s.url),
+            maxKeep: unitGalleryMaxKeep(scraped.length),
+            anthropicKey: process.env.ANTHROPIC_API_KEY,
+            kind: inferKindFromFolder(folder),
+            requiredBedrooms: listingFacts.bedrooms ?? candidate.bedrooms ?? lead.bedrooms,
+            requiredBathrooms: listingFacts.bathrooms ?? undefined,
+          });
+          if (swapResult.kept < MIN_INDEPENDENT_UNIT_PHOTOS) {
+            await cleanupStage();
+            emit({
+              type: "error",
+              phase: "scrape",
+              message: `Only ${swapResult.kept} photo${swapResult.kept === 1 ? "" : "s"} downloaded; the existing gallery was kept.`,
+            });
+            return res.end();
+          }
+
+          const persistedProof = buildUnitPhotoResolverProof({
+            photos: swapResult.keptSourceUrls.map((photoUrl) => ({ url: photoUrl })),
+            sourceUrl: candidate.url,
+            foundVia: "alert-remediate",
+            requestedBedrooms: listingFacts.bedrooms ?? candidate.bedrooms ?? lead.bedrooms,
+            facts: listingFacts,
+            contentFingerprints: swapResult.keptContentFingerprints,
+          });
+          if (persistedProof.status === "rejected") {
+            await cleanupStage();
+            emit({
+              type: "error",
+              phase: "scrape",
+              message: summarizeUnitPhotoProof("Replacement gallery", persistedProof),
+            });
+            return res.end();
+          }
+          const sourcePath = path.join(stagingPath, "_source.json");
+          let doc: any = {};
+          try { doc = JSON.parse(await fs.promises.readFile(sourcePath, "utf8")); } catch {}
+          doc.sourceListing = {
+            url: candidate.url,
+            platform: /zillow/i.test(candidate.url) ? "zillow" : "other",
+            scrapedDate: new Date().toISOString().slice(0, 10),
+          };
+          doc.unitPhotoResolverProof = {
+            ...persistedProof,
+            savedPhotoCount: swapResult.kept,
+            savedPhotos: swapResult.keptFilenames.map((filename, index) => ({
+              filename,
+              sourceUrl: swapResult.keptSourceUrls[index] ?? null,
+              contentFingerprint: swapResult.keptContentFingerprints[index] ?? null,
+            })),
+          };
+          delete doc.stagedCommunityAudit;
+          doc.verificationStatus = "needs-review";
+          doc.verifiedDate = new Date().toISOString().slice(0, 10);
+          doc.verifiedBy = "alert-remediate";
+          await fs.promises.writeFile(sourcePath, JSON.stringify(doc, null, 2));
+
+          await commitPhotoFolderStage(folderPath, stagingPath, backupPath, async () => {
+            await storage.mergeStagedPhotoLabelsIntoFolder(
+              stagingFolder,
+              folder,
+              swapResult.keptFilenames,
+            );
+          });
+        } catch (error) {
+          await cleanupStage();
+          throw error;
+        }
+      } finally {
+        releaseFolderLock();
+      }
       emit({ type: "swap", folder, kept: swapResult.kept, downloaded: swapResult.downloaded });
 
       // 4. Assemble photos[] from disk + push to each affected Guesty listing.

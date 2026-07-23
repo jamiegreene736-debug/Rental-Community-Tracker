@@ -812,14 +812,17 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_AUTO_REPLACE_RESUMES >=
   // checked with the same full engine before the destructive destination
   // replacement; only a typed positive contradiction burns the URL.
   const gateCall = routes.indexOf("verifyStagedUnitSwapCommunity(");
-  const destructiveRename = routes.indexOf("await fs.promises.rm(folderPath", gateCall);
+  const atomicPromotion = routes.indexOf(
+    "commitPhotoFolderStage(folderPath, stagingPath, backupPath",
+    gateCall,
+  );
   check("staged full-community gate is persisted and opt-in (standalone/manual auto-replace stays backwards-compatible)",
     /requireFullCommunityAudit: record\.requireFullCommunityAudit === true/.test(orch)
     && /requireFullCommunityAudit: input\.requireFullCommunityAudit === true/.test(orch));
   check("strict automatic replacement never reuses a stale prior hydration receipt as a pass",
     /existingSavedCount !== null && opts\.requireFullCommunityAudit !== true/.test(routes));
-  check("staged full-community audit runs before destination rm/rename",
-    gateCall >= 0 && destructiveRename > gateCall &&
+  check("staged full-community audit runs before atomic destination promotion",
+    gateCall >= 0 && atomicPromotion > gateCall &&
     routes.includes("const verifyStagedUnitSwapCommunity = async") &&
     routes.includes("const result = await runPhotoCommunityCheck("));
   check("staged gate retries inconclusive evidence a bounded number of times",

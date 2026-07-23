@@ -526,12 +526,11 @@ export function UnitReplacementFlow({
       skipUrls: [...skipUrls, ...nextExtra],
       expandedSearch: expanded,
       allowOtaListed: useAllowOtaListed,
-      // Exhaustive search (operator ask 2026-07-04): the background job keeps
-      // draining the community's whole candidate pool across passes instead of
-      // stopping at the first viable unit, so the options list shows every
-      // clean unit it could find (bounded by REPLACEMENT_EXHAUSTIVE_TARGET,
-      // default 12, and the existing pass/budget caps).
-      collectAllOptions: true,
+      // Interactive searches should return the first fully verified unit. The
+      // server still supports exhaustive mode for batch callers, but making the
+      // operator wait for 12 options kept this dialog at 94% long after a safe
+      // result had already been found.
+      collectAllOptions: false,
     };
     lastSearchPayloadRef.current = startPayload;
     try {

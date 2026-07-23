@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   canonicalKeysForExclusion,
+  chooseSameUnitHuntAnchor,
   evaluateGalleryNovelty,
   filterSameUnitSerpRows,
   hawaiiInlineUnitClaim,
@@ -12,6 +13,7 @@ import {
   sameUnitHuntIdentity,
   sameUnitHuntQueries,
   sameUnitHuntSearchComplete,
+  sameUnitSourceUrlsMatch,
   summarizeSameUnitHuntFailure,
   SAME_UNIT_HUNT_MAX_CANDIDATES_DEFAULT,
   SAME_UNIT_HUNT_MIN_NEW_PHOTOS_DEFAULT,
@@ -46,6 +48,108 @@ assert.equal(
   sameUnitHuntIdentity({ sourceUrl: "https://www.zillow.com/homedetails/Building-A-APT-201-Koloa/1_zpid/" }),
   null,
   "unit-claim-only anchors are rejected — no street root, no hunt",
+);
+
+// Cross-portal sources must preserve BOTH the street and unit identity. This
+// is the production Unit 920 guard: a stale Unit 720 source at the same
+// building may never become the anchor or be persisted into Unit 920's folder.
+const poipu920 = "https://www.zillow.com/homedetails/1831-Poipu-Rd-APT-920-Koloa-HI-96756/80157293_zpid/";
+assert.equal(
+  sameUnitSourceUrlsMatch(
+    poipu920,
+    "https://www.homes.com/property/1831-poipu-rd-koloa-hi-unit-920/example/",
+  ),
+  true,
+  "the exact same unit on another portal is allowed",
+);
+assert.equal(
+  sameUnitSourceUrlsMatch(
+    poipu920,
+    "https://www.homes.com/property/1831-poipu-rd-koloa-hi-unit-720/gy46glh43cckm/",
+  ),
+  false,
+  "a neighbor at the same street is rejected",
+);
+assert.equal(
+  sameUnitSourceUrlsMatch(
+    poipu920,
+    "https://www.redfin.com/HI/Koloa/1831-Poipu-Rd-96756/home/123",
+  ),
+  false,
+  "a unit-less same-building page cannot prove the requested condo",
+);
+assert.equal(
+  sameUnitSourceUrlsMatch(
+    poipu920,
+    "https://www.redfin.com/HI/Koloa/1775-Poipu-Rd-96756/unit-920/home/123",
+  ),
+  false,
+  "the same unit number at another street is rejected",
+);
+assert.equal(
+  sameUnitSourceUrlsMatch(
+    "https://www.zillow.com/homedetails/4460-Nehe-Rd-Lihue-HI-96766/555_zpid/",
+    "https://www.redfin.com/HI/Lihue/4460-Nehe-Rd-96766/home/777",
+    { allowUnitlessStreetMatch: true },
+  ),
+  true,
+  "positively identified unique-address homes can match cross-portal on exact street root",
+);
+assert.equal(
+  sameUnitSourceUrlsMatch(
+    "https://www.zillow.com/homedetails/1831-Poipu-Rd-Koloa-HI-96756/80157293_zpid/",
+    "https://www.redfin.com/HI/Koloa/1831-Poipu-Rd-96756/home/123",
+  ),
+  false,
+  "unit-less same-street URLs fail closed without positive unique-home evidence",
+);
+assert.equal(
+  sameUnitSourceUrlsMatch(
+    "https://www.zillow.com/homedetails/1831-Poipu-Rd-Koloa-HI-96756/80157293_zpid/",
+    "https://www.homes.com/property/1831-poipu-rd-koloa-hi-unit-720/example/",
+    { expectedUnitClaim: "Unit 920" },
+  ),
+  false,
+  "a committed unit claim rejects a different unit even when the authority URL is opaque",
+);
+assert.equal(
+  sameUnitSourceUrlsMatch(
+    "https://www.zillow.com/homedetails/4460-Nehe-Rd-Lihue-HI-96766/555_zpid/",
+    "https://www.redfin.com/HI/Lihue/4460-Nehe-Rd-96766/unit-5/home/777",
+  ),
+  false,
+  "a unique-address home does not match a subunit at that address",
+);
+assert.equal(
+  sameUnitSourceUrlsMatch(`${poipu920}?utm_source=test`, `${poipu920}?utm_source=other`),
+  true,
+  "tracking parameters do not split the same canonical listing",
+);
+assert.equal(
+  sameUnitSourceUrlsMatch(poipu920, "https://example.com/listing/opaque"),
+  false,
+  "an unparseable different URL fails closed",
+);
+
+assert.equal(
+  chooseSameUnitHuntAnchor({
+    replacementFolder: true,
+    authorityAvailable: false,
+    folderUrl: null,
+    clientUrl: "https://www.homes.com/property/1831-poipu-rd-koloa-hi-unit-720/stale/",
+  }),
+  null,
+  "a replacement folder never falls back to a stale client anchor when committed authority is unavailable",
+);
+assert.equal(
+  chooseSameUnitHuntAnchor({
+    replacementFolder: false,
+    authorityAvailable: false,
+    folderUrl: null,
+    clientUrl: poipu920,
+  }),
+  poipu920,
+  "ordinary folders retain the client fallback",
 );
 
 // Hawaii Hwy addresses parse (the 57-091 Kamehameha Hwy class): a neighboring
@@ -349,7 +453,7 @@ assert.ok(
   "exhaustion must be PROVEN (complete sweep + every candidate substantively judged) before recommending replacement",
 );
 assert.ok(
-  huntSource.includes("readFolderSourceUrl(folder)"),
+  huntSource.includes("readFolderSourceUrl(folder, {"),
   "the hunt must fall back to the folder's _source.json anchor when the client-sent source URL is missing (transport blips must not become false no-anchor verdicts)",
 );
 
@@ -386,6 +490,21 @@ const routesSource = read("server/routes.ts");
 assert.ok(
   routesSource.includes("sameUnitOnly: body.sameUnitOnly === true"),
   "the photo-fetch-jobs route must forward sameUnitOnly to the job",
+);
+assert.ok(
+  huntSource.includes("replacementPhotoFolderRef(folder)")
+    && huntSource.includes("authoritativeReplacementPhotoSource(folder)")
+    && huntSource.includes("replacementAuthority: folderAuthority")
+    && huntSource.includes("chooseSameUnitHuntAnchor({")
+    && huntSource.includes('failure("no-anchor", [], false'),
+  "replacement-folder hunts must reconcile even a nonempty client anchor against the committed swap",
+);
+assert.ok(
+  routesSource.includes("authoritativeReplacementPhotoSource(folder)")
+    && routesSource.includes("!sameUnitSourceUrlsMatch(authoritativeSwapUrl, sourceUrl, {")
+    && routesSource.includes("expectedUnitClaim: authoritativeSwap?.unitClaim")
+    && routesSource.includes("identityMismatch: true"),
+  "rescrape must reject an explicit source that contradicts the committed replacement identity",
 );
 
 console.log("same-unit-photo-hunt tests passed");
