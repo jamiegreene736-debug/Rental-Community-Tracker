@@ -79,6 +79,22 @@ check(
   "outcome normalizes pushedAt to ISO",
   freshPushOutcome(null, { pushedAt: after(1_000), status: "success", summary: "s" })?.pushedAt === after(1_000),
 );
+check(
+  "matching operation ID resolves the intended long-running photo push",
+  freshPushOutcome(
+    T0_MS,
+    { pushedAt: after(60_000), status: "success", summary: "31 photos pushed", operationId: "photo-operation-a" },
+    "photo-operation-a",
+  )?.status === "success",
+);
+check(
+  "a newer ledger entry from another photo push never resolves this operation",
+  freshPushOutcome(
+    T0_MS,
+    { pushedAt: after(60_000), status: "success", summary: "36 photos pushed", operationId: "photo-operation-b" },
+    "photo-operation-a",
+  ) === null,
+);
 
 console.log("push-reconcile: constants + copy");
 check("poll interval is slow (>= 3s) — the ledger GET must not be hammered", PUSH_RECONCILE_POLL_MS >= 3_000);
@@ -216,11 +232,17 @@ check(
 );
 check(
   "photo push captures a ledger baseline BEFORE the POST",
-  /const baselineMs = pushEntryTimeMs\(await readPhotosPushLedgerEntry\(selectedId\)\)/.test(builderSrc),
+  /const baselineMs = pushEntryTimeMs\(await readPhotosPushLedgerEntry\(listingId\)\)/.test(builderSrc),
 );
 check(
   "a lost stream resolves from the ledger via freshPushOutcome",
-  /freshPushOutcome\(baselineMs, await readPhotosPushLedgerEntry\(selectedId\)\)/.test(builderSrc),
+  /freshPushOutcome\(\s*baselineMs,\s*await readPhotosPushLedgerEntry\(listingId\),\s*operationId,\s*\)/.test(builderSrc),
+);
+check(
+  "photo push sends and reconciles one correlation ID",
+  builderSrc.includes("const operationId = createPhotoPushOperationId()")
+  && builderSrc.includes("upscale: withUpscale,")
+  && builderSrc.includes("operationId,"),
 );
 check(
   "reconcile deadline scales with the photos the server still had in flight",
@@ -228,7 +250,8 @@ check(
 );
 check(
   "user cancel (AbortError) returns cancelled and never enters the reconcile",
-  /AbortError[\s\S]{0,200}Photo push cancelled\./.test(builderSrc),
+  builderSrc.includes(`if (err?.name === "AbortError")`)
+  && builderSrc.indexOf("Photo push cancelled.") < builderSrc.indexOf("Stream lost before the \"done\" event"),
 );
 check(
   "the reconcile loop itself observes a mid-poll cancel",
@@ -259,7 +282,8 @@ check(
 check(
   "done event's live-gallery fields reach the confirm state",
   builderSrc.includes("setPushGuestyConfirm({")
-  && builderSrc.includes("replacementConfirmed: event.replacementConfirmed === true"),
+  && builderSrc.includes("const replacementConfirmed = event.replacementConfirmed === true")
+  && builderSrc.includes("replacementConfirmed,"),
 );
 check(
   "confirm panel renders pushed vs actually-on-Guesty",
@@ -273,28 +297,108 @@ check(
   && builderSrc.includes("c.replacementConfirmed && c.guestyTotal != null"),
 );
 check(
-  "the live count pill prefers the server's actual gallery read-back",
-  builderSrc.includes("setGuestyPhotoCount(guestyTotal ?? sc)"),
+  "the live count uses the server's actual gallery read-back and never substitutes the pushed count",
+  builderSrc.includes("setGuestyPhotoCount(guestyTotal)")
+  && !builderSrc.includes("setGuestyPhotoCount(guestyTotal ?? sc)"),
 );
 check(
   "verify read-back progress renders while the server confirms the gallery",
   builderSrc.includes("photo-push-verify-note"),
 );
 check(
-  "the persisted last-push summary carries the confirmed Guesty gallery count",
-  builderSrc.includes("last-push-guesty-total"),
+  "the visible last-push receipt uses the same newest merged ledger as the tab chip",
+  builderSrc.includes('data-testid="last-photo-push-receipt"')
+  && builderSrc.includes("mergedPushLog.photos.message"),
 );
 
 // The server side of the contract: push-photos MUST ledger-stamp its outcome
 // at the end (that stamp IS the reconcile signal) — success and failure both.
 const routesSrc = readFileSync("server/routes.ts", "utf8");
 check(
-  "push-photos route stamps the photos ledger on completion",
-  /recordGuestyPush\(\s*guestyListingId,\s*"photos",\s*successCount > 0 && !strictGalleryError \? "success" : "error"/.test(routesSrc),
+  "server records the same photo-push correlation ID in success and error outcomes",
+  routesSrc.includes("const operationId = normalizeGuestyPushOperationId(rawOperationId) ?? randomUUID()")
+  && routesSrc.includes(`recordGuestyPush(guestyListingId, "photos", "error", galleryError, operationId)`)
+  && /summarizePhotosPush\(successCount, verifiedCount, summaryConfirm\),\s*operationId/.test(routesSrc),
 );
 check(
-  "push-photos route stamps the photos ledger on a failed final PUT too",
-  routesSrc.includes(`recordGuestyPush(guestyListingId, "photos", "error", \`Photo push failed: \${e.message}\`)`),
+  "push-photos route stamps the photos ledger on completion",
+  /recordGuestyPush\(\s*guestyListingId,\s*"photos",\s*replacementConfirmed \? "success" : "error"/.test(routesSrc),
+);
+check(
+  "push-photos route stamps hosting and replacement failures as ledger errors",
+  routesSrc.includes(`recordGuestyPush(guestyListingId, "photos", "error", galleryError, operationId)`),
+);
+check(
+  "partial hosting never publishes a destructive partial Guesty gallery",
+  routesSrc.includes("if (collected.length !== photos.length)")
+  && routesSrc.includes("Guesty's existing gallery was left unchanged")
+  && !routesSrc.includes("Checkpoint Guesty PUT"),
+);
+check(
+  "live-count endpoint is no-store and rejects missing pictures instead of fabricating zero",
+  routesSrc.includes('app.get("/api/builder/guesty-photo-gallery-status"')
+  && routesSrc.includes('res.setHeader("Cache-Control", "no-store, max-age=0")')
+  && routesSrc.includes("Guesty listing response omitted pictures[]; the live gallery count could not be verified."),
+);
+check(
+  "UI compares our gallery with the verified Guesty total and exposes extra/missing drift",
+  builderSrc.includes('data-testid="guesty-photo-count-status"')
+  && builderSrc.includes("Our gallery:")
+  && builderSrc.includes("Guesty live count:")
+  && builderSrc.includes("extra")
+  && builderSrc.includes("missing"),
+);
+check(
+  "live-count fetch is no-store and has no local push-summary fallback",
+  builderSrc.includes("/api/builder/guesty-photo-gallery-status?listingId=")
+  && builderSrc.includes('{ cache: "no-store" }')
+  && !builderSrc.includes("const fallbackCount = storedSummary"),
+);
+check(
+  "listing and operation identity fence every delayed photo-count completion",
+  builderSrc.includes("const selectedIdRef = useRef(selectedId)")
+  && builderSrc.includes("photoPushUiOperationRef.current === operationId")
+  && builderSrc.includes("collageUiOperationRef.current === uiOperation")
+  && builderSrc.includes("const refreshGuestyPhotoCountFor = useCallback(async (listingId: string)")
+  && builderSrc.includes("selectedIdRef.current !== listingId")
+  && builderSrc.includes("scheduleLiveCountRefresh(8000)"),
+);
+check(
+  "selection changes clear prior receipts and failures invalidate a green count",
+  builderSrc.includes("setPushGuestyConfirm(null);")
+  && builderSrc.includes("setReconciledPushSummary(null);")
+  && builderSrc.includes("markGuestyPhotoCountUnverified(listingId, message)")
+  && builderSrc.includes('upscalePhase === "pushing"')
+  && builderSrc.includes('collagePhase === "generating"'),
+);
+check(
+  "selection reset is isolated from amenity-catalog callback changes",
+  /Clear listing-scoped mutation UI only when the selected listing changes\.[\s\S]*?\}, \[selectedId\]\);/.test(builderSrc)
+  && builderSrc.includes("Amenities may need a second pass when the Guesty-name catalog hydrates"),
+);
+check(
+  "in-flight live-count reads cannot overwrite a terminal mutation result",
+  builderSrc.includes("const guestyPhotoMutationActiveRef = useRef(false)")
+  && builderSrc.includes("|| guestyPhotoMutationActiveRef.current")
+  && builderSrc.includes("const finishGuestyPhotoCountMutation = useCallback")
+  && builderSrc.includes("++guestyPhotoCountRequestRef.current;")
+  && builderSrc.includes("finishGuestyPhotoCountMutation(listingId)"),
+);
+check(
+  "post-success Reset never masquerades as an active cancellation",
+  builderSrc.includes("const cancelledActivePush =")
+  && builderSrc.includes("if (cancelledActivePush && listingId)")
+  && builderSrc.includes("photoPushUiOperationRef.current !== null"),
+);
+check(
+  "photo push and cover collage are mutually exclusive in both handlers and controls",
+  builderSrc.includes("|| guestyPhotoMutationActiveRef.current")
+  && builderSrc.includes("if (!beginGuestyPhotoCountMutation(listingId)) return;")
+  && builderSrc.includes('error: "Another Guesty photo update is already running."')
+  && builderSrc.includes('collagePhase === "picking"')
+  && builderSrc.includes('collagePhase === "generating"')
+  && builderSrc.includes('upscalePhase === "pushing"')
+  && builderSrc.includes("Wait for the current Guesty photo push to finish."),
 );
 
 // ── Source guards: replacement receipt ("N old removed — M now live") ──────
@@ -305,7 +409,7 @@ check(
 // never mint a removed/now-live receipt.
 check(
   "route captures the pre-push Guesty gallery size off the collage pre-read",
-  routesSrc.includes("previousGuestyTotal = pics.length"),
+  routesSrc.includes("previousGuestyTotal = pictures.length"),
 );
 check(
   "removed count only computed from a CONFIRMED replacement",

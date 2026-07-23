@@ -45,15 +45,18 @@ export function pushEntryTimeMs(entry: PushLedgerEntryLike): number | null {
 
 // A ledger entry counts as THIS push's outcome only when it is strictly newer
 // than the pre-push baseline (or any entry at all when no baseline existed).
-// Entries with unparseable timestamps or unknown statuses never match — a
-// malformed ledger row must not flip the UI either way.
+// Long-running photo pushes also supply an operation ID so an overlapping
+// background push can never resolve the wrong browser request. Entries with
+// unparseable timestamps or unknown statuses never match.
 export function freshPushOutcome(
   baselineMs: number | null,
   entry: PushLedgerEntryLike,
+  expectedOperationId?: string,
 ): PushReconcileOutcome | null {
   const entryMs = pushEntryTimeMs(entry);
   if (entryMs == null) return null;
   if (baselineMs != null && entryMs <= baselineMs) return null;
+  if (expectedOperationId && entry?.operationId !== expectedOperationId) return null;
   const status = entry?.status;
   if (status !== "success" && status !== "error") return null;
   return {

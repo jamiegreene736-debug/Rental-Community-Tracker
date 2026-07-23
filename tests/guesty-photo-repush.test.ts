@@ -10,6 +10,7 @@ import {
   recentUnitSwapPropertyIds,
   type GuestyPushGallery,
 } from "../shared/guesty-photo-repush";
+import { guestyPicturesExactlyMatch } from "../server/guesty-picture-replacement";
 
 let passed = 0;
 let failed = 0;
@@ -245,6 +246,7 @@ const read = (rel: string) => fs.readFileSync(path.join(here, "..", rel), "utf8"
 }
 {
   const src = read("server/routes.ts");
+  const replacementSrc = read("server/guesty-picture-replacement.ts");
   check("POST /api/unit-swaps fires the Guesty photo re-push after commit",
     src.includes("repushGuestyPhotosForProperty(parsed.data.propertyId"));
   check("POST /api/unit-swaps honors the skipGuestyPhotoPush opt-out",
@@ -260,46 +262,26 @@ const read = (rel: string) => fs.readFileSync(path.join(here, "..", rel), "utf8"
     && src.includes('req.headers["x-admin-secret"]')
     && src.includes("supplied.length === expected.length && timingSafeEqual(supplied, expected)"));
   check("strict final-audit verification compares the exact normalized ordered gallery with Cover Collage first",
-    src.includes("strictGuestyPicturesExactlyMatch(savedPictures, picturesForPut())")
-    && src.includes('savedFirst?.caption === "Cover Collage"')
-    && src.includes('strictGalleryVerification ? exactMatch : savedLen === expectedTotal')
-    && src.includes('strictGalleryVerified'));
-  check("strict gallery mode requires the explicit trusted URL; intermediate/manual pushes keep count verification",
+    src.includes("replaceGuestyPicturesAndVerify({")
+    && replacementSrc.includes("guestyPicturesExactlyMatch(pictures, expected)")
+    && src.includes("const strictGalleryVerified = strictGalleryVerification ? replacementConfirmed")
+    && src.includes("strictGalleryVerified"));
+  check("strict gallery mode requires the explicit trusted URL while every push gets exact verification",
     src.includes("const strictGalleryVerification = requiredCoverCollageUrl != null")
     && !src.includes("strictGalleryVerificationRequirement")
-    && src.includes("intermediate replacement")
-    && src.includes('strictGalleryVerification ? exactMatch : savedLen === expectedTotal'));
-  // 2026-07-17: count verification is EXACT. The push PUT replaces the whole
-  // pictures[] — pushing 40 over an old 60-photo gallery must end at 40 — so a
-  // stale LARGER read-back (the old gallery still served by an eventually-
-  // consistent GET) re-PUTs instead of passing "by count" (the old
-  // `savedLen >= expectedTotal` accepted it and over-reported verifiedCount).
-  check("count verification requires the EXACT expected total — a stale larger (old) gallery re-PUTs instead of passing by count",
-    src.includes('strictGalleryVerification ? exactMatch : savedLen === expectedTotal')
-    && !src.includes("savedLen >= expectedTotal")
-    && src.includes("lastObservedTotal = savedLen"));
+    && src.includes("Every push now proves the exact ordered gallery")
+    && replacementSrc.includes("Exact ordered identity check for a whole Guesty gallery"));
+  check("verification requires exact identities — a stale larger or equal-count gallery never passes by count",
+    replacementSrc.includes("guestyPicturesExactlyMatch(pictures, expected)")
+    && !replacementSrc.includes("savedLen >= expectedTotal")
+    && src.includes("const lastObservedTotal = verification.observedTotal"));
   check("done event reports the live Guesty gallery so the Photos tab can confirm pushed vs actually-on-Guesty",
     src.includes("guestyTotal: lastObservedTotal")
-    && src.includes("replacementConfirmed = true")
+    && src.includes("const replacementConfirmed = verification.confirmed")
     && src.includes("staleExtra"));
   check("verifiedCount can never exceed the number of photos actually pushed",
-    src.includes("Math.min(verifiedTotal - pinnedCount, collected.length)"));
+    src.includes("const verifiedCount = replacementConfirmed ? successCount : 0"));
 
-  // Execute the production comparison helpers directly from their marked
-  // source block. Regression: count-only verification used to accept both of
-  // these stale galleries, even though hidden/old photos were still present.
-  const helperStart = src.indexOf("type NormalizedGuestyPicture");
-  const helperEnd = src.indexOf("const AMENITY_SCAN_RECEIPTS_SETTING_KEY", helperStart);
-  let strictMatch: ((actual: unknown, expected: unknown) => boolean) | null = null;
-  if (helperStart >= 0 && helperEnd > helperStart) {
-    const helperSource = `${src.slice(helperStart, helperEnd)}\n(globalThis as any).__strictMatch = strictGuestyPicturesExactlyMatch;`;
-    const js = ts.transpileModule(helperSource, {
-      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
-    }).outputText;
-    const context: Record<string, unknown> = { URL };
-    vm.runInNewContext(js, context);
-    strictMatch = context.__strictMatch as typeof strictMatch;
-  }
   const expected = [
     { original: "https://cdn.example/collage.jpg", caption: "Cover Collage" },
     { original: "https://cdn.example/new-unit.jpg", caption: "Unit Patio" },
@@ -314,13 +296,11 @@ const read = (rel: string) => fs.readFileSync(path.join(here, "..", rel), "utf8"
     { url: "https://cdn.example/new-unit.jpg", caption: "Unit Patio" },
   ];
   check("strict gallery regression: stale equal/greater counts fail, while normalized exact order passes",
-    !!strictMatch
-    && !strictMatch(staleEqualCount, expected)
-    && !strictMatch(staleLargerCount, expected)
-    && strictMatch(normalizedEquivalent, expected));
+    !guestyPicturesExactlyMatch(staleEqualCount, expected)
+    && !guestyPicturesExactlyMatch(staleLargerCount, expected)
+    && guestyPicturesExactlyMatch(normalizedEquivalent, expected));
   check("strict gallery regression: an older captioned Cover Collage cannot satisfy this audit's URL identity",
-    !!strictMatch
-    && !strictMatch([
+    !guestyPicturesExactlyMatch([
       { original: "https://cdn.example/older-collage.jpg", caption: "Cover Collage" },
       expected[1],
     ], expected));
@@ -329,7 +309,7 @@ const read = (rel: string) => fs.readFileSync(path.join(here, "..", rel), "utf8"
   // insufficient from a browser/remote socket; the exact URL capability is
   // reserved for the same-process loopback repush.
   const authStart = src.indexOf("function isAuthenticatedInternalGalleryPush(");
-  const authEnd = src.indexOf("type NormalizedGuestyPicture", authStart);
+  const authEnd = src.indexOf("const AMENITY_SCAN_RECEIPTS_SETTING_KEY", authStart);
   let trustedInternal: ((req: unknown) => boolean) | null = null;
   let normalizeRequiredUrl: ((raw: unknown) => string | null) | null = null;
   let trustedAuthCasesPass = false;
@@ -380,7 +360,8 @@ const read = (rel: string) => fs.readFileSync(path.join(here, "..", rel), "utf8"
     src.includes("waitForFolderLabels"));
   check("a partial upload or short Guesty read-back is never reported as a completed gallery sync",
     src.includes("successCount === expectedPushCount") &&
-    src.includes("verifiedCount >= successCount") &&
+    src.includes("verifiedCount === successCount") &&
+    src.includes("&& replacementConfirmed") &&
     src.includes("only ${verifiedCount}/${successCount} pushed photos were verified on Guesty"));
   check("strict repush sends the required collage identity and requires both exact completion flags",
     src.includes("...(requiredCoverCollageUrl ? { requiredCoverCollageUrl } : {})")

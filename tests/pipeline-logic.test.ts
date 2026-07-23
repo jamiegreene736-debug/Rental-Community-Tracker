@@ -3428,12 +3428,14 @@ assert.equal(
 console.log("  ✓ builder hydrates mapped Guesty listings before dropdown listing fetch completes");
 
 assert.ok(
-  builderSource.includes("?fields=pictures"),
-  "Photos tab should read Guesty pictures with an explicit fields=pictures projection",
+  builderSource.includes("/api/builder/guesty-photo-gallery-status?listingId=")
+  && routeSource.includes("?fields=pictures"),
+  "Photos tab should use the authoritative server endpoint with an explicit pictures projection",
 );
 assert.ok(
-  builderSource.includes("fallbackCount"),
-  "Photos tab should not show a false zero when a verified last push exists",
+  !builderSource.includes("const fallbackCount = storedSummary")
+  && builderSource.includes("Guesty gallery count could not be verified."),
+  "Photos tab should show an explicit read error rather than relabeling a stale push receipt as the live count",
 );
 const guestyServiceSource = readFileSync(new URL("../client/src/services/guestyService.ts", import.meta.url), "utf8");
 assert.ok(

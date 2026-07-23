@@ -1,12 +1,18 @@
 import type { Express, Request, Response } from "express";
 import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import { createServer, type Server } from "http";
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import { storage } from "./storage";
 import { clearAutoReplaceQueue, listAutoFixActivity, listAutoReplaceJobs, startAutoReplaceJob } from "./auto-replace-jobs";
 import { cancelUnitAuditSweep, getUnitAuditDashboardStatus, getUnitAuditJob, listUnitAuditJobs, startUnitAuditSweep, startUnitAuditSweepBulk } from "./unit-audit-sweep";
 import { getUnitAuditCronStatus, runUnitAuditCronSweep } from "./unit-audit-scheduler";
 import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
+import { acquireGuestyPictureMutation } from "./guesty-picture-mutation";
+import {
+  guestyPicturesExactlyMatch,
+  replaceGuestyPicturesAndVerify,
+  type GuestyPictureForReplacement,
+} from "./guesty-picture-replacement";
 import { assembleGuestyPushPhotos, type GuestyPushGallery } from "@shared/guesty-photo-repush";
 import { unitGalleryLabel } from "@shared/photo-gallery-layout";
 import { withUnitSwapPropertyWriteLock } from "./unit-swap-write-lock";
@@ -64,6 +70,7 @@ import {
   GUESTY_PUSH_RETROACTIVE_HOURS,
   classifyGuestyProxyListingWrite,
   newestGuestyPushEntry,
+  normalizeGuestyPushOperationId,
   summarizeAmenitiesPush,
   summarizeBeddingPush,
   summarizeBookingRulesPush,
@@ -566,37 +573,18 @@ function normalizeRequiredCoverCollageUrl(raw: unknown): string | null {
   }
 }
 
-type NormalizedGuestyPicture = { original: string; caption: string };
+async function readGuestyPicturesForVerification(listingId: string): Promise<unknown[]> {
+  const encodedListingId = encodeURIComponent(String(listingId ?? "").trim());
+  if (!encodedListingId) throw new Error("Guesty listing ID is required.");
 
-function normalizeGuestyPictureForVerification(raw: unknown): NormalizedGuestyPicture | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const picture = raw as Record<string, unknown>;
-  const originalRaw = String(picture.original ?? picture.url ?? "").trim();
-  if (!originalRaw) return null;
-  let original = originalRaw;
-  try {
-    const parsed = new URL(originalRaw);
-    parsed.hash = "";
-    parsed.protocol = parsed.protocol.toLowerCase();
-    parsed.hostname = parsed.hostname.toLowerCase();
-    original = parsed.toString();
-  } catch { /* local/non-standard URLs compare by their trimmed spelling */ }
-  const caption = String(picture.caption ?? "").trim().replace(/\s+/g, " ");
-  return { original, caption };
-}
-
-/** Exact order/content check. A stale gallery with an equal or larger count
- * must not satisfy a strict audit after local hides changed the intended set. */
-function strictGuestyPicturesExactlyMatch(actualRaw: unknown, expectedRaw: unknown): boolean {
-  if (!Array.isArray(actualRaw) || !Array.isArray(expectedRaw)) return false;
-  const actual = actualRaw.map(normalizeGuestyPictureForVerification).filter((p): p is NormalizedGuestyPicture => !!p);
-  const expected = expectedRaw.map(normalizeGuestyPictureForVerification).filter((p): p is NormalizedGuestyPicture => !!p);
-  if (actual.length !== actualRaw.length || expected.length !== expectedRaw.length || actual.length !== expected.length) {
-    return false;
+  let listing = await guestyRequest("GET", `/listings/${encodedListingId}?fields=pictures`) as Record<string, unknown>;
+  if (!Array.isArray(listing?.pictures)) {
+    listing = await guestyRequest("GET", `/listings/${encodedListingId}`) as Record<string, unknown>;
   }
-  return actual.every((picture, index) =>
-    picture.original === expected[index].original
-    && picture.caption === expected[index].caption);
+  if (!Array.isArray(listing?.pictures)) {
+    throw new Error("Guesty listing response omitted pictures[]; the live gallery count could not be verified.");
+  }
+  return listing.pictures;
 }
 
 const AMENITY_SCAN_RECEIPTS_SETTING_KEY = "amenity_scan_receipts.v1";
@@ -2476,7 +2464,31 @@ async function uploadBufferToImgBbWithRetry(
 }
 
 function sanitizePublicPathSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90) || "photo";
+  let sanitized = "";
+  let replacingInvalidRun = false;
+  for (const character of String(value ?? "").slice(0, 256)) {
+    const code = character.charCodeAt(0);
+    const allowed =
+      (code >= 48 && code <= 57)
+      || (code >= 65 && code <= 90)
+      || (code >= 97 && code <= 122)
+      || character === "."
+      || character === "_"
+      || character === "-";
+    if (allowed) {
+      sanitized += character;
+      replacingInvalidRun = false;
+    } else if (sanitized && !replacingInvalidRun) {
+      sanitized += "-";
+      replacingInvalidRun = true;
+    }
+    if (sanitized.length >= 91) break;
+  }
+  let start = 0;
+  let end = sanitized.length;
+  while (start < end && sanitized[start] === "-") start++;
+  while (end > start && sanitized[end - 1] === "-") end--;
+  return sanitized.slice(start, end).slice(0, 90) || "photo";
 }
 
 function hostGuestyPhotoLocally(
@@ -2492,9 +2504,17 @@ function hostGuestyPhotoLocally(
   const ext = mimeType === "image/png" ? ".png" : mimeType === "image/webp" ? ".webp" : ".jpg";
   const filename = `${String(index).padStart(3, "0")}-${Date.now()}-${sourceName}${ext}`;
   const relativePath = `/photos/_guesty-hosted/${folder}/${filename}`;
-  const targetDir = path.join(process.cwd(), "client", "public", "photos", "_guesty-hosted", folder);
+  const hostedRoot = path.resolve(process.cwd(), "client", "public", "photos", "_guesty-hosted");
+  const targetDir = path.resolve(hostedRoot, folder);
+  const targetPath = path.resolve(targetDir, filename);
+  if (
+    !targetDir.startsWith(`${hostedRoot}${path.sep}`)
+    || !targetPath.startsWith(`${targetDir}${path.sep}`)
+  ) {
+    throw new Error("Refusing to host a Guesty photo outside the public photo directory.");
+  }
   fs.mkdirSync(targetDir, { recursive: true });
-  fs.writeFileSync(path.join(targetDir, filename), buffer);
+  fs.writeFileSync(targetPath, buffer);
   return `${publicPhotoBaseUrl(req)}${relativePath}`;
 }
 
@@ -9556,6 +9576,9 @@ export async function registerRoutes(
   //        PUT /api/guesty-proxy/listings/:id
   //        etc. — maps 1:1 to https://open-api.guesty.com/v1/*
   app.all("/api/guesty-proxy/*path", async (req: Request, res: Response) => {
+    if (req.method === "GET" || req.method === "HEAD") {
+      res.setHeader("Cache-Control", "no-store, max-age=0");
+    }
     // Shared token module handles memory/DB/file caching + refresh dedup.
     let token: string;
     try {
@@ -9572,6 +9595,18 @@ export async function registerRoutes(
     const guestyPath = req.path.replace(/^\/api\/guesty-proxy/, "") || "/";
     const qs = new URLSearchParams(req.query as Record<string, string>).toString();
     const url = `https://open-api.guesty.com/v1${guestyPath}${qs ? "?" + qs : ""}`;
+
+    if (
+      req.method !== "GET"
+      && req.method !== "HEAD"
+      && /^\/listings\/[^/]+\/?$/.test(guestyPath)
+      && Object.prototype.hasOwnProperty.call(req.body ?? {}, "pictures")
+    ) {
+      return res.status(409).json({
+        error: "UNVERIFIED_GALLERY_WRITE",
+        message: "Guesty pictures[] must be replaced through the verified photo-push or cover-collage workflow.",
+      });
+    }
 
     if (req.method === "POST" && guestyPath === "/listings" && !hasPublishableGuestyStreetAddress((req.body as any)?.address)) {
       const current = String((req.body as any)?.address?.full || (req.body as any)?.address?.street || "no address").trim();
@@ -24290,35 +24325,57 @@ Requirements:
   // Accepts:
   //   { base64: string (data URL or raw base64),
   //     listingId: string,
-  //     existingPhotos?: { original: string; caption: string }[]  // optional
   //   }
   // Uploads the collage bytes to ImgBB, then PUTs Guesty's pictures
   // array with the collage at index 0 + the rest.
   //
-  // "The rest" is either:
-  //   (a) what the CALLER just pushed (passed in as `existingPhotos`) —
-  //       preferred, because this is race-free. Guesty's read-after-write
-  //       isn't strongly consistent, so a GET right after a push-photos
-  //       finish can return stale data and we'd write back fewer pictures
-  //       than the caller actually uploaded.
-  //   (b) a fresh GET from Guesty — fallback for callers that don't
-  //       track their last push (e.g. user returns to the tab later and
-  //       regenerates the collage without re-pushing).
+  // "The rest" comes from a fresh Guesty read taken inside the per-listing
+  // mutation lock. Caller-supplied gallery snapshots are not trusted: they can
+  // be stale after a tab switch and would silently overwrite a newer gallery.
   // Shared tail for both collage endpoints: ImgBB-host the collage bytes,
   // then PUT Guesty's pictures with the collage pinned first (any previous
   // "Cover Collage" picture dropped so regeneration doesn't accumulate).
   // Returns a discriminated result instead of throwing so both callers map
   // failures to the exact HTTP statuses the manual endpoint always used.
   type CoverCollagePushResult =
-    | { ok: true; collageUrl: string; totalPhotos: number }
+    | {
+        ok: true;
+        collageUrl: string;
+        totalPhotos: number;
+        expectedTotal: number;
+        replacementConfirmed: true;
+      }
     | { ok: false; status: number; body: Record<string, unknown> };
+
+  async function uploadCoverCollageToImgBb(rawBase64: string): Promise<
+    | { ok: true; collageUrl: string }
+    | { ok: false; status: number; body: Record<string, unknown> }
+  > {
+    const imgbbKey = process.env.IMGBB_API_KEY;
+    if (!imgbbKey) return { ok: false, status: 500, body: { error: "IMGBB_API_KEY not configured" } };
+
+    try {
+      const form = new FormData();
+      form.append("image", rawBase64);
+      const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, { method: "POST", body: form });
+      if (!imgbbResp.ok) {
+        const detail = await imgbbResp.text();
+        return { ok: false, status: 502, body: { error: "ImgBB upload failed", detail: detail.slice(0, 200) } };
+      }
+      const imgbbData = await imgbbResp.json() as any;
+      const collageUrl = String(imgbbData?.data?.url ?? "").trim();
+      if (!collageUrl) return { ok: false, status: 502, body: { error: "ImgBB returned no URL" } };
+      return { ok: true, collageUrl };
+    } catch (error: any) {
+      return { ok: false, status: 500, body: { error: "ImgBB error", message: error?.message ?? String(error) } };
+    }
+  }
 
   async function pushCoverCollageToGuesty(
     listingId: string,
     rawBase64: string,
-    existingPhotos?: { original: string; caption: string }[],
   ): Promise<CoverCollagePushResult> {
-    const result = await pushCoverCollageToGuestyUnrecorded(listingId, rawBase64, existingPhotos);
+    const result = await pushCoverCollageToGuestyUnrecorded(listingId, rawBase64);
     // Per-tab push ledger: the collage push rewrites the listing's pictures[]
     // (collage pinned first), so it IS a Photos-tab Guesty push. Recording at
     // this single chokepoint covers BOTH callers — the manual upload-collage
@@ -24338,69 +24395,78 @@ Requirements:
   async function pushCoverCollageToGuestyUnrecorded(
     listingId: string,
     rawBase64: string,
-    existingPhotos?: { original: string; caption: string }[],
   ): Promise<CoverCollagePushResult> {
-    const imgbbKey = process.env.IMGBB_API_KEY;
-    if (!imgbbKey) return { ok: false, status: 500, body: { error: "IMGBB_API_KEY not configured" } };
-
-    // Upload to ImgBB
-    let collageUrl: string;
-    try {
-      const form = new FormData();
-      form.append("image", rawBase64);
-      const imgbbResp = await fetch(`https://api.imgbb.com/1/upload?key=${imgbbKey}`, { method: "POST", body: form });
-      if (!imgbbResp.ok) {
-        const t = await imgbbResp.text();
-        return { ok: false, status: 502, body: { error: "ImgBB upload failed", detail: t.slice(0, 200) } };
-      }
-      const imgbbData = await imgbbResp.json() as any;
-      collageUrl = imgbbData?.data?.url;
-      if (!collageUrl) return { ok: false, status: 502, body: { error: "ImgBB returned no URL" } };
-    } catch (e: any) {
-      return { ok: false, status: 500, body: { error: "ImgBB error", message: e.message } };
-    }
+    const upload = await uploadCoverCollageToImgBb(rawBase64);
+    if (!upload.ok) return upload;
+    const collageUrl = upload.collageUrl;
+    const releaseMutation = await acquireGuestyPictureMutation(listingId);
 
     try {
-      let existing: { original: string; caption: string }[];
-
-      if (Array.isArray(existingPhotos) && existingPhotos.length > 0) {
-        // Race-free path: trust the caller's list.
-        existing = existingPhotos
-          .map((p) => ({ original: String(p.original || ""), caption: String(p.caption || "") }))
-          .filter((p) => p.original);
-      } else {
-        // Fallback: GET from Guesty. Subject to eventual-consistency
-        // lag after recent PUTs — callers that just finished a push
-        // should pass `existingPhotos` instead.
-        const listing = await guestyRequest("GET", `/listings/${listingId}`) as any;
-        existing = (listing?.pictures || []).map((p: any) => ({
-          original: p.original || p.url || "",
-          caption: p.caption || "",
-        })).filter((p: any) => p.original);
-      }
+      const existing = (await readGuestyPicturesForVerification(listingId))
+        .map((picture) => {
+          const p = picture as Record<string, unknown>;
+          return {
+            original: p.original || p.url || "",
+            caption: p.caption || "",
+          };
+        })
+        .map((picture) => ({
+          original: String(picture.original ?? ""),
+          caption: String(picture.caption ?? ""),
+        }))
+        .filter((picture) => picture.original);
 
       // Remove any previous collage so regeneration doesn't accumulate.
       const withoutOldCollage = existing.filter(p => p.caption !== "Cover Collage");
       const updated = [{ original: collageUrl, caption: "Cover Collage" }, ...withoutOldCollage];
-      await guestyRequest("PUT", `/listings/${listingId}`, { pictures: updated });
+      const verification = await replaceGuestyPicturesAndVerify({
+        pictures: updated,
+        replace: (pictures) => guestyRequest("PUT", `/listings/${listingId}`, { pictures }),
+        read: () => readGuestyPicturesForVerification(listingId),
+        onVerify: ({ attempt, expected, got, exactMatch, error }) => {
+          console.log(
+            `[cover-collage] Verify #${attempt}: expected exact ${expected}, `
+            + (got == null ? `read failed (${error ?? "unknown"})` : `Guesty has ${got}, exact=${exactMatch}`),
+          );
+        },
+      });
+      if (!verification.confirmed || verification.observedTotal == null) {
+        return {
+          ok: false,
+          status: 502,
+          body: {
+            error: "Guesty did not confirm the exact cover-collage gallery",
+            expectedTotal: updated.length,
+            guestyTotal: verification.observedTotal,
+            replacementConfirmed: false,
+          },
+        };
+      }
 
-      return { ok: true, collageUrl, totalPhotos: updated.length };
+      return {
+        ok: true,
+        collageUrl,
+        totalPhotos: verification.observedTotal,
+        expectedTotal: updated.length,
+        replacementConfirmed: true,
+      };
     } catch (e: any) {
       return { ok: false, status: 500, body: { error: "Guesty update failed", message: e.message } };
+    } finally {
+      releaseMutation();
     }
   }
 
   app.post("/api/builder/upload-collage", async (req, res) => {
-    const { base64, listingId, existingPhotos } = req.body as {
+    const { base64, listingId } = req.body as {
       base64: string;
       listingId: string;
-      existingPhotos?: { original: string; caption: string }[];
     };
     if (!base64 || !listingId) return res.status(400).json({ error: "base64 and listingId required" });
 
     // Strip data URL prefix if present
     const raw = base64.replace(/^data:image\/[a-z]+;base64,/, "");
-    const result = await pushCoverCollageToGuesty(listingId, raw, existingPhotos);
+    const result = await pushCoverCollageToGuesty(listingId, raw);
     if (!result.ok) return res.status(result.status).json(result.body);
     res.json({ success: true, collageUrl: result.collageUrl, totalPhotos: result.totalPhotos });
   });
@@ -24412,7 +24478,6 @@ Requirements:
   //     photos: { url; caption?; source? }[],   // the tab's VISIBLE gallery,
   //                                             // client-driven like the
   //                                             // community/dedupe checks
-  //     existingPhotos?: { original; caption }[] }  // race-free pictures list
   //
   // One click end-to-end: Claude vision picks the two best photos (LEFT =
   // community hero, RIGHT = unit patio/lanai — Load-Bearing #8; see
@@ -24426,12 +24491,21 @@ Requirements:
   // Both saves are best-effort and reported honestly in the response —
   // a failed save never unwinds a successful Guesty push.
   app.post("/api/builder/auto-cover-collage", async (req, res) => {
-    const { listingId: rawListingId, propertyId: rawPropertyId, photos, existingPhotos, requireVision, picks } = req.body as {
+    const {
+      listingId: rawListingId,
+      propertyId: rawPropertyId,
+      photos,
+      requireVision,
+      picks,
+      syncGalleryFromSystem,
+    } = req.body as {
       listingId?: string | null;
       propertyId?: number | string | null;
       photos: Array<{ url: string; caption?: string; source?: string }>;
-      existingPhotos?: { original: string; caption: string }[];
       requireVision?: boolean;
+      /** Photos-tab calls require the new collage plus the current curated
+       * local gallery to replace Guesty as one exact verified operation. */
+      syncGalleryFromSystem?: boolean;
       /** "pick manually": the operator's chosen pair. Present → the engine
        * composes EXACTLY these two and never consults vision/heuristic. */
       picks?: { left?: { url?: string }; right?: { url?: string } };
@@ -24441,12 +24515,26 @@ Requirements:
     const propertyId = parsedPropertyId != null && Number.isFinite(parsedPropertyId) && parsedPropertyId !== 0
       ? parsedPropertyId
       : null;
-    const auditRequest = propertyId != null;
+    const authoritativeSystemSync = syncGalleryFromSystem === true;
+    const auditRequest = propertyId != null && !authoritativeSystemSync;
     if (!listingId && propertyId == null) {
       return res.status(400).json({ error: "listingId or propertyId required" });
     }
     if (!Array.isArray(photos) || photos.length < 2) {
       return res.status(400).json({ error: "photos array with at least 2 entries required" });
+    }
+    if (authoritativeSystemSync && (!listingId || propertyId == null)) {
+      return res.status(400).json({
+        error: "listingId and propertyId are required to synchronize the curated gallery",
+      });
+    }
+    if (authoritativeSystemSync && propertyId != null && listingId) {
+      const mappedListingId = await storage.getGuestyListingId(propertyId).catch(() => undefined);
+      if (mappedListingId !== listingId) {
+        return res.status(409).json({
+          error: "This property is no longer mapped to the selected Guesty listing. Refresh before making the cover collage.",
+        });
+      }
     }
     // Manual calls still promise an immediate Guesty push, so fail before a
     // vision spend when ImgBB cannot host it. A property-scoped audit saves
@@ -24506,11 +24594,46 @@ Requirements:
     }
 
     let pushed: CoverCollagePushResult | null = null;
-    if (listingId) {
+    if (listingId && authoritativeSystemSync && propertyId != null) {
+      const upload = await uploadCoverCollageToImgBb(collage.buffer.toString("base64"));
+      if (!upload.ok) {
+        pushed = upload;
+      } else {
+        const repush = await repushGuestyPhotosForProperty(propertyId, {
+          reason: "Photos tab — replace the full curated gallery with the newly generated cover collage",
+          requiredCoverCollageUrl: upload.collageUrl,
+          // The collage button should not unexpectedly run paid AI upscaling
+          // across the whole gallery. Validation/normalization still runs.
+          upscale: false,
+        });
+        const exactConfirmed = repush.ok
+          && repush.replacementConfirmed === true
+          && repush.collagePinned === true
+          && repush.strictGalleryVerified === true
+          && typeof repush.guestyTotal === "number";
+        pushed = exactConfirmed
+          ? {
+              ok: true,
+              collageUrl: upload.collageUrl,
+              totalPhotos: repush.guestyTotal!,
+              expectedTotal: repush.guestyTotal!,
+              replacementConfirmed: true,
+            }
+          : {
+              ok: false,
+              status: 502,
+              body: {
+                error: repush.error ?? "Guesty did not confirm the exact curated gallery with the new cover collage.",
+                expectedTotal: (repush.photoCount ?? photos.length) + 1,
+                guestyTotal: repush.guestyTotal ?? null,
+                replacementConfirmed: repush.replacementConfirmed === true,
+              },
+            };
+      }
+    } else if (listingId) {
       pushed = await pushCoverCollageToGuesty(
         listingId,
         collage.buffer.toString("base64"),
-        existingPhotos,
       );
     }
 
@@ -24550,14 +24673,20 @@ Requirements:
         recordSaveError,
       });
     }
-    if (!auditRequest && pushed && !pushed.ok) {
+    if ((!auditRequest || authoritativeSystemSync) && pushed && !pushed.ok) {
       return res.status(pushed.status).json(pushed.body);
     }
 
     const guesty = !listingId
       ? { synced: false, skipped: true, reason: "No Guesty listing mapped" }
       : pushed?.ok
-        ? { synced: true, skipped: false, collageUrl: pushed.collageUrl, totalPhotos: pushed.totalPhotos }
+        ? {
+            synced: true,
+            skipped: false,
+            collageUrl: pushed.collageUrl,
+            totalPhotos: pushed.totalPhotos,
+            replacementConfirmed: pushed.replacementConfirmed,
+          }
         : { synced: false, skipped: false, error: String(pushed?.body?.error ?? `HTTP ${pushed?.status ?? 500}`) };
 
     console.log(
@@ -24570,6 +24699,7 @@ Requirements:
       success: true,
       collageUrl: pushed?.ok ? pushed.collageUrl : null,
       totalPhotos: pushed?.ok ? pushed.totalPhotos : null,
+      replacementConfirmed: pushed?.ok ? pushed.replacementConfirmed : false,
       guesty,
       picks: { left: collage.left, right: collage.right },
       method: collage.method,
@@ -26091,6 +26221,22 @@ Requirements:
     }
   });
 
+  // Expensive whole-gallery writes are operator actions, not polling endpoints.
+  // Bound them per signed-in portal user + IP so repeated requests cannot fan
+  // out image downloads/uploads or long Guesty replacement loops.
+  const guestyPhotoMutationRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 20,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    keyGenerator: (req, res) => {
+      const session = res.locals.portalSession as { username?: string } | undefined;
+      const address = req.ip ?? req.socket.remoteAddress ?? "unknown";
+      return `${session?.username ?? "unauthenticated"}:${ipKeyGenerator(address)}`;
+    },
+    message: { error: "Too many Guesty photo updates. Please wait a minute and try again." },
+  });
+
   // POST /api/builder/push-photos
   // Streams NDJSON events as each photo completes to keep progress flowing.
   // Each line: { type:"photo", index, total, localPath, success, url?, wasUpscaled?, error? }
@@ -26098,10 +26244,10 @@ Requirements:
   // NOTE (2026-07-14): streaming does NOT make the connection immortal —
   // Railway's edge hard-cuts every response at 15 minutes of total duration
   // even mid-stream, and a big AI-upscale push legitimately runs longer. The
-  // route keeps working after the cut (checkpoint PUTs every 5 photos + the
-  // final PUT/verify), and the recordGuestyPush ledger stamp at the end is the
-  // client's reconcile signal (shared/push-reconcile.ts) — don't remove it.
-  app.post("/api/builder/push-photos", async (req, res) => {
+  // route keeps working after the cut (hosting progress checkpoints + the
+  // all-or-nothing final PUT/verify), and the recordGuestyPush ledger stamp at
+  // the end is the client's reconcile signal (shared/push-reconcile.ts).
+  app.post("/api/builder/push-photos", guestyPhotoMutationRateLimit, async (req, res) => {
     const imgbbKey = process.env.IMGBB_API_KEY;
     const replicateKey = process.env.REPLICATE_API_KEY;
 
@@ -26109,11 +26255,18 @@ Requirements:
       console.warn("[push-photos] IMGBB_API_KEY not configured — using app-hosted /photos fallback");
     }
 
-    const { guestyListingId, photos: rawPhotos, upscale = true, requiredCoverCollageUrl: rawRequiredCoverCollageUrl } = req.body as {
+    const {
+      guestyListingId,
+      photos: rawPhotos,
+      upscale = true,
+      requiredCoverCollageUrl: rawRequiredCoverCollageUrl,
+      operationId: rawOperationId,
+    } = req.body as {
       guestyListingId: string;
       photos: { localPath: string; caption: string }[];
       upscale?: boolean;
       requiredCoverCollageUrl?: string;
+      operationId?: string;
     };
 
     if (!guestyListingId || !Array.isArray(rawPhotos) || rawPhotos.length === 0) {
@@ -26128,12 +26281,13 @@ Requirements:
     if (rawRequiredCoverCollageUrl != null && !requiredCoverCollageUrl) {
       return res.status(400).json({ error: "requiredCoverCollageUrl must be a valid http(s) URL" });
     }
+    const operationId = normalizeGuestyPushOperationId(rawOperationId) ?? randomUUID();
 
+    const releasePictureMutation = await acquireGuestyPictureMutation(guestyListingId);
+    try {
     // Strict mode is an explicit capability carried only by the final audit
-    // seam. Do not infer it from a pending job: intermediate replacement
-    // pushes run before the new collage exists and must retain the historical
-    // count-based behavior. The orchestrator fails closed before this call if
-    // the final mapped audit lacks its persisted identity.
+    // seam. Every push now proves the exact ordered gallery; strict mode adds
+    // the stronger requirement that this run's persisted collage URL is first.
     const strictGalleryVerification = requiredCoverCollageUrl != null;
 
     // Pin an existing Cover Collage to the FRONT of the listing. The PUTs below
@@ -26142,9 +26296,9 @@ Requirements:
     // front and re-prepend it on every PUT so the live Guesty order stays
     //   Cover Collage → Unit A → Unit B → … → Community.
     // (No collage yet → the push is just the photos; make one via "Make Cover
-    // Collage" and it lands first.) Standard/manual pushes remain best-effort.
-    // The final full-automation sync supplies its own persisted, trusted
-    // collage identity and proves that exact URL in the final read-back.
+    // Collage" and it lands first.) The final full-automation sync supplies
+    // its own persisted, trusted collage identity; every path proves its exact
+    // final ordered gallery.
     let pinnedCollage: { original: string; caption: string } | null = requiredCoverCollageUrl
       ? { original: requiredCoverCollageUrl, caption: "Cover Collage" }
       : null;
@@ -26152,8 +26306,9 @@ Requirements:
     // this run. Do not gate its corrective PUT on an eventually-consistent
     // pre-read that may still show the old collage; write the required URL and
     // prove the whole exact ordered gallery with the retrying read-back below.
-    // Standard/manual calls have no such identity, so they retain the legacy
-    // best-effort GET that preserves any existing captioned cover.
+    // Standard/manual calls have no such identity, so they must prove the
+    // current gallery is readable before proceeding. An unreadable gallery is
+    // not evidence that no cover exists; failing closed avoids deleting it.
     // How many pictures Guesty held BEFORE this push. Captured off the same
     // collage-pin pre-read (no extra Guesty call); null when unreadable or in
     // strict-audit mode (which deliberately skips the pre-read). Feeds the
@@ -26161,18 +26316,24 @@ Requirements:
     let previousGuestyTotal: number | null = null;
     if (!requiredCoverCollageUrl) {
       try {
-        const current = await guestyRequest("GET", `/listings/${guestyListingId}?fields=pictures`) as any;
-        const pics = Array.isArray(current?.pictures) ? current.pictures : [];
-        previousGuestyTotal = pics.length;
-        const existing = pics.find((p: any) => (p?.caption || "") === "Cover Collage");
-        const collageUrl = existing?.original || existing?.url;
+        const pictures = await readGuestyPicturesForVerification(guestyListingId);
+        previousGuestyTotal = pictures.length;
+        const existing = pictures.find((picture) => {
+          const p = picture as Record<string, unknown>;
+          return String(p?.caption ?? "") === "Cover Collage";
+        }) as Record<string, unknown> | undefined;
+        const collageUrl = String(existing?.original ?? existing?.url ?? "").trim();
         if (collageUrl) {
-          pinnedCollage = { original: String(collageUrl), caption: "Cover Collage" };
+          pinnedCollage = { original: collageUrl, caption: "Cover Collage" };
         }
       } catch (e: any) {
-        console.warn(`[push-photos] could not read existing collage (continuing without pin): ${e?.message ?? e}`);
+        const galleryError =
+          `Guesty's existing gallery could not be read, so it was left unchanged to avoid deleting an unverified cover collage. Re-check Guesty and push again. (${e?.message ?? e})`;
+        recordGuestyPush(guestyListingId, "photos", "error", galleryError, operationId);
+        return res.status(502).json({ error: galleryError, operationId });
       }
     }
+    const preservedCoverCollageUrl = pinnedCollage?.original ?? null;
     const pinnedCount = pinnedCollage ? 1 : 0;
 
     // Keep the Guesty master/Airbnb source set up to Airbnb's published
@@ -26372,128 +26533,151 @@ Requirements:
       emit({ type: "photo", index, total: photos.length, localPath, success: true, url: publicUrl, wasUpscaled, validationChanges, hostedBy, pending: true });
       console.log(`[push-photos] ✓ hosted via ${hostedBy} ${index}/${photos.length} ${safePath}`);
 
-      // Checkpoint: commit accumulated photos to Guesty every 5 successful uploads.
-      // Each PUT replaces the full pictures array, so we accumulate. This way a server
-      // restart or network drop mid-run still leaves the completed photos in Guesty.
+      // Progress checkpoint only. Publishing a partial whole-gallery snapshot
+      // here used to delete every photo that had not finished hosting yet. The
+      // actual Guesty mutation is intentionally all-or-nothing below.
       const CHECKPOINT_EVERY = 5;
       if (collected.length > 0 && collected.length % CHECKPOINT_EVERY === 0) {
-        emit({ type: "checkpoint", saved: collected.length, total: photos.length });
-        try {
-          await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: picturesForPut() });
-          console.log(`[push-photos] ✓ Checkpoint Guesty PUT — ${collected.length} photos committed${pinnedCollage ? " (+ pinned collage)" : ""}`);
-        } catch (e: any) {
-          console.error(`[push-photos] ✗ Checkpoint Guesty PUT failed: ${e.message}`);
-          // Non-fatal: keep uploading remaining photos, try final PUT at end
-        }
+        emit({ type: "checkpoint", saved: collected.length, total: photos.length, pending: true });
       }
     }
 
-    // Final PUT to Guesty with all collected pictures (handles remainder after last checkpoint).
-    // Guesty stores pictures via PUT /listings/{id} with pictures[].original (not url).
-    // This replaces all existing photos on the listing.
-    let successCount = 0;
-    if (collected.length > 0) {
-      emit({ type: "saving", count: collected.length });
+    if (collected.length !== photos.length) {
+      const hostingFailureCount = photos.length - collected.length;
+      const galleryError = `Prepared ${collected.length}/${photos.length} photos, so Guesty's existing gallery was left unchanged. Fix the ${hostingFailureCount} photo hosting failure${hostingFailureCount === 1 ? "" : "s"} and push again.`;
+      recordGuestyPush(guestyListingId, "photos", "error", galleryError, operationId);
+      emit({
+        type: "done",
+        operationId,
+        successCount: 0,
+        hostedCount: collected.length,
+        verifiedCount: 0,
+        shortfall: hostingFailureCount,
+        upscaledCount,
+        total: photos.length,
+        trimmed: trimmedCount,
+        maxPhotos: MAX_GUESTY_PHOTOS,
+        collagePinned: pinnedCount > 0,
+        expectedTotal: photos.length + pinnedCount,
+        guestyTotal: previousGuestyTotal,
+        replacementConfirmed: false,
+        staleExtra: 0,
+        previousTotal: previousGuestyTotal,
+        removedCount: null,
+        guestyError: galleryError,
+      });
+      res.end();
+      return;
+    }
+
+    if (!requiredCoverCollageUrl) {
       try {
-        await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: picturesForPut() });
-        successCount = collected.length;
-        console.log(`[push-photos] ✓ Guesty PUT — ${successCount} photos saved to listing ${guestyListingId}${pinnedCollage ? " (cover collage pinned first)" : ""}`);
+        const currentPictures = await readGuestyPicturesForVerification(guestyListingId);
+        previousGuestyTotal = currentPictures.length;
+        const currentCover = currentPictures.find((picture) => {
+          const p = picture as Record<string, unknown>;
+          return String(p?.caption ?? "") === "Cover Collage";
+        }) as Record<string, unknown> | undefined;
+        const currentCoverUrl = String(currentCover?.original ?? currentCover?.url ?? "").trim() || null;
+        if (currentCoverUrl !== preservedCoverCollageUrl) {
+          throw new Error("the cover collage changed while the replacement photos were being prepared");
+        }
       } catch (e: any) {
-        console.error(`[push-photos] ✗ Guesty PUT failed: ${e.message}`);
-        recordGuestyPush(guestyListingId, "photos", "error", `Photo push failed: ${e.message}`);
-        emit({ type: "done", successCount: 0, upscaledCount, total: photos.length, trimmed: trimmedCount, maxPhotos: MAX_GUESTY_PHOTOS, guestyError: e.message });
+        const galleryError =
+          `Guesty's gallery changed or became unreadable while the photos were being prepared, so the existing gallery was left unchanged. Re-check Guesty and push again. (${e?.message ?? e})`;
+        recordGuestyPush(guestyListingId, "photos", "error", galleryError, operationId);
+        emit({
+          type: "done",
+          operationId,
+          successCount: 0,
+          hostedCount: collected.length,
+          verifiedCount: 0,
+          shortfall: photos.length,
+          upscaledCount,
+          total: photos.length,
+          trimmed: trimmedCount,
+          maxPhotos: MAX_GUESTY_PHOTOS,
+          collagePinned: pinnedCount > 0,
+          expectedTotal: photos.length + pinnedCount,
+          guestyTotal: previousGuestyTotal,
+          replacementConfirmed: false,
+          staleExtra: 0,
+          previousTotal: previousGuestyTotal,
+          removedCount: null,
+          guestyError: galleryError,
+        });
         res.end();
         return;
       }
     }
 
-    // Verify-and-retry loop. Guesty silently drops pictures from the
-    // array when it can't fetch the URL during its internal validation
-    // (observed: ImgBB CDN propagation lag on newly-uploaded images
-    // causes the last few URLs to 404 when Guesty tries them, and Guesty
-    // strips them from `pictures` without signaling an error). Without
-    // this loop the server reports successCount=N but Guesty stored
-    // fewer. The retry gives the ImgBB CDN time to catch up and re-PUTs.
-    //
-    // Retry ladder: wait 3s, verify, retry if short. Wait 6s, verify,
-    // retry. Wait 10s, verify. Give up after that and report the final
-    // observed count so the UI doesn't lie.
-    // Guesty's stored array includes the pinned collage, so compare against
-    // collected + pinned and report photo counts net of the collage. Standard
-    // pushes retain the historical count-based read-back. A strict final audit
-    // requires the exact normalized URL+caption sequence (including Cover
-    // Collage first): an eventually-consistent stale gallery can be longer
-    // than the intended post-dedupe gallery and must never produce a false
-    // green merely because its count is high enough.
-    const expectedTotal = collected.length + pinnedCount;
-    let verifiedTotal = strictGalleryVerification ? 0 : successCount + pinnedCount;
-    let strictGalleryVerified = !strictGalleryVerification;
-    // The replacement contract the operator relies on: pushing N photos must
-    // leave Guesty with EXACTLY N (+ the pinned collage). A stale LARGER
-    // gallery — the old pictures[] still served by an eventually-consistent
-    // read — must trigger a corrective re-PUT, never pass "by count".
-    // lastObservedTotal is what Guesty actually reported on the most recent
-    // successful read (null = every verify GET failed); replacementConfirmed
-    // is true only when a read matched the expectation exactly.
-    let lastObservedTotal: number | null = null;
-    let replacementConfirmed = false;
-    if (collected.length > 0) {
-      const waits = [3000, 6000, 10000];
-      for (let attempt = 0; attempt < waits.length; attempt++) {
-        await new Promise((r) => setTimeout(r, waits[attempt]));
-        try {
-          const listing = await guestyRequest("GET", `/listings/${guestyListingId}?fields=pictures`) as any;
-          const savedPictures = Array.isArray(listing?.pictures) ? listing.pictures : [];
-          const savedLen = savedPictures.length;
-          lastObservedTotal = savedLen;
-          const savedFirst = normalizeGuestyPictureForVerification(savedPictures[0]);
-          const exactMatch = strictGalleryVerification
-            && savedFirst?.caption === "Cover Collage"
-            && strictGuestyPicturesExactlyMatch(savedPictures, picturesForPut());
-          emit({
-            type: "verify",
-            attempt: attempt + 1,
-            expected: expectedTotal,
-            got: savedLen,
-            ...(strictGalleryVerification ? { exactMatch } : {}),
-          });
+    // Guesty stores photos through a whole pictures[] replacement. A count
+    // match alone is insufficient: 31 stale pictures can masquerade as the 31
+    // intended pictures. Verify the exact ordered URL+caption sequence and only
+    // retry after a mismatched read; the final operation is always a read.
+    emit({ type: "saving", count: collected.length });
+    const replacementPictures: GuestyPictureForReplacement[] = picturesForPut();
+    let verification;
+    try {
+      verification = await replaceGuestyPicturesAndVerify({
+        pictures: replacementPictures,
+        replace: (pictures) => guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures }),
+        read: () => readGuestyPicturesForVerification(guestyListingId),
+        onVerify: ({ attempt, expected, got, exactMatch, error }) => {
+          emit({ type: "verify", attempt, expected, got, exactMatch, ...(error ? { error } : {}) });
           console.log(
-            `[push-photos] Verify #${attempt + 1}: expected ${expectedTotal}, Guesty has ${savedLen}`
-            + (strictGalleryVerification ? `, exact ordered gallery ${exactMatch ? "matched" : "did not match"}` : ""),
+            `[push-photos] Verify #${attempt}: expected ${expected}, Guesty reported ${got ?? "unreadable"}, exact ordered gallery ${exactMatch ? "matched" : "did not match"}${error ? ` (${error})` : ""}`,
           );
-          if (strictGalleryVerification ? exactMatch : savedLen === expectedTotal) {
-            verifiedTotal = savedLen;
-            strictGalleryVerified = true;
-            replacementConfirmed = true;
-            break;
+        },
+        onRetry: ({ attempt, expected, error }) => {
+          if (error) {
+            console.error(`[push-photos] Corrective PUT #${attempt} failed for the ${expected}-photo gallery: ${error}`);
+          } else {
+            console.log(`[push-photos] Corrective PUT #${attempt} — re-pushed the exact ${expected}-photo gallery`);
           }
-          // Count mismatch (short OR a stale larger/old gallery) or strict
-          // content/order mismatch — re-PUT and loop. An over-count means
-          // Guesty is still serving pre-push pictures, the exact failure the
-          // operator's "60 old photos must become the 40 pushed" contract
-          // exists to catch.
-          try {
-            await guestyRequest("PUT", `/listings/${guestyListingId}`, { pictures: picturesForPut() });
-            console.log(`[push-photos] Retry PUT #${attempt + 1} — re-pushed ${expectedTotal} pictures after ${strictGalleryVerification ? "exact-gallery" : "count-mismatch"} verify`);
-          } catch (e: any) {
-            console.error(`[push-photos] Retry PUT #${attempt + 1} failed: ${e.message}`);
-          }
-          if (!strictGalleryVerification) verifiedTotal = savedLen;
-        } catch (e: any) {
-          console.error(`[push-photos] Verify #${attempt + 1} GET failed: ${e.message}`);
-          // Don't break — a transient GET failure shouldn't abort the loop
-        }
-      }
+        },
+      });
+    } catch (e: any) {
+      const galleryError = `Guesty gallery replacement failed: ${e?.message ?? e}`;
+      console.error(`[push-photos] ✗ ${galleryError}`);
+      recordGuestyPush(guestyListingId, "photos", "error", galleryError, operationId);
+      emit({
+        type: "done",
+        operationId,
+        successCount: 0,
+        hostedCount: collected.length,
+        verifiedCount: 0,
+        shortfall: collected.length,
+        upscaledCount,
+        total: photos.length,
+        trimmed: trimmedCount,
+        maxPhotos: MAX_GUESTY_PHOTOS,
+        collagePinned: pinnedCount > 0,
+        expectedTotal: replacementPictures.length,
+        guestyTotal: null,
+        replacementConfirmed: false,
+        staleExtra: 0,
+        previousTotal: previousGuestyTotal,
+        removedCount: null,
+        guestyError: galleryError,
+      });
+      res.end();
+      return;
     }
 
-    // Never report more photos "verified" than were actually pushed — a stale
-    // over-count read is an UNCONFIRMED replacement, not a bigger success.
-    const verifiedCount = Math.max(0, Math.min(verifiedTotal - pinnedCount, collected.length));
-    const shortfall = collected.length - verifiedCount;
+    const successCount = collected.length;
+    const expectedTotal = verification.expectedTotal;
+    const lastObservedTotal = verification.observedTotal;
+    const replacementConfirmed = verification.confirmed;
+    const verifiedCount = replacementConfirmed ? successCount : 0;
+    const shortfall = lastObservedTotal != null && lastObservedTotal < expectedTotal
+      ? Math.min(successCount, expectedTotal - lastObservedTotal)
+      : replacementConfirmed ? 0 : successCount;
     const staleExtra = lastObservedTotal != null ? Math.max(0, lastObservedTotal - expectedTotal) : 0;
-    const strictGalleryError = strictGalleryVerification && !strictGalleryVerified
-      ? "Strict audit could not verify the exact ordered Guesty gallery with Cover Collage pinned first."
-      : null;
+    const strictGalleryVerified = strictGalleryVerification ? replacementConfirmed : undefined;
+    const galleryError = replacementConfirmed
+      ? null
+      : `Guesty did not confirm the exact ordered ${expectedTotal}-photo replacement gallery after ${verification.readAttempts} reads${lastObservedTotal == null ? "; the final gallery could not be read" : `; the last read reported ${lastObservedTotal} photos`}${verification.lastReadError ? ` (${verification.lastReadError})` : ""}${verification.lastReplaceError ? `; the last corrective write failed (${verification.lastReplaceError})` : ""}.`;
     // The replacement receipt: only a CONFIRMED read-back may claim "now live
     // in Guesty" (a stale read is not the live gallery). removedCount is the
     // delta vs the pre-push gallery — e.g. 40 before, 33 pushed → 7 removed.
@@ -26506,11 +26690,13 @@ Requirements:
     recordGuestyPush(
       guestyListingId,
       "photos",
-      successCount > 0 && !strictGalleryError ? "success" : "error",
-      strictGalleryError ?? (successCount > 0 ? summarizePhotosPush(successCount, verifiedCount, summaryConfirm) : "No photos pushed to Guesty"),
+      replacementConfirmed ? "success" : "error",
+      galleryError ?? summarizePhotosPush(successCount, verifiedCount, summaryConfirm),
+      operationId,
     );
     emit({
       type: "done",
+      operationId,
       successCount,
       verifiedCount,
       shortfall: shortfall > 0 ? shortfall : 0,
@@ -26534,10 +26720,38 @@ Requirements:
       previousTotal: previousGuestyTotal,
       removedCount,
       ...(strictGalleryVerification ? { strictGalleryVerified } : {}),
-      ...(strictGalleryError ? { guestyError: strictGalleryError } : {}),
+      ...(galleryError ? { guestyError: galleryError } : {}),
     });
-    console.log(`[push-photos] Done: ${successCount}/${photos.length} pushed, verified ${verifiedCount} on Guesty${shortfall > 0 ? ` (shortfall ${shortfall} — Guesty silently dropped them)` : ""}${staleExtra > 0 ? ` (Guesty still reports ${lastObservedTotal} pictures — ${staleExtra} stale extras, replacement unconfirmed)` : ""}, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
+    console.log(`[push-photos] Done: ${successCount}/${photos.length} hosted, exact replacement ${replacementConfirmed ? "confirmed" : "NOT confirmed"}${lastObservedTotal != null ? ` (${lastObservedTotal} on Guesty)` : ""}${shortfall > 0 ? ` (shortfall ${shortfall})` : ""}${staleExtra > 0 ? ` (${staleExtra} stale extras)` : ""}, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
     res.end();
+    } finally {
+      releasePictureMutation();
+    }
+  });
+
+  // Authoritative live Guesty count for the Photos tab. Never falls back to a
+  // browser receipt: a failed or malformed Guesty read is an explicit error,
+  // not a fabricated zero/last-push count.
+  app.get("/api/builder/guesty-photo-gallery-status", async (req: Request, res: Response) => {
+    const listingId = String((req.query as Record<string, unknown>).listingId ?? "").trim();
+    if (!listingId) return res.status(400).json({ error: "listingId required" });
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+
+    try {
+      const pictures = (await readGuestyPicturesForVerification(listingId)) as Array<Record<string, unknown>>;
+      const collage = pictures.find((picture) => String(picture?.caption ?? "") === "Cover Collage");
+      const collageUrl = String(collage?.original ?? collage?.url ?? "").trim() || null;
+      return res.json({
+        listingId,
+        count: pictures.length,
+        collageUrl,
+        checkedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      return res.status(502).json({
+        error: `Guesty gallery read failed: ${err?.message ?? err}`,
+      });
+    }
   });
 
   // ── Guesty push history — per-tab "last pushed" ledger ─────────────────────
@@ -32843,7 +33057,7 @@ Return ONLY compact JSON with this exact shape:
     }
   });
 
-  app.post("/api/builder/normalize-photos", async (req, res) => {
+  app.post("/api/builder/normalize-photos", guestyPhotoMutationRateLimit, async (req, res) => {
     const imgbbKey = process.env.IMGBB_API_KEY;
     if (!imgbbKey) {
       return res.status(500).json({ error: "IMGBB_API_KEY not configured" });
@@ -32878,6 +33092,8 @@ Return ONLY compact JSON with this exact shape:
 
     for (const target of targets) {
       const listingId = target.guestyListingId;
+      const releasePictureMutation = await acquireGuestyPictureMutation(listingId);
+      try {
       let listingName = listingId;
       let pictures: Array<{ original?: string; _id?: string; caption?: string; url?: string }> = [];
 
@@ -33000,10 +33216,27 @@ Return ONLY compact JSON with this exact shape:
       // PUT back only if we actually changed something
       if (fixedCount > 0) {
         try {
-          await guestyRequest("PUT", `/listings/${listingId}`, { pictures: normalized });
+          const currentPictures = await readGuestyPicturesForVerification(listingId);
+          if (!guestyPicturesExactlyMatch(currentPictures, pictures)) {
+            throw new Error(
+              "Guesty's gallery changed while normalization was running; no normalized gallery was written. Run normalization again against the current gallery.",
+            );
+          }
+          const verification = await replaceGuestyPicturesAndVerify({
+            pictures: normalized,
+            replace: (nextPictures) => guestyRequest("PUT", `/listings/${listingId}`, { pictures: nextPictures }),
+            read: () => readGuestyPicturesForVerification(listingId),
+          });
+          if (!verification.confirmed) {
+            throw new Error(
+              verification.observedTotal == null
+                ? "Guesty did not return a readable final pictures[] gallery"
+                : `Guesty returned ${verification.observedTotal}/${verification.expectedTotal} photos or different photo identities`,
+            );
+          }
           console.log(`[normalize-photos] ✓ ${listingName}: ${fixedCount} fixed, ${skippedCount} ok`);
         } catch (e: any) {
-          emit({ type: "listing-error", id: listingId, name: listingName, error: `PUT failed: ${e.message}` });
+          emit({ type: "listing-error", id: listingId, name: listingName, error: `Verified replacement failed: ${e.message}` });
           globalFailed++;
           continue;
         }
@@ -33019,6 +33252,9 @@ Return ONLY compact JSON with this exact shape:
         skippedCount,
         totalCount: pictures.length,
       });
+      } finally {
+        releasePictureMutation();
+      }
     }
 
     emit({

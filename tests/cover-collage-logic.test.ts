@@ -295,8 +295,9 @@ assert.ok(
 );
 assert.ok(
   routes.includes("await pushCoverCollageToGuesty(") &&
+  routes.includes("replaceGuestyPicturesAndVerify({") &&
   routes.includes('app.post("/api/builder/upload-collage"'),
-  "both collage endpoints share ONE ImgBB + Guesty-pin tail (no drift between manual and AI paths)",
+  "collage writes use the shared exact Guesty-gallery verification contract",
 );
 assert.ok(
   routes.includes('const withoutOldCollage = existing.filter(p => p.caption !== "Cover Collage")'),
@@ -319,7 +320,7 @@ assert.ok(
   "auto endpoint accepts a propertyId without requiring a Guesty listingId",
 );
 assert.ok(
-  autoRoute.includes("const auditRequest = propertyId != null") &&
+  autoRoute.includes("const auditRequest = propertyId != null && !authoritativeSystemSync") &&
   autoRoute.includes("if (!auditRequest && !process.env.IMGBB_API_KEY)") &&
   autoRoute.includes("requireVision: requireVision === true"),
   "property-scoped audit generation does not require ImgBB and forwards the strict-Claude flag",
@@ -332,16 +333,17 @@ assert.ok(
   "property-scoped JPEG and property:<id> receipt are durably saved",
 );
 assert.ok(
-  autoRoute.indexOf("await fs.promises.writeFile(path.join(dir, file), collage.buffer)") < autoRoute.indexOf("if (listingId) {") &&
+  autoRoute.indexOf("await fs.promises.writeFile(path.join(dir, file), collage.buffer)") < autoRoute.indexOf("let pushed: CoverCollagePushResult") &&
   autoRoute.includes("if (auditRequest && (!savedPath || !savedRecord))") &&
   autoRoute.includes('reason: "No Guesty listing mapped"'),
   "local persistence happens before optional Guesty sync and is sufficient when no listing is mapped",
 );
 assert.ok(
-  autoRoute.includes("if (listingId) {") &&
+  autoRoute.includes("if (listingId && authoritativeSystemSync && propertyId != null)") &&
+  autoRoute.includes("repushGuestyPhotosForProperty(propertyId") &&
   autoRoute.includes("pushed = await pushCoverCollageToGuesty(") &&
   autoRoute.includes("guestySynced: pushed?.ok === true"),
-  "mapped listings still receive the collage and the receipt records Guesty sync status",
+  "Photos-tab collages repush the full curated system gallery; audit/manual paths remain explicit",
 );
 assert.ok(
   routes.includes("f !== COVER_COLLAGE_DISK_FOLDER && (!onlyFolder || f === onlyFolder)"),
@@ -376,8 +378,10 @@ assert.ok(
   "builder calls the auto endpoint",
 );
 assert.ok(
-  builderUi.includes("existingPhotos: lastPushedPictures.length > 0 ? lastPushedPictures : undefined"),
-  "race-free pictures list forwarded (same contract as the manual upload-collage call)",
+  builderUi.includes("propertyId,") &&
+  builderUi.includes("syncGalleryFromSystem: propertyId != null") &&
+  !builderUi.includes("existingPhotos: lastPushedPictures"),
+  "Photos-tab collage requests synchronize the full curated system gallery instead of reusing Guesty's stale gallery",
 );
 assert.ok(
   !builderUi.includes("requireVision:"),

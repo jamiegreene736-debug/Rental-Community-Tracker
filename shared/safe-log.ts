@@ -21,13 +21,15 @@ const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const PHONE_RE = /\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b/g;
 const LOCAL_USER_PATH_RE = /\/Users\/[^/\s]+/g;
 const LONG_VALUE_RE = /\b(?=[A-Za-z0-9._~+/=-]{32,}\b)(?=[A-Za-z0-9._~+/=-]*[A-Za-z])(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]+\b/g;
+const TRAILING_URL_PUNCTUATION = new Set([")", "]", ".", ",", ";", ":", "!", "?"]);
 
 function trimTrailingUrlPunctuation(raw: string): { core: string; trailing: string } {
-  const match = raw.match(/[)\].,;:!?]+$/);
-  if (!match) return { core: raw, trailing: "" };
+  let end = raw.length;
+  while (end > 0 && TRAILING_URL_PUNCTUATION.has(raw[end - 1])) end--;
+  if (end === raw.length) return { core: raw, trailing: "" };
   return {
-    core: raw.slice(0, -match[0].length),
-    trailing: match[0],
+    core: raw.slice(0, end),
+    trailing: raw.slice(end),
   };
 }
 

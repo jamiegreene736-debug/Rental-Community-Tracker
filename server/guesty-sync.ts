@@ -12,6 +12,7 @@ import {
   parseRetryAfterMs,
   shouldRetryGuesty429,
 } from "@shared/guesty-retry";
+import { buildGuestyApiUrl } from "@shared/guesty-endpoint";
 
 let guestyRequestGate: Promise<void> = Promise.resolve();
 let nextGuestyRequestAt = 0;
@@ -39,11 +40,12 @@ export async function guestyRequest(method: string, endpoint: string, body?: unk
   // through the gate (which now waits out the pause) is safe for EVERY
   // method. Bounded by GUESTY_429_RETRIES (default 2 extra attempts).
   const maxAttempts = guesty429MaxAttempts(process.env.GUESTY_429_RETRIES);
+  const requestUrl = buildGuestyApiUrl(endpoint);
   let res!: Response;
   for (let attempt = 1; ; attempt++) {
     const token = await getGuestyToken();
     await waitForGuestyRequestSlot();
-    res = await fetch(`https://open-api.guesty.com/v1${endpoint}`, {
+    res = await fetch(requestUrl, {
       method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
       body: body ? JSON.stringify(body) : undefined,
