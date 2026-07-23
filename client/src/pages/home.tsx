@@ -8,6 +8,8 @@ import { navigate as navigateInApp } from "wouter/use-browser-location";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { RevenueProjectionBand } from "@/components/revenue-projection-band";
+import type { RevenueProjectionResponse } from "@shared/revenue-projection-types";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -2225,6 +2227,16 @@ function AdminDashboard() {
     refetchOnWindowFocus: false,
   });
 
+  // Forward 12-month projection + trailing run-rate (server/revenue-projection-
+  // aggregate.ts, refreshed daily). Drives the new "Next 12 months" band and the
+  // T90 run-rate lines that replaced the old naive 3-day-average forecast.
+  const { data: revenueProjection, isLoading: revenueProjectionLoading } = useQuery<RevenueProjectionResponse>({
+    queryKey: ["/api/dashboard/revenue-projection"],
+    staleTime: 30 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const projTrailing = revenueProjection?.ready ? revenueProjection.trailing : null;
+
   // Failed / uncollected guest payments (14-day retroactive window; cancelled
   // bookings excluded server-side). Drives the auto-opening red warning popup +
   // persistent banner — same pattern as the duplicate-photos warning.
@@ -4198,6 +4210,11 @@ function AdminDashboard() {
           </Link>
         </div>
 
+        {/* Forward-looking hero: the 12-month projection (revenue · collections ·
+            net profit + monthly chart). The 30-day activity cards below are now
+            the "recent activity" tier. */}
+        <RevenueProjectionBand data={revenueProjection} isLoading={revenueProjectionLoading} />
+
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 mb-6">
           <Card className="p-4">
             <div className="flex items-start gap-2 mb-1 min-h-8">
@@ -4304,9 +4321,9 @@ function AdminDashboard() {
                   Past 5 days: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.fundsCollected5Days ?? 0)}
                   {revenueSummary ? ` · ${revenueSummary.paymentsTaken5Days ?? 0} payment${(revenueSummary.paymentsTaken5Days ?? 0) === 1 ? "" : "s"}` : ""}
                 </p>
-                <p className="mt-1 text-xs font-medium leading-snug text-foreground">
-                  12-mo forecast: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.fundsCollectedAnnualProjection ?? 0)}
-                  <span className="font-normal text-muted-foreground"> · 3-day avg {formatCurrency(Math.round(revenueSummary?.fundsCollectedDailyAvg3Days ?? 0))}/day</span>
+                <p className="mt-1 text-xs font-medium leading-snug text-foreground" data-testid="text-funds-run-rate">
+                  90-day run rate: {projTrailing ? `${formatCurrency(projTrailing.collectedRunRateAnnual)}/yr` : "—"}
+                  <span className="font-normal text-muted-foreground"> · 12-mo projection above</span>
                 </p>
                 <p className="mt-1 text-xs font-medium leading-snug text-foreground" data-testid="text-next-deposit">
                   Next deposit:{" "}
@@ -4672,8 +4689,8 @@ function AdminDashboard() {
                   {revenueSummary ? ` · ${revenueSummary.bookingCount5Days ?? 0} booking${(revenueSummary.bookingCount5Days ?? 0) === 1 ? "" : "s"}` : ""}
                 </p>
                 <p className="mt-1 text-xs font-medium leading-snug text-foreground" data-testid="text-booking-revenue-forecast">
-                  12-mo forecast: {revenueSummaryLoading ? "..." : formatCurrency(revenueSummary?.revenueAnnualProjection ?? 0)}
-                  <span className="font-normal text-muted-foreground"> · 3-day avg {formatCurrency(Math.round(revenueSummary?.revenueDailyAvg3Days ?? 0))}/day</span>
+                  90-day run rate: {projTrailing ? `${formatCurrency(projTrailing.revenueRunRateAnnual)}/yr` : "—"}
+                  <span className="font-normal text-muted-foreground"> · 12-mo projection above</span>
                 </p>
               </button>
             </DialogTrigger>
@@ -4704,9 +4721,9 @@ function AdminDashboard() {
                     <p className="text-xs text-muted-foreground">{revenueSummary?.bookingCount5Days ?? 0} booking{(revenueSummary?.bookingCount5Days ?? 0) === 1 ? "" : "s"}</p>
                   </div>
                   <div className="rounded-md border bg-muted/30 p-3">
-                    <p className="text-xs font-medium text-muted-foreground">12-mo forecast</p>
-                    <p className="mt-1 text-lg font-semibold">{formatCurrency(revenueSummary?.revenueAnnualProjection ?? 0)}</p>
-                    <p className="text-xs text-muted-foreground">3-day avg {formatCurrency(Math.round(revenueSummary?.revenueDailyAvg3Days ?? 0))}/day</p>
+                    <p className="text-xs font-medium text-muted-foreground">90-day run rate</p>
+                    <p className="mt-1 text-lg font-semibold">{projTrailing ? formatCurrency(projTrailing.revenueRunRateAnnual) : "—"}</p>
+                    <p className="text-xs text-muted-foreground">annualized · see 12-mo projection at top</p>
                   </div>
                   <div className="rounded-md border bg-muted/30 p-3">
                     <p className="text-xs font-medium text-muted-foreground">Revenue basis</p>

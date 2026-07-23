@@ -246,6 +246,7 @@ import { getGuestComplaintScannerStatus, setGuestComplaintScannerEnabled, runGue
 import { fetchSearchApiWithFallback, getSearchApiKey, isSearchApiQuotaError } from "./searchapi";
 import { getBookingConfirmationStatus, setBookingConfirmationEnabled, runBookingConfirmations, resendBookingConfirmation } from "./booking-confirmations";
 import { runPropertyRevenueRefresh, getPropertyRevenueStatus } from "./property-revenue-scheduler";
+import { runRevenueProjectionRefresh, getRevenueProjectionStatus } from "./revenue-projection-scheduler";
 import { runMarketRateScan, getMarketRateScanStatus } from "./market-rate-scheduler";
 import { validateAndFixPhoto, TARGET_WIDTH as PUSH_PHOTO_TARGET_WIDTH } from "./photo-validator";
 import { esrganScaleForPhoto } from "@shared/photo-upscale-plan";
@@ -23216,6 +23217,40 @@ Requirements:
 
   app.get("/api/admin/property-revenue-status", async (_req, res) => {
     res.json(getPropertyRevenueStatus());
+  });
+
+  // Dashboard 12-month revenue projection + trailing run-rate (the new revenue
+  // KPI band). Serves the single cached snapshot the revenue-projection
+  // scheduler computes daily (server/revenue-projection-aggregate.ts). Fails
+  // soft to { ready:false } until the first scheduler run populates the row so
+  // the dashboard renders (with a "computing…" state) on a fresh deploy.
+  app.get("/api/dashboard/revenue-projection", async (_req, res) => {
+    try {
+      const row = await storage.getRevenueProjection();
+      if (!row?.payload) {
+        return res.json({ ready: false, computedAt: null });
+      }
+      const payload = (typeof row.payload === "object" && row.payload) || {};
+      res.json({ ...(payload as Record<string, unknown>), computedAt: row.computedAt ? new Date(row.computedAt).toISOString() : null });
+    } catch (e: any) {
+      console.warn("[revenue-projection] serve failed (table may not exist yet):", e?.message ?? e);
+      res.json({ ready: false, computedAt: null });
+    }
+  });
+
+  // Manual trigger for the daily projection refresh (deploy smoke + on-demand
+  // recompute). Admin-gated like other /api/admin/* routes; loopback bypasses.
+  app.post("/api/admin/refresh-revenue-projection", async (_req, res) => {
+    try {
+      const result = await runRevenueProjectionRefresh();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
+  app.get("/api/admin/revenue-projection-status", async (_req, res) => {
+    res.json(getRevenueProjectionStatus());
   });
 
   // Per-property "Last Price Scan" for the dashboard column: the timestamp the

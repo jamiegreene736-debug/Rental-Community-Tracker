@@ -16,6 +16,7 @@ import { startBookingConfirmationScheduler } from "./booking-confirmations";
 import { startGuestReceiptScheduler } from "./guest-receipts";
 import { startGuestComplaintScanner } from "./guest-complaint-scanner";
 import { startPropertyRevenueScheduler } from "./property-revenue-scheduler";
+import { startRevenueProjectionScheduler } from "./revenue-projection-scheduler";
 import { startMarketRateScheduler } from "./market-rate-scheduler";
 import { startGuestInboxSyncScheduler } from "./guest-inbox-sync";
 import { startBuyInVendorEmailSyncScheduler } from "./buy-in-email-sync";
@@ -244,6 +245,7 @@ app.get("/api/auth/session", (_req, res) => {
       startGuestInboxSyncScheduler();
       startBuyInVendorEmailSyncScheduler();
       startPropertyRevenueScheduler();
+      startRevenueProjectionScheduler();
       startMarketRateScheduler();
       // Prime the Operations Property dropdown + global-summary listing set so
       // the operator's first page load reads from memory instead of paying for
