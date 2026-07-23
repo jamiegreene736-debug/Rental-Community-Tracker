@@ -93,6 +93,16 @@ import {
     assert.equal(image?.buffer.length, payload.length);
     assert.ok(seenAgents.every((agent) => !/VacationRentalBot|NexStay/i.test(agent)));
 
+    // A hostname (unlike a literal 127.0.0.1 URL) exercises the pinned custom
+    // DNS callback. Node 22 otherwise requests `all: true` and rejects the
+    // legacy scalar callback shape before opening the socket.
+    const hostnameImage = await fetchRemoteImage(`http://localhost:${address.port}/photo.jpg`, {
+      minBytes: 1,
+      timeoutMs: 2_000,
+      allowPrivateNetworkForTests: true,
+    });
+    assert.equal(hostnameImage?.buffer.length, payload.length);
+
     const oversized = await fetchRemoteImage(`http://127.0.0.1:${address.port}/chunked.jpg`, {
       maxBytes: payload.length * 2,
       timeoutMs: 2_000,
@@ -295,10 +305,12 @@ import {
     "community-photo saves must be bounded, serialized, and atomic",
   );
   assert.ok(
-    remoteFetch.includes("lookup: (_lookupHostname, _lookupOptions, callback)")
+    remoteFetch.includes("lookup: (_lookupHostname, lookupOptions, callback)")
+      && remoteFetch.includes("if (lookupOptions.all)")
+      && remoteFetch.includes("callback(null, [target])")
       && remoteFetch.includes("callback(null, target.address, target.family)")
       && !remoteFetch.includes("fetch(current"),
-    "the outbound connection must use the already-validated DNS address",
+    "the outbound connection must use the already-validated DNS address in both Node lookup callback shapes",
   );
   assert.ok(
     storage.includes("planPhotoLabelMerge(destinationRows, stagedFilenames, liveFilenames)")

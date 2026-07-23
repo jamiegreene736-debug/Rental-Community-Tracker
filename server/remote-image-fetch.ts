@@ -161,7 +161,16 @@ function requestPinnedRemote(
         ...(headers ?? {}),
         Host: url.host,
       },
-      lookup: (_lookupHostname, _lookupOptions, callback) => {
+      lookup: (_lookupHostname, lookupOptions, callback) => {
+        // Node 20+ enables automatic family selection by default and asks
+        // custom lookup functions for `all: true`. Returning the legacy
+        // scalar callback shape in that mode fails before the request leaves
+        // the process with ERR_INVALID_IP_ADDRESS. Return the exact same
+        // prevalidated address in whichever callback shape Node requested.
+        if (lookupOptions.all) {
+          callback(null, [target]);
+          return;
+        }
         callback(null, target.address, target.family);
       },
       ...(url.protocol === "https:" && !net.isIP(hostname)
