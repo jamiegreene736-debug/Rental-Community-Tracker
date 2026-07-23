@@ -89,6 +89,87 @@ check("photos with no label row at all fall back to the filename caption", (() =
   return photos[0]?.caption === "Lanai View";
 })());
 
+check("effective user bedroom caption gets the natural unit suffix", (() => {
+  const photos = assembleGuestyPushPhotos([
+    {
+      folder: "unit-a",
+      scope: "unit",
+      unitId: "a",
+      unitLabel: "Unit A (3BR)",
+      files: ["bedroom.jpg"],
+      labels: [{
+        filename: "bedroom.jpg",
+        label: "Master Bedroom",
+        userLabel: "Ocean-View Sleeping Retreat",
+        category: "Bedrooms",
+      }],
+    },
+    {
+      folder: "unit-b",
+      scope: "unit",
+      unitId: "b",
+      unitLabel: "Unit B (2BR)",
+      files: [],
+    },
+  ], { unitDividers: false });
+  return photos[0]?.caption === "Ocean-View Sleeping Retreat (Unit A)";
+})());
+
+check("static room categories suffix captions that the narrow text fallback cannot recognize", (() => {
+  const photos = assembleGuestyPushPhotos([
+    {
+      folder: "unit-a",
+      scope: "unit",
+      unitId: "a",
+      unitLabel: "Unit A (2BR)",
+      files: ["master-suite.jpg", "hall-bathroom.jpg"],
+      staticLabels: {
+        "master-suite.jpg": "Master Suite",
+        "hall-bathroom.jpg": "Hall Bathroom",
+      },
+      staticCategories: {
+        "master-suite.jpg": "Bedrooms",
+        "hall-bathroom.jpg": "Bathrooms",
+      },
+    },
+    {
+      folder: "unit-b",
+      scope: "unit",
+      unitId: "b",
+      unitLabel: "Unit B (2BR)",
+      files: [],
+    },
+  ], { unitDividers: false });
+  return photos.some((photo) => photo.caption === "Master Suite (Unit A)")
+    && photos.some((photo) => photo.caption === "Hall Bathroom (Unit A)");
+})());
+
+check("an explicit DB category overrides a stale static room category", (() => {
+  const photos = assembleGuestyPushPhotos([
+    {
+      folder: "unit-a",
+      scope: "unit",
+      unitId: "a",
+      unitLabel: "Unit A (2BR)",
+      files: ["suite-sitting-area.jpg"],
+      labels: [{
+        filename: "suite-sitting-area.jpg",
+        label: "Suite Sitting Area",
+        category: "Living Areas",
+      }],
+      staticCategories: { "suite-sitting-area.jpg": "Bedrooms" },
+    },
+    {
+      folder: "unit-b",
+      scope: "unit",
+      unitId: "b",
+      unitLabel: "Unit B (2BR)",
+      files: [],
+    },
+  ], { unitDividers: false });
+  return photos[0]?.caption === "Suite Sitting Area";
+})());
+
 check("identical files from a shared folder are emitted only once", (() => {
   const photos = assembleGuestyPushPhotos([unitGallery, unitGallery]);
   return photos.filter((p) => p.localPath.includes("01-bedroom.jpg")).length === 1;
@@ -99,17 +180,25 @@ check("shared folders preserve distinct per-unit staged candidates", (() => {
     {
       folder: "shared-unit-gallery",
       scope: "unit",
+      unitId: "a",
+      unitLabel: "Unit A (2BR)",
       files: ["virtual-staged-unit-a.jpg", "02-kitchen.jpg"],
+      labels: [{ filename: "virtual-staged-unit-a.jpg", label: "Master Bedroom", category: "Bedrooms" }],
     },
     {
       folder: "shared-unit-gallery",
       scope: "unit",
+      unitId: "b",
+      unitLabel: "Unit B (2BR)",
       files: ["virtual-staged-unit-b.jpg", "02-kitchen.jpg"],
+      labels: [{ filename: "virtual-staged-unit-b.jpg", label: "Primary Bathroom", category: "Bathrooms" }],
     },
-  ]);
+  ], { unitDividers: false });
   return photos.filter((p) => p.localPath.endsWith("/02-kitchen.jpg")).length === 1
-    && photos.some((p) => p.localPath.endsWith("/virtual-staged-unit-a.jpg"))
-    && photos.some((p) => p.localPath.endsWith("/virtual-staged-unit-b.jpg"));
+    && photos.some((p) =>
+      p.localPath.endsWith("/virtual-staged-unit-a.jpg") && p.caption === "Master Bedroom (Unit A)")
+    && photos.some((p) =>
+      p.localPath.endsWith("/virtual-staged-unit-b.jpg") && p.caption === "Primary Bathroom (Unit B)");
 })());
 
 check("empty folders contribute nothing",

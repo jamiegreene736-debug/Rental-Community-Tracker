@@ -23,9 +23,16 @@ export type GuestyListingSummary = {
 export type GuestyPhoto = {
   url: string;
   caption?: string;
+  /** Effective labeler/static category used for contextual room captions. */
+  category?: string | null;
   source?: string;
   /** Logical builder unit identity; omitted for community/external photos. */
   unitId?: string;
+  /**
+   * Natural logical unit label used only to render the contextual bedroom /
+   * bathroom caption suffix in the Photos tab. It is not sent to Guesty.
+   */
+  roomUnitLabel?: string;
   /**
    * The community photo published BETWEEN two unit galleries so a guest can see
    * the listing is two separate units. It keeps the community `source` (it is a

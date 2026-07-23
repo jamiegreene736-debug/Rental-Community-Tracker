@@ -2349,6 +2349,26 @@ cover collage → <lead unit> → [community divider] → <next unit> → … �
     choice — a property with no saved row still gets one. `unitDividers: false`
     is the explicit per-property opt-out. Single-unit listings never get one.
 
+11. **Multi-unit bedroom and bathroom captions end in the NATURAL logical
+    identity — `(Unit A)`, `(Unit B)`, etc. (2026-07-23).** This is presentation
+    context applied by `captionWithUnitRoomSuffix` inside
+    `planGalleryLayout`, AFTER the AI relabel + within-gallery ordering. It is
+    deliberately NOT stored in `photo_labels`: those rows are keyed only by
+    `(folder, filename)`, while a physical folder can back Unit A and Unit B
+    inside one property or carry different A/B identities across properties
+    (`unit-114` is the concrete collision). Persisting the suffix would let one
+    relabel/edit silently miscaption another logical gallery. The effective
+    `Bedrooms` / `Bathrooms` category wins (DB override/AI category first,
+    original static unit category second); a narrow structured-caption fallback
+    covers rows with no category. Single-unit, community, divider, cover, and
+    non-room captions stay unchanged. Existing terminal unit suffixes are
+    corrected/idempotent, the complete suffix stays inside the 200-character
+    cap, and caption editing opens on the clean unsuffixed base so a free-form
+    rename cannot write presentation context back into the shared row.
+    `stripUnitRoomCaptionSuffix` also runs before reorder write-back. Both the client/manual push and every server
+    `assembleGuestyPushPhotos` path must carry effective category + the
+    natural-index `unitGalleryLabel`; display order never renames a room.
+
 ### Bedding-tab bedroom count is RECONCILED, never trusted (Load-Bearing, 2026-07-18)
 
 The Bedding tab's config lives in **one browser's `localStorage`**

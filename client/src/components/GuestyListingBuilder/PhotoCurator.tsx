@@ -20,7 +20,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RotateCcw, RotateCw, ChevronLeft, ChevronRight, GripVertical } from "lucide-react";
 import { bestOrderIndices, scopeForSource } from "@shared/photo-order";
-import { stripDividerCaptionSuffix } from "@shared/photo-gallery-layout";
+import {
+  captionWithUnitRoomSuffix,
+  stripDividerCaptionSuffix,
+  stripUnitRoomCaptionSuffix,
+} from "@shared/photo-gallery-layout";
 import { normalizePhotoVerdictKey, photoVerdictKeyFromUrl } from "@shared/photo-verdict-keys";
 import { virtualStagingSessionAction } from "@shared/virtual-staging";
 import { Button } from "@/components/ui/button";
@@ -35,7 +39,9 @@ export type { VirtualStagingUnit } from "./VirtualStagingDialog";
 type PhotoIn = {
   url: string;
   caption?: string;
+  category?: string | null;
   source?: string;
+  roomUnitLabel?: string;
   // Set on the community photo published between two unit galleries. It keeps
   // the community `source`; only the rendering below treats it specially.
   isUnitDivider?: boolean;
@@ -522,9 +528,12 @@ export default function PhotoCurator({
   // Caption to persist alongside the order. For a divider tile the rendered
   // caption carries the "— next: Unit B" tail; strip it so the suffix can never
   // be written into photo_labels as the photo's real label.
-  const tilePersistLabel = (p: Tile, isDivider: boolean): string =>
-    p.meta?.userLabel
-    || (isDivider ? stripDividerCaptionSuffix(p.caption) || p.meta?.label || "" : p.caption || p.meta?.label || "");
+  const tilePersistLabel = (p: Tile, isDivider: boolean): string => {
+    const category = p.meta?.userCategory ?? p.meta?.category ?? p.category;
+    const caption = p.meta?.userLabel
+      || (isDivider ? stripDividerCaptionSuffix(p.caption) || p.meta?.label || "" : p.caption || p.meta?.label || "");
+    return stripUnitRoomCaptionSuffix(caption, category);
+  };
 
   // Persist a new front-to-back order (by tile key) for one gallery and show
   // it immediately via the optimistic overlay.
@@ -581,8 +590,8 @@ export default function PhotoCurator({
   const tileSortText = (tile: Tile, labelMeta: Map<string, LabelMeta>): string => {
     const key = tile.folder && tile.filename ? `${tile.folder}/${tile.filename}` : null;
     const m = key ? labelMeta.get(key) ?? tile.meta : tile.meta;
-    const caption = m?.userLabel || tile.caption || m?.label || "";
-    const category = m?.category || "";
+    const caption = m?.userLabel || m?.label || tile.caption || "";
+    const category = m?.userCategory || m?.category || tile.category || "";
     return [caption, category, tile.filename].filter(Boolean).join(" ");
   };
 
@@ -605,11 +614,16 @@ export default function PhotoCurator({
   const relabelAndReorderSection = async (section: Section) => {
     const folder = sectionFolder(section);
     if (!folder || relabelingFolder) return;
+    const addsUnitRoomCaptions = section.photos.some((photo) => !!photo.roomUnitLabel);
     const confirmed = window.confirm(
       `Re-label and reorder all ${section.photos.length} photo(s) in this gallery with Claude vision?\n\n`
       + "Claude looks at each photo, re-captions it (merging duplicate bedroom views, e.g. "
       + "Bedroom 6 → Master Bedroom — Alt View), then puts the gallery in the best presentation "
-      + "order (hero shots first, then each bedroom followed by its ensuite bathroom, outdoor grill last).\n\n"
+      + "order (hero shots first, then each bedroom followed by its ensuite bathroom, outdoor grill last)."
+      + (addsUnitRoomCaptions
+        ? "\n\nBedroom and bathroom captions will end with this gallery's logical unit name, such as (Unit A) or (Unit B)."
+        : "")
+      + "\n\n"
       + "Your manual caption edits and the current drag order in this gallery will be replaced.",
     );
     if (!confirmed) return;
@@ -1384,7 +1398,9 @@ export default function PhotoCurator({
                     type="button"
                     onClick={() => relabelAndReorderSection(section)}
                     disabled={!!relabelingFolder}
-                    title="Claude vision looks at every photo, re-captions each one, then reorders the gallery best-first (hero shots → bedrooms → bathrooms → …)"
+                    title={section.photos.some((photo) => !!photo.roomUnitLabel)
+                      ? "Claude vision re-captions every photo, adds Unit A/B to bedroom and bathroom captions, then reorders the gallery best-first"
+                      : "Claude vision re-captions every photo, then reorders the gallery best-first"}
                     style={{
                       fontSize: 11,
                       color: relabelingFolder === firstFolder ? "#5b21b6" : "#6d28d9",
@@ -1435,7 +1451,9 @@ export default function PhotoCurator({
                   onMoveRight={() => moveWithinSection(section, tileIdx, tileIdx + 1)}
                   onEditCaption={(caption) => {
                     if (!tile.folder || !tile.filename) return;
-                    patchLabel(tile.folder, tile.filename, { userLabel: caption.trim() || null });
+                    const category = tile.meta?.userCategory ?? tile.meta?.category ?? tile.category;
+                    const storedCaption = stripUnitRoomCaptionSuffix(caption, category);
+                    patchLabel(tile.folder, tile.filename, { userLabel: storedCaption || null });
                   }}
                   onDelete={() => {
                     if (!tile.folder || !tile.filename) return;
@@ -1487,6 +1505,8 @@ function PhotoTile({
     key: string;
     url: string;
     caption?: string;
+    category?: string | null;
+    roomUnitLabel?: string;
     folder: string | null;
     filename: string | null;
     meta: LabelMeta | null;
@@ -1511,13 +1531,24 @@ function PhotoTile({
   onMoveLeft?: () => void;
   onMoveRight?: () => void;
 }) {
-  // Effective caption — user override wins, else labeler output, else
-  // whatever the parent passed in (static label fallback), else blank.
-  const effectiveCaption = tile.meta?.userLabel ?? tile.meta?.label ?? tile.caption ?? "";
+  // Effective caption — user override wins, else labeler output, else the
+  // parent's static fallback. The logical unit suffix is projected here too so
+  // freshly loaded folder metadata cannot hide the guest-facing Unit A/B text.
+  const effectiveCategory = tile.meta?.userCategory ?? tile.meta?.category ?? tile.category;
+  const effectiveCaption = captionWithUnitRoomSuffix(
+    tile.meta?.userLabel ?? tile.meta?.label ?? tile.caption ?? "",
+    tile.roomUnitLabel,
+    effectiveCategory,
+  );
+  // Generated presentation context should not be part of an operator's raw
+  // edit. Starting from the clean base also prevents a category-less room that
+  // is renamed to free-form copy from persisting "(Unit A)" into a shared
+  // folder row.
+  const editableCaption = stripUnitRoomCaptionSuffix(effectiveCaption, effectiveCategory);
 
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(effectiveCaption);
-  useEffect(() => { setDraft(effectiveCaption); }, [effectiveCaption]);
+  const [draft, setDraft] = useState(editableCaption);
+  useEffect(() => { setDraft(editableCaption); }, [editableCaption]);
 
   const hidden = !!tile.meta?.hidden;
   const cannotEdit = !tile.folder;
@@ -1594,11 +1625,11 @@ function PhotoTile({
             onChange={(e) => setDraft(e.target.value)}
             onBlur={() => {
               setEditing(false);
-              if (draft.trim() !== (effectiveCaption || "")) onEditCaption(draft);
+              if (draft.trim() !== editableCaption) onEditCaption(draft);
             }}
             onKeyDown={(e) => {
               if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-              if (e.key === "Escape") { setDraft(effectiveCaption); setEditing(false); }
+              if (e.key === "Escape") { setDraft(editableCaption); setEditing(false); }
             }}
             style={{
               fontSize: 11, padding: "4px 6px",
@@ -1608,7 +1639,11 @@ function PhotoTile({
           />
         ) : (
           <div
-            onClick={() => !cannotEdit && setEditing(true)}
+            onClick={() => {
+              if (cannotEdit) return;
+              setDraft(editableCaption);
+              setEditing(true);
+            }}
             title={cannotEdit ? "External photo — not editable" : "Click to edit caption"}
             style={{
               fontWeight: 500, color: "#111827",
