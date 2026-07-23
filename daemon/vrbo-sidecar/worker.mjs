@@ -8541,17 +8541,44 @@ async function processListingGalleryScrape(id, params) {
   // Best-effort: open the full photo gallery so lazy-loaded images render.
   // Generic across portals; when no matching control exists we just harvest
   // whatever already rendered.
-  await page
-    .click(
-      'button:has-text("See all photos"), button:has-text("View all photos"), ' +
-      'button:has-text("Show all photos"), button:has-text("See photos"), ' +
-      'button:has-text("View photos"), button:has-text("All photos"), ' +
-      'a:has-text("See all photos"), [data-rf-test-name="photoPreview"], ' +
-      'button:has-text("Photos")',
-      { timeout: 2500 },
-    )
-    .catch(() => {});
+  let openedFullGallery = false;
+  const fullGalleryName = /^(?:see|view|show)\s+all(?:\s+\d+)?\s+photos\b/i;
+  for (const role of ["button", "link"]) {
+    try {
+      const control = page.getByRole(role, { name: fullGalleryName }).first();
+      if (await control.count()) {
+        await control.click({ timeout: 2500 });
+        openedFullGallery = true;
+        break;
+      }
+    } catch {
+      // Fall through to the portal-specific selector below.
+    }
+  }
+  if (!openedFullGallery) {
+    openedFullGallery = await page
+      .click(
+        'button:has-text("See all photos"), button:has-text("View all photos"), ' +
+        'button:has-text("Show all photos"), button:has-text("See photos"), ' +
+        'button:has-text("View photos"), button:has-text("All photos"), ' +
+        'a:has-text("See all photos"), [data-rf-test-name="photoPreview"], ' +
+        'button:has-text("Photos")',
+        { timeout: 2500 },
+      )
+      .then(() => true)
+      .catch(() => false);
+  }
   await page.waitForTimeout(1200);
+  // Zillow can present its press-and-hold challenge only after the gallery
+  // control is clicked. Check unconditionally because Playwright may dispatch
+  // the click, then reject while the challenge navigation exceeds its timeout.
+  // On a normal listing page this assist is an immediate no-op.
+  const galleryWallAssist = await resolveListingBotWallManually(
+    id,
+    "listing_gallery_scrape",
+    url,
+  );
+  throwIfListingTerminalDenial(galleryWallAssist);
 
   // Scroll so lazy galleries hydrate (Redfin/Zillow defer thumbnails), then
   // return to the top.

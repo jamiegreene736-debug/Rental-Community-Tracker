@@ -245,6 +245,14 @@ assert.ok(
     galleryFn.includes("harvesting whatever rendered"),
     "the documented interactive-wall timeout fallback remains unchanged",
   );
+  assert.ok(
+    galleryFn.includes('all(?:\\s+\\d+)?\\s+photos'),
+    'numbered gallery controls such as "See all 14 photos" are matched',
+  );
+  assert.ok(
+    /await page\.waitForTimeout\(1200\);\s+\/\/ Zillow[\s\S]*?const galleryWallAssist = await resolveListingBotWallManually/.test(galleryFn),
+    "the post-click manual-solve check runs even when Playwright dispatches a click but times out during challenge navigation",
+  );
 }
 // The audible alert must fire for gallery labels too (gate was vrbo-only).
 assert.ok(
