@@ -120,9 +120,22 @@ check("null raw parses to an empty store", parseClaudeFindRunStore(null).runs.le
     serializeClaudeFindRunStore({ version: 1, runs: [oldTerminal, freshTerminal, activeOld] }, NOW),
   );
   check(
-    "7-day TTL evicts old terminal runs but NEVER an active run",
-    parsed.runs.map((r) => r.id).join(",") === "fresh,active-old",
+    "7-day TTL evicts old terminal runs but NEVER an active run (createdAt order)",
+    parsed.runs.map((r) => r.id).join(",") === "active-old,fresh",
     parsed.runs.map((r) => r.id),
+  );
+}
+{
+  // Deep-queue: ALL active runs survive serialization even far past the store
+  // cap — a bulk batch parks dozens in "queued" and none may be dropped.
+  const active = Array.from({ length: CLAUDE_FIND_RUN_STORE_CAP + 20 }, (_, i) =>
+    makeRun({ id: `q${i}`, reservationId: `res-${i}`, status: "queued" }),
+  );
+  const parsed = parseClaudeFindRunStore(serializeClaudeFindRunStore({ version: 1, runs: active }, NOW));
+  check(
+    "active runs are never capped (all 52+ queued survive)",
+    parsed.runs.length === CLAUDE_FIND_RUN_STORE_CAP + 20 && parsed.runs.every((r) => r.status === "queued"),
+    parsed.runs.length,
   );
 }
 {
@@ -257,14 +270,24 @@ check("null raw parses to an empty store", parseClaudeFindRunStore(null).runs.le
     "no activity context at all behaves exactly like the single-run original",
     claudeFindRunWatchdogVerdict(makeRun(), NOW + CLAUDE_FIND_RUN_CLAIM_TIMEOUT_MS + 1_000).action === "fail",
   );
-  const queueCeiling = claudeFindRunWatchdogVerdict(
+  check(
+    "a busy runner protects a queued run of ANY age (deep overnight line never expires)",
+    claudeFindRunWatchdogVerdict(
+      makeRun(),
+      NOW + CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS + 1_000,
+      { busy: true, lastActivityMs: NOW + CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS },
+    ).action === "none",
+  );
+  const wedged = claudeFindRunWatchdogVerdict(
     makeRun(),
     NOW + CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS + 1_000,
-    { busy: true, lastActivityMs: NOW + CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS },
+    // Runner NOT busy but showing recent activity (an inter-run gap) — yet this
+    // run waited far past the drain window: it is being passed over → backstop.
+    { busy: false, lastActivityMs: NOW + CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS },
   );
   check(
-    "queue ceiling closes a run even while the runner reads busy (a wedged line must not be immortal)",
-    queueCeiling.action === "fail" && /Waited in line/.test(queueCeiling.error ?? ""),
+    "final backstop closes a run passed over past the drain window (idle-but-active runner)",
+    wedged.action === "fail" && /past the drain window/.test(wedged.error ?? ""),
   );
   check(
     // A run that waited 3 hours in line must not be closed by the 90-min
@@ -280,8 +303,8 @@ check("null raw parses to an empty store", parseClaudeFindRunStore(null).runs.le
       ).action === "fail",
   );
   check(
-    "cap × per-run ceiling stays inside the queue ceiling (re-derive one when changing the other)",
-    CLAUDE_FIND_RUN_BULK_MAX * CLAUDE_FIND_RUN_MAX_AGE_MS <= CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS,
+    "deep-queue design: bulk cap covers a full portfolio and the backstop is generous",
+    CLAUDE_FIND_RUN_BULK_MAX >= 52 && CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS >= 24 * 60 * 60_000,
   );
 }
 
@@ -1246,6 +1269,28 @@ console.log("claude-find-run: checkout-run source wiring");
   check("an empty store yields an empty overview", claudeFindRunOverview([], now).active.length === 0
     && claudeFindRunOverview([], now).recent.length === 0);
 
+  // Cumulative batch progress: computed over the FULL view set, so a completed
+  // run OUTSIDE the recent-terminal window still counts toward its batch.
+  const batchOverview = claudeFindRunOverview(
+    [
+      view({ id: "ba", status: "queued", batchId: "B1" }),
+      view({ id: "bb", status: "running", batchId: "B1" }),
+      view({ id: "bd", status: "completed", endedAt: "2026-07-21T01:45:00.000Z", batchId: "B1" }),
+      view({ id: "bf", status: "completed", endedAt: "2026-07-20T20:00:00.000Z", batchId: "B1" }), // stale window, still in batch
+      view({ id: "solo", status: "completed", endedAt: "2026-07-21T01:50:00.000Z" }), // no batchId → excluded
+    ],
+    now,
+  );
+  check("batch rollup counts a completed run even outside the recent window", (() => {
+    const b = batchOverview.batches.find((x) => x.batchId === "B1");
+    return !!b && b.total === 4 && b.done === 2 && b.completed === 2 && b.queued === 1 && b.working === 1;
+  })());
+  check("batch rollup estimates an ETA from realized throughput while runs remain", (() => {
+    const b = batchOverview.batches.find((x) => x.batchId === "B1");
+    return !!b && typeof b.etaMs === "number" && (b.etaMs as number) > 0;
+  })());
+  check("single (non-batch) runs produce no batch entry", !batchOverview.batches.some((x) => x.total === 1));
+
   const record = {
     id: "x", reservationId: "res", propertyId: 1, propertyName: "P", guestName: "Ann Guest",
     status: "queued", createdAt: "2026-07-21T00:00:00.000Z", claimedAt: null, heartbeatAt: null,
@@ -1255,6 +1300,11 @@ console.log("claude-find-run: checkout-run source wiring");
   check("client view carries guestName for the banner (token/prompt still stripped)", (() => {
     const v = clientClaudeFindRunView(record) as any;
     return v.guestName === "Ann Guest" && !("token" in v) && !("prompt" in v);
+  })());
+  check("client view carries batchId when set, omits it for single runs", (() => {
+    const batched = clientClaudeFindRunView({ ...record, batchId: "B1" }) as any;
+    const single = clientClaudeFindRunView(record) as any;
+    return batched.batchId === "B1" && !("batchId" in single);
   })());
 
   const fs2 = await import("node:fs");
