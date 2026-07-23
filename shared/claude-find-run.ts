@@ -95,6 +95,9 @@ export interface ClaudeFindRunRecord {
   unitIds: string[];
   checkIn: string;
   checkOut: string;
+  /** Groups runs enqueued by one bulk click, for cumulative batch progress.
+   *  Absent on single-run and pre-2026-07-23 records. */
+  batchId?: string | null;
 }
 
 export interface ClaudeFindRunStore {
@@ -103,8 +106,15 @@ export interface ClaudeFindRunStore {
 }
 
 export const CLAUDE_FIND_RUN_STORE_KEY = "claude_find_runs.v1";
-/** Newest runs kept in the store (terminal history for the row panels). */
-export const CLAUDE_FIND_RUN_STORE_CAP = 40;
+/**
+ * Cap on TERMINAL runs kept in the store (history for the row panels + batch
+ * progress). ACTIVE runs are NEVER capped — a bulk batch may legitimately hold
+ * dozens of queued runs at once, and dropping one would silently lose work the
+ * operator dispatched (see serializeClaudeFindRunStore). Sized to comfortably
+ * hold a full overnight bulk batch's completed runs so its progress stays
+ * accurate until the operator comes back to it.
+ */
+export const CLAUDE_FIND_RUN_STORE_CAP = 200;
 /** Terminal runs older than this are evicted at write time. */
 export const CLAUDE_FIND_RUN_TERMINAL_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 /** Bounded per-run event ring. */
@@ -119,20 +129,27 @@ export const CLAUDE_FIND_RUN_HEARTBEAT_TIMEOUT_MS = 10 * 60 * 1_000;
  *  (claimedAt) — queue-wait time is governed by the queue ceiling below. */
 export const CLAUDE_FIND_RUN_MAX_AGE_MS = 90 * 60 * 1_000;
 /**
- * Absolute ceiling on QUEUE WAIT (2026-07-20, bulk). The runner is sequential
- * — one run at a time by construction — so a bulk batch legitimately leaves
- * runs queued for hours while the line drains. 12h = the bulk cap (8) times
- * the per-run ceiling (90 min): the longest any honest queue can take. A run
- * still queued past that is stuck behind a wedged store, never a live line.
+ * FINAL wedge backstop on QUEUE WAIT (2026-07-23, deep-queue). The runner is
+ * sequential — one run at a time by construction — so a big overnight batch
+ * legitimately parks runs in "queued" for many hours while the line drains.
+ * That long wait is NO LONGER failed on age alone: the watchdog protects any
+ * run waiting behind a demonstrably-busy/active runner (claudeFindRunWatchdog-
+ * Verdict), so an honest line of any depth survives. This ceiling only fires
+ * when the runner is NOT draining — a truly wedged/unclaimable run — as a last
+ * resort so nothing lingers forever. Sized well above a realistic full-portfolio
+ * batch's drain time (a queued run this old with no active runner is stuck).
  */
-export const CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS = 12 * 60 * 60 * 1_000;
+export const CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS = 72 * 60 * 60 * 1_000;
 /**
- * Most runs one bulk click may enqueue. Matches COWORK_BULK_FIND_MAX so the
- * batch size the operator approved for the Cowork bulk route carries over,
- * and so cap × per-run ceiling stays inside the queue ceiling above — raise
- * one and you must re-derive the other.
+ * Most runs one bulk click may enqueue. Raised 8 → 100 (2026-07-23) so the
+ * operator can rescan the whole portfolio in one click and walk away — the
+ * daemon drains them sequentially, fully server-side, and the queue watchdog
+ * tolerates an arbitrarily deep honest line (see QUEUE_MAX_AGE_MS above).
+ * Deliberately DECOUPLED from COWORK_BULK_FIND_MAX now: that cap governs the
+ * window-driven Cowork deep-link route, which is a different flow; this cap is
+ * just a sanity ceiling on one headless enqueue.
  */
-export const CLAUDE_FIND_RUN_BULK_MAX = 8;
+export const CLAUDE_FIND_RUN_BULK_MAX = 100;
 
 export function parseClaudeFindRunStore(raw: string | null | undefined): ClaudeFindRunStore {
   if (!raw) return { version: 1, runs: [] };
@@ -147,13 +164,18 @@ export function parseClaudeFindRunStore(raw: string | null | undefined): ClaudeF
 
 export function serializeClaudeFindRunStore(store: ClaudeFindRunStore, nowMs: number): string {
   const isTerminal = (r: ClaudeFindRunRecord) => !ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(r.status);
-  const kept = store.runs
-    .filter((r) => {
-      if (!isTerminal(r)) return true;
-      const ended = Date.parse(r.endedAt ?? r.createdAt);
-      return !Number.isFinite(ended) || nowMs - ended < CLAUDE_FIND_RUN_TERMINAL_TTL_MS;
-    })
-    .slice(-CLAUDE_FIND_RUN_STORE_CAP);
+  const withinTtl = (r: ClaudeFindRunRecord) => {
+    const ended = Date.parse(r.endedAt ?? r.createdAt);
+    return !Number.isFinite(ended) || nowMs - ended < CLAUDE_FIND_RUN_TERMINAL_TTL_MS;
+  };
+  // ACTIVE runs are ALL kept — a bulk batch can park dozens in "queued" behind
+  // the one-at-a-time runner, and slicing them off would silently drop work the
+  // operator dispatched. Only TERMINAL history is capped (newest STORE_CAP,
+  // within TTL). Re-sorted by createdAt so the runner still drains FIFO and
+  // "N ahead in line" stays true after the merge.
+  const active = store.runs.filter((r) => !isTerminal(r));
+  const terminal = store.runs.filter((r) => isTerminal(r) && withinTtl(r)).slice(-CLAUDE_FIND_RUN_STORE_CAP);
+  const kept = [...active, ...terminal].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   return JSON.stringify({ version: 1, runs: kept });
 }
 
@@ -300,23 +322,33 @@ export function claudeFindRunWatchdogVerdict(
   if (!ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(run.status)) return { action: "none" };
   const created = Date.parse(run.createdAt);
   if (run.status === "queued") {
-    if (Number.isFinite(created) && nowMs - created > CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS) {
-      return {
-        action: "fail",
-        error: "Waited in line for 12 hours without starting — closed by the watchdog. Re-run it if it is still wanted.",
-      };
-    }
-    // Waiting in line behind a live run is the bulk queue working as designed.
+    // A busy/active runner draining the line protects every run behind it,
+    // regardless of how long it has waited — a deep overnight batch is the queue
+    // working as designed. The head-of-line run is bounded by its own 90-min
+    // ceiling, so the line always advances and this run's turn will come.
     if (activity?.busy) return { action: "none" };
     const basis = Math.max(
       Number.isFinite(created) ? created : 0,
       activity?.lastActivityMs ?? 0,
     );
+    // Runner idle: no claim / heartbeat / finish anywhere within the claim
+    // window → the head-of-line was never picked up (Mac asleep / daemon down).
     if (basis > 0 && nowMs - basis > CLAUDE_FIND_RUN_CLAIM_TIMEOUT_MS) {
       return {
         action: "fail",
         error:
           "The Mac runner never picked this up — is the Mac awake and the sidecar daemon running? (launchctl kickstart -k gui/$(id -u)/com.vrbosidecar.worker)",
+      };
+    }
+    // Final wedge backstop: the runner shows recent activity (an inter-run gap,
+    // so it IS draining) yet this specific run has waited far past the drain
+    // window — it is being passed over (e.g. an unclaimable malformed run). Fail
+    // it so it can't linger forever. An honest deep line never reaches here: it
+    // is protected by the busy check above on every tick the runner is working.
+    if (Number.isFinite(created) && nowMs - created > CLAUDE_FIND_RUN_QUEUE_MAX_AGE_MS) {
+      return {
+        action: "fail",
+        error: "Sat in the queue far past the drain window while the runner passed it over — closed by the watchdog. Re-run it if it is still wanted.",
       };
     }
     return { action: "none" };
@@ -377,6 +409,8 @@ export interface ClaudeFindRunClientView {
   droppedEvents: number;
   /** Queued runs only: live runs ahead of it in the one-at-a-time line. */
   queueAhead?: number;
+  /** Bulk-batch grouping id, for cumulative batch progress (absent on singles). */
+  batchId?: string | null;
 }
 
 /**
@@ -433,11 +467,31 @@ export function clientClaudeFindRunView(
     error: run.error,
     events: run.events.slice(-CLAUDE_FIND_RUN_CLIENT_EVENTS),
     droppedEvents: run.droppedEvents + Math.max(0, run.events.length - CLAUDE_FIND_RUN_CLIENT_EVENTS),
+    ...(run.batchId ? { batchId: run.batchId } : {}),
   };
 }
 
 /** Terminal runs stay on the page-level status banner this long after ending. */
 export const CLAUDE_FIND_RUN_OVERVIEW_RECENT_MS = 60 * 60 * 1_000;
+
+/** Cumulative progress of one bulk batch — accurate for an overnight run
+ *  because it is computed over the FULL store, not the recent-terminal window. */
+export interface ClaudeFindRunBatchProgress {
+  batchId: string;
+  total: number;
+  /** completed + failed + cancelled. */
+  done: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  queued: number;
+  /** claimed + running. */
+  working: number;
+  attention: number;
+  /** Rough ms to drain the rest, from realized throughput; null until enough
+   *  runs have finished to estimate. */
+  etaMs: number | null;
+}
 
 export interface ClaudeFindRunOverview {
   /** Live runs in queue order (the runner drains the store front-to-back). */
@@ -453,6 +507,8 @@ export interface ClaudeFindRunOverview {
     failed: number;
     cancelled: number;
   };
+  /** Cumulative rollups for bulk batches still in flight or recently finished. */
+  batches: ClaudeFindRunBatchProgress[];
 }
 
 /**
@@ -486,7 +542,54 @@ export function claudeFindRunOverview(views: ClaudeFindRunClientView[], nowMs: n
     }
   }
   recent.sort((a, b) => String(b.endedAt ?? b.createdAt).localeCompare(String(a.endedAt ?? a.createdAt)));
-  return { active, recent, counts };
+
+  // Cumulative per-batch progress over the FULL view set (NOT the recent
+  // window), so a bulk batch reads "X of N done" correctly hours later. Grouped
+  // by batchId; single runs (no batchId) are excluded.
+  const batchMap = new Map<string, ClaudeFindRunClientView[]>();
+  for (const view of views ?? []) {
+    if (!view?.batchId) continue;
+    const list = batchMap.get(view.batchId) ?? [];
+    list.push(view);
+    batchMap.set(view.batchId, list);
+  }
+  const batches: ClaudeFindRunBatchProgress[] = [];
+  for (const [batchId, list] of Array.from(batchMap.entries())) {
+    const b: ClaudeFindRunBatchProgress = {
+      batchId, total: list.length, done: 0,
+      completed: 0, failed: 0, cancelled: 0, queued: 0, working: 0, attention: 0, etaMs: null,
+    };
+    const endTimes: number[] = [];
+    for (const v of list) {
+      if (v.status === "queued") b.queued += 1;
+      else if (v.status === "attention") b.attention += 1;
+      else if (v.status === "claimed" || v.status === "running") b.working += 1;
+      else if (v.status === "completed") b.completed += 1;
+      else if (v.status === "failed") b.failed += 1;
+      else if (v.status === "cancelled") b.cancelled += 1;
+      if (!ACTIVE_CLAUDE_FIND_RUN_STATUSES.has(v.status)) {
+        const e = Date.parse(v.endedAt ?? "");
+        if (Number.isFinite(e)) endTimes.push(e);
+      }
+    }
+    b.done = b.completed + b.failed + b.cancelled;
+    const remaining = b.queued + b.working + b.attention;
+    if (endTimes.length >= 2 && remaining > 0) {
+      endTimes.sort((x, y) => x - y);
+      const perRun = (endTimes[endTimes.length - 1] - endTimes[0]) / (endTimes.length - 1);
+      if (perRun > 0) b.etaMs = Math.round(remaining * perRun);
+    }
+    batches.push(b);
+  }
+  // In-flight batches first (most remaining), then largest — the one the
+  // operator is watching sits on top.
+  batches.sort(
+    (a, b) =>
+      (b.queued + b.working + b.attention) - (a.queued + a.working + a.attention) ||
+      b.total - a.total,
+  );
+
+  return { active, recent, counts, batches };
 }
 
 /**

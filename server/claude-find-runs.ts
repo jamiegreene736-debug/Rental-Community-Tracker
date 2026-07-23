@@ -176,6 +176,7 @@ function enqueueFindRunInStore(
   input: CoworkBuyInPromptInput,
   apiRoot: string,
   nowIso: string,
+  batchId?: string,
 ): { run: ClaudeFindRunRecord } | { conflict: ClaudeFindRunRecord } {
   const active = activeClaudeFindRunForReservation(store.runs, input.reservationId);
   if (active) return { conflict: active };
@@ -212,6 +213,7 @@ function enqueueFindRunInStore(
     unitIds: input.units.map((u) => u.unitId),
     checkIn: input.checkIn,
     checkOut: input.checkOut,
+    batchId: batchId ?? null,
   };
   store.runs.push(run);
   return { run };
@@ -275,6 +277,9 @@ export function registerClaudeFindRunRoutes(app: Express): void {
     }
     const apiRoot = requestApiRoot(req);
     const nowIso = new Date().toISOString();
+    // One id groups this whole click so the banner can show cumulative
+    // "X of N done" progress as the runner drains the line overnight.
+    const batchId = randomUUID();
     const result = await mutateStore((store) => {
       const created: ReturnType<typeof clientClaudeFindRunView>[] = [];
       const skipped: { reservationId: string; error: string }[] = [];
@@ -287,7 +292,7 @@ export function registerClaudeFindRunRoutes(app: Express): void {
           skipped.push({ reservationId: rid, error: validated.error });
           continue;
         }
-        const outcome = enqueueFindRunInStore(store, validated.input, apiRoot, nowIso);
+        const outcome = enqueueFindRunInStore(store, validated.input, apiRoot, nowIso, batchId);
         if ("conflict" in outcome) {
           skipped.push({
             reservationId: validated.input.reservationId,
@@ -299,7 +304,7 @@ export function registerClaudeFindRunRoutes(app: Express): void {
           queueAhead: claudeFindRunQueueAhead(store.runs, outcome.run.id),
         }));
       }
-      return { created, skipped };
+      return { batchId, created, skipped };
     });
     return res.json(result);
   }));

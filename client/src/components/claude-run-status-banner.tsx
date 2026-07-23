@@ -18,6 +18,13 @@ import {
 } from "@shared/claude-find-run";
 import { Bot, ChevronDown, ChevronUp, Loader2, XCircle } from "lucide-react";
 
+function etaLabel(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms) || ms <= 0) return "";
+  const mins = Math.round(ms / 60_000);
+  if (mins < 60) return `~${Math.max(1, mins)}m left`;
+  return `~${Math.round(mins / 60)}h left`;
+}
+
 function ageLabel(iso: string | null | undefined): string {
   const t = Date.parse(String(iso ?? ""));
   if (!Number.isFinite(t)) return "";
@@ -126,6 +133,32 @@ export function ClaudeRunStatusBanner({ onJumpToReservation }: { onJumpToReserva
           {collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
         </span>
       </button>
+
+      {/* Cumulative bulk-batch progress — always visible so a "click 52 and walk
+          away" batch reads "X of 52 done" at a glance without expanding. */}
+      {(overview.batches ?? [])
+        .filter((b) => b.total >= 2)
+        .map((b) => {
+          const pct = b.total > 0 ? Math.round((b.done / b.total) * 100) : 0;
+          const bits: string[] = [];
+          if (b.working > 0) bits.push(`${b.working} running`);
+          if (b.queued > 0) bits.push(`${b.queued} queued`);
+          if (b.attention > 0) bits.push(`${b.attention} need${b.attention === 1 ? "s" : ""} you`);
+          if (b.failed > 0) bits.push(`${b.failed} failed`);
+          const eta = etaLabel(b.etaMs);
+          if (eta) bits.push(eta);
+          return (
+            <div key={b.batchId} className="border-t px-4 py-2" data-testid={`run-batch-progress-${b.batchId}`}>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-medium">Bulk find · {b.done}/{b.total} done</span>
+                <span className="text-muted-foreground" data-testid={`text-batch-summary-${b.batchId}`}>{bits.join(" · ")}</span>
+              </div>
+              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                <div className="h-full rounded-full bg-sky-500 transition-all" style={{ width: `${pct}%` }} />
+              </div>
+            </div>
+          );
+        })}
 
       {!collapsed && (
         <div className="divide-y border-t" data-testid="run-banner-rows">
