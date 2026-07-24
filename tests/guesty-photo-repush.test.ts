@@ -11,6 +11,7 @@ import {
   type GuestyPushGallery,
 } from "../shared/guesty-photo-repush";
 import { guestyPicturesExactlyMatch } from "../server/guesty-picture-replacement";
+import "./photo-content-dedupe.test";
 
 let passed = 0;
 let failed = 0;

@@ -8,6 +8,7 @@ import { cancelUnitAuditSweep, getUnitAuditDashboardStatus, getUnitAuditJob, lis
 import { getUnitAuditCronStatus, runUnitAuditCronSweep } from "./unit-audit-scheduler";
 import { repushGuestyPhotosForProperty, repushGuestyPhotosForRecentSwaps } from "./guesty-photo-repush";
 import { acquireGuestyPictureMutation } from "./guesty-picture-mutation";
+import { dedupeLocalPhotoItems } from "./photo-content-dedupe";
 import {
   guestyPicturesExactlyMatch,
   replaceGuestyPicturesAndVerify,
@@ -26342,11 +26343,27 @@ Requirements:
     // so the operator can decide whether to curate before publishing there.
     // Reserve one slot for the pinned cover collage so the total stays <=100.
     const MAX_GUESTY_PHOTOS = 100;
+    const publicPhotosRoot = path.resolve(process.cwd(), "client/public");
+    const { unique: contentUniquePhotos, duplicates: exactDuplicates } = await dedupeLocalPhotoItems(
+      rawPhotos,
+      ({ localPath }) => {
+        if (!localPath || !localPath.startsWith("/photos/")) return null;
+        const candidate = path.resolve(publicPhotosRoot, localPath.replace(/^\/+/, ""));
+        return candidate.startsWith(`${publicPhotosRoot}${path.sep}`) ? candidate : null;
+      },
+    );
+    if (exactDuplicates.length > 0) {
+      console.log(
+        `[push-photos] collapsed ${exactDuplicates.length} byte-identical source alias${exactDuplicates.length === 1 ? "" : "es"} before upload: `
+        + exactDuplicates.map(({ item, duplicateOf }) => `${item.localPath} = ${duplicateOf.localPath}`).join(", "),
+      );
+    }
     const photoCap = MAX_GUESTY_PHOTOS - pinnedCount;
-    const photos = rawPhotos.length > photoCap
-      ? rawPhotos.slice(0, photoCap)
-      : rawPhotos;
-    const trimmedCount = rawPhotos.length - photos.length;
+    const photos = contentUniquePhotos.length > photoCap
+      ? contentUniquePhotos.slice(0, photoCap)
+      : contentUniquePhotos;
+    const deduplicatedCount = exactDuplicates.length;
+    const trimmedCount = contentUniquePhotos.length - photos.length;
 
     // Stream NDJSON — one JSON line per photo + a final summary line.
     // (Keeps intermediaries from idle-timing-out the response; the edge's
@@ -26556,6 +26573,7 @@ Requirements:
         upscaledCount,
         total: photos.length,
         trimmed: trimmedCount,
+        deduplicated: deduplicatedCount,
         maxPhotos: MAX_GUESTY_PHOTOS,
         collagePinned: pinnedCount > 0,
         expectedTotal: photos.length + pinnedCount,
@@ -26596,6 +26614,7 @@ Requirements:
           upscaledCount,
           total: photos.length,
           trimmed: trimmedCount,
+          deduplicated: deduplicatedCount,
           maxPhotos: MAX_GUESTY_PHOTOS,
           collagePinned: pinnedCount > 0,
           expectedTotal: photos.length + pinnedCount,
@@ -26651,6 +26670,7 @@ Requirements:
         upscaledCount,
         total: photos.length,
         trimmed: trimmedCount,
+        deduplicated: deduplicatedCount,
         maxPhotos: MAX_GUESTY_PHOTOS,
         collagePinned: pinnedCount > 0,
         expectedTotal: replacementPictures.length,
@@ -26703,6 +26723,7 @@ Requirements:
       upscaledCount,
       total: photos.length,
       trimmed: trimmedCount,
+      deduplicated: deduplicatedCount,
       maxPhotos: MAX_GUESTY_PHOTOS,
       collagePinned: pinnedCount > 0,
       // Live-gallery confirmation for the Photos tab: what the push should
@@ -26722,7 +26743,7 @@ Requirements:
       ...(strictGalleryVerification ? { strictGalleryVerified } : {}),
       ...(galleryError ? { guestyError: galleryError } : {}),
     });
-    console.log(`[push-photos] Done: ${successCount}/${photos.length} hosted, exact replacement ${replacementConfirmed ? "confirmed" : "NOT confirmed"}${lastObservedTotal != null ? ` (${lastObservedTotal} on Guesty)` : ""}${shortfall > 0 ? ` (shortfall ${shortfall})` : ""}${staleExtra > 0 ? ` (${staleExtra} stale extras)` : ""}, ${upscaledCount} upscaled${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
+    console.log(`[push-photos] Done: ${successCount}/${photos.length} hosted, exact replacement ${replacementConfirmed ? "confirmed" : "NOT confirmed"}${lastObservedTotal != null ? ` (${lastObservedTotal} on Guesty)` : ""}${shortfall > 0 ? ` (shortfall ${shortfall})` : ""}${staleExtra > 0 ? ` (${staleExtra} stale extras)` : ""}, ${upscaledCount} upscaled${deduplicatedCount ? `, ${deduplicatedCount} exact duplicate${deduplicatedCount === 1 ? "" : "s"} collapsed` : ""}${trimmedCount ? `, ${trimmedCount} trimmed` : ""}`);
     res.end();
     } finally {
       releasePictureMutation();
@@ -33825,11 +33846,17 @@ Return ONLY compact JSON with this exact shape:
       const diskImageFiles = (files as string[])
         .filter((f: string) => /\.(jpg|jpeg|png|webp)$/i.test(f))
         .sort();
-      const imageFiles = hasUnitContext
+      const resolvedImageFiles = hasUnitContext
         ? await resolveVirtualStagingGalleryFiles({ diskFilenames: diskImageFiles, propertyId, unitId, folder })
         : diskImageFiles.filter((filename) => !isVirtualStagingCandidateFilename(filename));
       const labels = await storage.getPhotoLabelsByFolder(folder);
       const hiddenFiles = new Set(labels.filter((label) => label.hidden).map((label) => label.filename));
+      const { unique: imageFiles } = await dedupeLocalPhotoItems(
+        resolvedImageFiles,
+        // Hidden aliases do not participate: if alphabetic file A is hidden
+        // while byte-identical file B is visible, B must remain in the gallery.
+        (filename) => hiddenFiles.has(filename) ? null : path.join(folderPath, filename),
+      );
       const result = imageFiles.map((f: string) => ({
         url: `/photos/${folder}/${f}`,
         filename: f,

@@ -37,6 +37,7 @@ import { loopbackRequestHeaders } from "./auth";
 import { storage } from "./storage";
 import { resolveVirtualStagingGalleryFiles } from "./virtual-staging-gallery";
 import { isVirtualStagingCandidateFilename } from "@shared/virtual-staging";
+import { dedupeLocalPhotoItems } from "./photo-content-dedupe";
 
 const loopbackBaseUrl = () => `http://127.0.0.1:${process.env.PORT || "5000"}`;
 const photosRoot = () => path.join(process.cwd(), "client/public/photos");
@@ -168,14 +169,20 @@ async function assemblePushPhotosForProperty(propertyId: number): Promise<
     unitLabel?: string,
   ): Promise<GuestyPushGallery> => {
     const diskFiles = (await listPhotoFiles(path.join(photosRoot(), folder)).catch(() => [] as string[])).slice().sort();
-    const files = unitId
+    const resolvedFiles = unitId
       ? await resolveVirtualStagingGalleryFiles({ diskFilenames: diskFiles, propertyId, unitId, folder })
       : diskFiles.filter((filename) => !isVirtualStagingCandidateFilename(filename));
+    const labels = await storage.getPhotoLabelsByFolder(folder).catch(() => []);
+    const hiddenFiles = new Set(labels.filter((label) => label.hidden).map((label) => label.filename));
+    const { unique: files } = await dedupeLocalPhotoItems(
+      resolvedFiles,
+      (filename) => hiddenFiles.has(filename) ? null : path.join(photosRoot(), folder, filename),
+    );
     return {
       folder,
       scope,
       files,
-      labels: await storage.getPhotoLabelsByFolder(folder).catch(() => []),
+      labels,
       staticLabels,
       staticCategories,
       unitId,
