@@ -1361,9 +1361,12 @@ export default function BuilderPreflight() {
   const [platformDone, setPlatformDone] = useState(false);
   const [fullAuditRunning, setFullAuditRunning] = useState(false);
   const [lastCheckWasFullAudit, setLastCheckWasFullAudit] = useState(false);
-  const [showReplacementFlow, setShowReplacementFlow] = useState(false);
-  const [replacementTargetId, setReplacementTargetId] = useState<string | null>(null);
-  const [replacementSkipUrl, setReplacementSkipUrl] = useState<string | null>(null);
+  // Unit-scoped replacement panels. Keeping one entry per unit lets Unit A and
+  // Unit B search, poll, and finish independently instead of retargeting one
+  // component and hiding the first in-flight job.
+  const [replacementFlowTargets, setReplacementFlowTargets] = useState<
+    Record<string, { skipUrl: string | null }>
+  >({});
   const [manualReplaceUnitId, setManualReplaceUnitId] = useState<string | null>(null);
   const [manualReplaceUrl, setManualReplaceUrl] = useState("");
   const [manualReplacingUnitId, setManualReplacingUnitId] = useState<string | null>(null);
@@ -1840,9 +1843,11 @@ export default function BuilderPreflight() {
     };
     const updatedOverrides = { ...unitOverrides, [oldUnitId]: newOverride };
     setUnitOverrides(updatedOverrides);
-    setShowReplacementFlow(false);
-    setReplacementTargetId(null);
-    setReplacementSkipUrl(null);
+    setReplacementFlowTargets((current) => {
+      const next = { ...current };
+      delete next[oldUnitId];
+      return next;
+    });
     // The unit's photo-fetch receipt describes the OLD gallery — after a
     // replacement, a lingering "No different photos found — Find replacement
     // unit" receipt would keep pushing a swap that already happened.
@@ -1928,9 +1933,10 @@ export default function BuilderPreflight() {
   const openReplacementFlowForUnit = (unitId: string) => {
     if (property?.communityPhotoFolder) {
       setSwapsCommitted(false);
-      setReplacementSkipUrl(null);
-      setReplacementTargetId(unitId);
-      setShowReplacementFlow(true);
+      setReplacementFlowTargets((current) => ({
+        ...current,
+        [unitId]: current[unitId] ?? { skipUrl: null },
+      }));
       window.setTimeout(() => {
         document.getElementById("unit-replacement-flow-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
       }, 150);
@@ -1992,9 +1998,8 @@ export default function BuilderPreflight() {
     .map((unit) => formatUnitDisplayLabel(unit.unitNumber))
     .join(", ");
   const canFullUnitAudit = effectiveUnits.some((unit) => !!(unit as any).photoFolder);
-  const targetUnit = replacementTargetId
-    ? property.units.find(u => u.id === replacementTargetId) ?? property.units[0]
-    : property.units[0];
+  const activeReplacementUnits = property.units.filter((unit) => replacementFlowTargets[unit.id]);
+  const allReplacementUnitsOpen = activeReplacementUnits.length === property.units.length;
   const parsedReplacementAddress = parsePropertyAddress(property.address);
   const replacementStreetAddress = inferCommunityStreetAddress({
     communityName: property.complexName,
@@ -2002,9 +2007,9 @@ export default function BuilderPreflight() {
     state: parsedReplacementAddress.state,
     addressHint: parsedReplacementAddress.street || property.address,
   }) || parsedReplacementAddress.street;
-  const replacementSkipUrls = Array.from(new Set([
+  const replacementSkipUrlsForUnit = (unitId: string) => Array.from(new Set([
     ...Object.values(unitOverrides).map(o => o.sourceUrl).filter(Boolean),
-    ...(replacementSkipUrl ? [replacementSkipUrl] : []),
+    ...(replacementFlowTargets[unitId]?.skipUrl ? [replacementFlowTargets[unitId].skipUrl!] : []),
   ]));
 
   return (
@@ -2838,9 +2843,10 @@ export default function BuilderPreflight() {
                                 const skipReplacementUrl = unitOverrides[origUnit.id]?.sourceUrl ?? null;
                                 setSwapsCommitted(false);
                                 await handleUndoSwap(origUnit.id);
-                                setReplacementSkipUrl(skipReplacementUrl);
-                                setReplacementTargetId(origUnit.id);
-                                setShowReplacementFlow(true);
+                                setReplacementFlowTargets((current) => ({
+                                  ...current,
+                                  [origUnit.id]: { skipUrl: skipReplacementUrl },
+                                }));
                               }}
                               data-testid={`button-change-committed-swap-${origUnit.id}`}
                             >
@@ -2863,9 +2869,10 @@ export default function BuilderPreflight() {
                             className="h-7 px-2 text-xs border-amber-400 dark:border-amber-600 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
                             onClick={() => {
                               setSwapsCommitted(false);
-                              setReplacementSkipUrl(null);
-                              setReplacementTargetId(origUnit.id);
-                              setShowReplacementFlow(true);
+                              setReplacementFlowTargets((current) => ({
+                                ...current,
+                                [origUnit.id]: current[origUnit.id] ?? { skipUrl: null },
+                              }));
                             }}
                             data-testid={`button-find-replacement-${origUnit.id}`}
                           >
@@ -3136,8 +3143,10 @@ export default function BuilderPreflight() {
                           className="h-8 px-2.5 text-xs lg:flex-shrink-0"
                           data-testid={`button-replace-unit-${unit.id}`}
                           onClick={() => {
-                            setReplacementTargetId(unit.id);
-                            setShowReplacementFlow(true);
+                            setReplacementFlowTargets((current) => ({
+                              ...current,
+                              [unit.id]: current[unit.id] ?? { skipUrl: null },
+                            }));
                           }}
                         >
                           <RefreshCw className="h-3 w-3 mr-1" />
@@ -3195,57 +3204,74 @@ export default function BuilderPreflight() {
               size="lg"
               variant="outline"
               onClick={() => {
-                setReplacementTargetId(null);
-                setReplacementSkipUrl(null);
-                setShowReplacementFlow(v => !v);
+                if (allReplacementUnitsOpen) {
+                  setReplacementFlowTargets({});
+                  return;
+                }
+                setSwapsCommitted(false);
+                setReplacementFlowTargets((current) => Object.fromEntries(
+                  property.units.map((unit) => [unit.id, current[unit.id] ?? { skipUrl: null }]),
+                ));
               }}
               className="sm:w-auto"
             >
-              Find / Replace a Unit
+              {allReplacementUnitsOpen ? "Close Replacement Searches" : "Find / Replace Units"}
             </Button>
           )}
         </div>
 
-        {/* Unit replacement flow */}
-        {showReplacementFlow && property.communityPhotoFolder && (
-          <div className="mt-6" id="unit-replacement-flow-anchor">
-            {/* key: retargeting the flow (e.g. the Find-replacement-unit CTA
-                while it's already open for another unit) must REMOUNT it —
-                its internal search/commit state is unit-scoped, and a stale
-                mount could commit a swap against the wrong unit. */}
-            <UnitReplacementFlow
-              key={targetUnit.id}
-              unit={{
+        {/* One independently persisted replacement flow per unit. */}
+        {activeReplacementUnits.length > 0 && property.communityPhotoFolder && (
+          <div className="mt-6 space-y-4" id="unit-replacement-flow-anchor">
+            {activeReplacementUnits.length > 1 && (
+              <p className="text-xs text-muted-foreground" data-testid="replacement-concurrency-note">
+                Each unit search runs independently. You can start the next unit while another search is still running.
+              </p>
+            )}
+            {activeReplacementUnits.map((targetUnit) => {
+              const unitIndex = property.units.findIndex((unit) => unit.id === targetUnit.id);
+              const targetStub = {
                 id: targetUnit.id,
                 unitNumber: targetUnit.unitNumber,
                 bedrooms: targetUnit.bedrooms,
                 photoFolder: (targetUnit as any).photoFolder,
-                positionLabel: (() => {
-                  const idx = property.units.findIndex(u => u.id === targetUnit.id);
-                  return idx >= 0 ? `Unit ${String.fromCharCode(65 + idx)}` : undefined;
-                })(),
+                positionLabel: unitIndex >= 0 ? `Unit ${String.fromCharCode(65 + unitIndex)}` : undefined,
                 replacementLabel: unitOverrides[targetUnit.id]?.unitLabel,
-              }}
-              allUnits={property.units.map((u, i) => ({
-                id: u.id,
-                unitNumber: u.unitNumber,
-                bedrooms: u.bedrooms,
-                photoFolder: u.photoFolder,
-                positionLabel: `Unit ${String.fromCharCode(65 + i)}`,
-                replacementLabel: unitOverrides[u.id]?.unitLabel,
-                replacementSourceUrl: unitOverrides[u.id]?.sourceUrl,
-              }))}
-              communityFolder={property.communityPhotoFolder}
-              communityName={property.complexName}
-              propertyAddress={property.address}
-              streetAddress={replacementStreetAddress || undefined}
-              city={parsedReplacementAddress.city || undefined}
-              state={parsedReplacementAddress.state || undefined}
-              propertyId={id}
-              skipUrls={replacementSkipUrls}
-              onClose={() => { setShowReplacementFlow(false); setReplacementTargetId(null); setReplacementSkipUrl(null); }}
-              onUnitReplaced={handleUnitReplaced}
-            />
+                replacementSourceUrl: unitOverrides[targetUnit.id]?.sourceUrl,
+              };
+              return (
+                <UnitReplacementFlow
+                  key={targetUnit.id}
+                  unit={targetStub}
+                  allUnits={property.units.map((candidate, candidateIndex) => ({
+                    id: candidate.id,
+                    unitNumber: candidate.unitNumber,
+                    bedrooms: candidate.bedrooms,
+                    photoFolder: (candidate as any).photoFolder,
+                    positionLabel: `Unit ${String.fromCharCode(65 + candidateIndex)}`,
+                    replacementLabel: unitOverrides[candidate.id]?.unitLabel,
+                    replacementSourceUrl: unitOverrides[candidate.id]?.sourceUrl,
+                  }))}
+                  communityFolder={property.communityPhotoFolder}
+                  communityName={property.complexName}
+                  propertyAddress={property.address}
+                  streetAddress={replacementStreetAddress || undefined}
+                  city={parsedReplacementAddress.city || undefined}
+                  state={parsedReplacementAddress.state || undefined}
+                  propertyId={id}
+                  skipUrls={replacementSkipUrlsForUnit(targetUnit.id)}
+                  lockUnitSelection
+                  onClose={() => {
+                    setReplacementFlowTargets((current) => {
+                      const next = { ...current };
+                      delete next[targetUnit.id];
+                      return next;
+                    });
+                  }}
+                  onUnitReplaced={handleUnitReplaced}
+                />
+              );
+            })}
           </div>
         )}
       </div>
