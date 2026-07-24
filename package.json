@@ -15,7 +15,7 @@
     "sidecar:install": "./scripts/install-vrbo-sidecar-launchagent.sh"
   },
   "dependencies": {
-    "@browserbasehq/sdk": "^2.10.0",
+    "@browserbasehq/sdk": "^2.14.1",
     "@browserbasehq/stagehand": "^3.3.0",
     "@hookform/resolvers": "^3.10.0",
     "@jridgewell/trace-mapping": "^0.3.25",
