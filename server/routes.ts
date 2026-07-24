@@ -36040,6 +36040,15 @@ Return ONLY compact JSON with this exact shape:
     type PhotoSignals = Record<string, boolean>; // platform key → found
     type PhotoMatchedUrls = Record<string, string | null>; // platform key → URL of the FIRST listing-page hit
     type PhotoMatchCounts = Record<string, number>; // platform key → distinct strong unit photos matched
+    type PreflightPhotoMatchEvidence = {
+      photoUrl: string;
+      listingUrl: string;
+      title: string;
+      source: string;
+      verified: true;
+      matchImageUrl?: string;
+    };
+    type PhotoMatchEvidenceByPlatform = Record<"airbnb" | "vrbo" | "booking", PreflightPhotoMatchEvidence[]>;
     const selectUnitPhotoFilesForDuplicateCheck = async (folderPath: string, photoFolder: string): Promise<string[]> => {
       if (isCommunityOrSharedPhotoCandidate({ folder: photoFolder })) return [];
       const diskFiles = fs.readdirSync(folderPath)
@@ -36068,17 +36077,19 @@ Return ONLY compact JSON with this exact shape:
       signals: PhotoSignals;
       matchedUrls: PhotoMatchedUrls;
       matchCounts: PhotoMatchCounts;
+      matches: PhotoMatchEvidenceByPlatform;
       matchCount: number;
       totalChecked: number;
     }> => {
       const signals: PhotoSignals = { airbnb: false, vrbo: false, booking: false };
       const matchedUrls: PhotoMatchedUrls = { airbnb: null, vrbo: null, booking: null };
       const matchCounts: PhotoMatchCounts = { airbnb: 0, vrbo: 0, booking: 0 };
-      if (!imgbbKey) return { signals, matchedUrls, matchCounts, matchCount: 0, totalChecked: 0 };
+      const matches: PhotoMatchEvidenceByPlatform = { airbnb: [], vrbo: [], booking: [] };
+      if (!imgbbKey) return { signals, matchedUrls, matchCounts, matches, matchCount: 0, totalChecked: 0 };
       // Empty photoFolder means no local photos available (e.g. a replacement unit) — skip photo check
-      if (!photoFolder || photoFolder.trim() === "") return { signals, matchedUrls, matchCounts, matchCount: 0, totalChecked: 0 };
+      if (!photoFolder || photoFolder.trim() === "") return { signals, matchedUrls, matchCounts, matches, matchCount: 0, totalChecked: 0 };
       const folderPath = path.join(photosBase, photoFolder.replace(/[^a-zA-Z0-9_-]/g, ""));
-      if (!fs.existsSync(folderPath)) return { signals, matchedUrls, matchCounts, matchCount: 0, totalChecked: 0 };
+      if (!fs.existsSync(folderPath)) return { signals, matchedUrls, matchCounts, matches, matchCount: 0, totalChecked: 0 };
       const allFiles = await selectUnitPhotoFilesForDuplicateCheck(folderPath, photoFolder);
       const files = fullPhotoAudit ? allFiles : allFiles.slice(0, 5);
       const folderTokens = verificationTokensForFolder(photoFolder) ?? [];
@@ -36141,15 +36152,19 @@ Return ONLY compact JSON with this exact shape:
               // match that here so a brand-new property's preflight
               // gets the same detection rate the scanner gets on
               // existing folders.
-              const candidates = sourceRows.map(({ row }) => String(row?.link || row?.url || row?.source_url || row?.source?.link || row?.source?.url || ""))
-                .filter((l: string) => {
-                  const ll = l.toLowerCase();
+              const candidates = sourceRows.map(({ row }) => ({
+                row,
+                link: String(row?.link || row?.url || row?.source_url || row?.source?.link || row?.source?.url || ""),
+              }))
+                .filter(({ link }) => {
+                  const ll = link.toLowerCase();
                   if (!ll.includes(domain)) return false;
                   return isListingUrl(ll, cfg) || ll.split(domain)[1]?.length > 5;
                 }).slice(0, 3);
               const key = cfg.key as "airbnb" | "vrbo" | "booking";
-              let verifiedCandidate: string | null = null;
-              for (const matchedLink of candidates) {
+              let verifiedCandidate: { link: string; row: any } | null = null;
+              for (const candidate of candidates) {
+                const matchedLink = candidate.link;
                 // Cross-validate: confirm the matched page actually
                 // names one of this folder/unit's tokens. For shared-building addresses
                 // the same Lens result set can contain listings for
@@ -36167,7 +36182,7 @@ Return ONLY compact JSON with this exact shape:
                     })()
                   : true;
                 if (!verified) continue;
-                verifiedCandidate = matchedLink;
+                verifiedCandidate = candidate;
                 matchedUrls[cfg.key] = matchedLink;
                 if (!firstStrongUrls[key]) {
                   firstStrongUrls[key] = matchedLink;
@@ -36175,7 +36190,17 @@ Return ONLY compact JSON with this exact shape:
                 break;
               }
               if (verifiedCandidate) {
-                photoHits[key].add(`/photos/${photoFolder}/${file}`);
+                const ourPhotoUrl = `/photos/${photoFolder}/${file}`;
+                photoHits[key].add(ourPhotoUrl);
+                const matchImageUrl = String(verifiedCandidate.row?.thumbnail ?? verifiedCandidate.row?.image ?? "") || undefined;
+                matches[key].push({
+                  photoUrl: ourPhotoUrl,
+                  listingUrl: verifiedCandidate.link,
+                  title: String(verifiedCandidate.row?.title ?? ""),
+                  source: String(verifiedCandidate.row?.source ?? ""),
+                  verified: true,
+                  ...(matchImageUrl ? { matchImageUrl } : {}),
+                });
                 matchCount++;
               }
             }
@@ -36190,30 +36215,41 @@ Return ONLY compact JSON with this exact shape:
           matchedUrls[key] = firstStrongUrls[key];
         }
       }
-      return { signals, matchedUrls, matchCounts, matchCount, totalChecked: files.length };
+      return { signals, matchedUrls, matchCounts, matches, matchCount, totalChecked: files.length };
     };
 
     // ── Combine text + photo signals into a single status per platform ─────────
-    type CombinedResult = { status: string; url: string | null; detection: string };
+    type CombinedResult = {
+      status: string;
+      url: string | null;
+      detection: string;
+      photoMatches?: PreflightPhotoMatchEvidence[];
+    };
     const combine = (
       text: { listed: boolean | null; url: string | null; titleMatch: boolean },
       photoFound: boolean,
       photoMatchedUrl: string | null,
       photoMatchCount: number,
       totalPhotos: number,
+      photoMatches: PreflightPhotoMatchEvidence[],
     ): CombinedResult => {
       if (text.listed && text.titleMatch)
-        return { status: "confirmed", url: text.url, detection: "Title match confirmed" };
+        return {
+          status: "confirmed",
+          url: text.url,
+          detection: "Title match confirmed",
+          ...(photoMatches.length > 0 ? { photoMatches } : {}),
+        };
       if (text.listed && !text.titleMatch && photoFound)
         // Text + photo both hit — prefer the text URL (the actual listing
         // we verified) but fall back to the photo-matched one when the
         // text search couldn't pin a specific listing-page URL.
-        return { status: "photo-confirmed", url: text.url ?? photoMatchedUrl, detection: "Text found + photos matched" };
+        return { status: "photo-confirmed", url: text.url ?? photoMatchedUrl, detection: "Text found + photos matched", photoMatches };
       if (!text.listed && photoFound)
         // Photo-only branch — surface the URL where the photo was found
         // so the user can click through and verify the match instead of
         // taking our boolean signal on faith.
-        return { status: "photo-only", url: photoMatchedUrl, detection: `${photoMatchCount} strong unit photos matched (${totalPhotos} checked) — no text confirmation` };
+        return { status: "photo-only", url: photoMatchedUrl, detection: `${photoMatchCount} strong unit photos matched (${totalPhotos} checked) — no text confirmation`, photoMatches };
       if (text.listed && !text.titleMatch && !photoFound)
         return { status: "unconfirmed", url: text.url, detection: "Text found — title unconfirmed, no photo match" };
       if (text.listed === null)
@@ -36280,6 +36316,23 @@ Return ONLY compact JSON with this exact shape:
       } catch { /* fall through */ }
       return null;
     };
+    const scannerMatches = (
+      row: any,
+      platform: "airbnb" | "vrbo" | "booking",
+    ): PreflightPhotoMatchEvidence[] => {
+      const json = platform === "airbnb"
+        ? row?.airbnbMatches
+        : platform === "vrbo"
+          ? row?.vrboMatches
+          : row?.bookingMatches;
+      if (!json || typeof json !== "string") return [];
+      try {
+        const parsed = JSON.parse(json);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    };
 
     // Promote a per-platform result with the scanner's verdict. "found"
     // upgrades to photo-confirmed (or keeps existing "confirmed" but
@@ -36297,12 +36350,14 @@ Return ONLY compact JSON with this exact shape:
           : row.bookingStatus;
       if (status !== "found") return combined;
       const scannerUrl = firstScannerMatchUrl(row, platform);
+      const photoMatches = scannerMatches(row, platform);
       if (combined.status === "confirmed") {
-        return { ...combined, url: combined.url ?? scannerUrl };
+        return { ...combined, url: combined.url ?? scannerUrl, ...(photoMatches.length > 0 ? { photoMatches } : {}) };
       }
       return {
         status: "photo-confirmed",
         url: scannerUrl ?? combined.url,
+        ...(photoMatches.length > 0 ? { photoMatches } : {}),
         detection: combined.status === "unconfirmed" || combined.status === "photo-only"
           ? "Text + scanner photo match"
           : "Scanner photo match — Lens detected our photos on a third-party listing",
@@ -36314,10 +36369,10 @@ Return ONLY compact JSON with this exact shape:
       units.map(async (unit) => {
         const [textResults, photoResult] = await Promise.all([
           Promise.all(PLATFORM_CONFIGS.map(cfg => textSearch(unit, cfg))),
-          unit.photoFolder ? photoSearch(unit.photoFolder, unit.unitNumber, unit.address) : Promise.resolve({ signals: { airbnb: false, vrbo: false, booking: false }, matchedUrls: { airbnb: null, vrbo: null, booking: null }, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 }, matchCount: 0, totalChecked: 0 }),
+          unit.photoFolder ? photoSearch(unit.photoFolder, unit.unitNumber, unit.address) : Promise.resolve({ signals: { airbnb: false, vrbo: false, booking: false }, matchedUrls: { airbnb: null, vrbo: null, booking: null }, matchCounts: { airbnb: 0, vrbo: 0, booking: 0 }, matches: { airbnb: [], vrbo: [], booking: [] }, matchCount: 0, totalChecked: 0 }),
         ]);
         const [airbnbText, vrboText, bookingText] = textResults;
-        const { signals, matchedUrls, matchCounts, totalChecked } = photoResult;
+        const { signals, matchedUrls, matchCounts, matches, totalChecked } = photoResult;
         const scannerRow = unit.photoFolder && scannerRowAppliesToUnit(unit.photoFolder, unit.unitNumber, unit.address)
           ? folderToScannerRow.get(unit.photoFolder)
           : undefined;
@@ -36334,9 +36389,9 @@ Return ONLY compact JSON with this exact shape:
           unitNumber: unit.unitNumber,
           address: unit.address,
           platforms: {
-            airbnb:  applyScannerOverride(combine(resolveText(airbnbText),  signals.airbnb,  matchedUrls.airbnb,  matchCounts.airbnb, totalChecked), scannerRow, "airbnb"),
-            vrbo:    applyScannerOverride(combine(resolveText(vrboText),    signals.vrbo,    matchedUrls.vrbo,    matchCounts.vrbo, totalChecked), scannerRow, "vrbo"),
-            booking: applyScannerOverride(combine(resolveText(bookingText), signals.booking, matchedUrls.booking, matchCounts.booking, totalChecked), scannerRow, "booking"),
+            airbnb:  applyScannerOverride(combine(resolveText(airbnbText),  signals.airbnb,  matchedUrls.airbnb,  matchCounts.airbnb, totalChecked, matches.airbnb), scannerRow, "airbnb"),
+            vrbo:    applyScannerOverride(combine(resolveText(vrboText),    signals.vrbo,    matchedUrls.vrbo,    matchCounts.vrbo, totalChecked, matches.vrbo), scannerRow, "vrbo"),
+            booking: applyScannerOverride(combine(resolveText(bookingText), signals.booking, matchedUrls.booking, matchCounts.booking, totalChecked, matches.booking), scannerRow, "booking"),
           },
         };
       }),

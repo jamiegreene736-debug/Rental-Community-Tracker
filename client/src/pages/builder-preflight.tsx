@@ -37,7 +37,12 @@ import {
   inferCommunityStreetAddress,
   parseCityFromMailingAddress,
 } from "@shared/community-addresses";
-import { mergeUnitVerdict, DEEP_PHOTO_MIN } from "@shared/preflight-verdict";
+import {
+  mergeUnitVerdict,
+  DEEP_PHOTO_MIN,
+  firstPreflightPhotoMatchEvidence,
+  type PreflightPhotoMatchEvidence,
+} from "@shared/preflight-verdict";
 import { confirmCommunityLocation, type LocationConfirmation } from "@shared/photo-location-confirmation";
 import { communityPhotosCorrectAnswer } from "@shared/photo-community-check-logic";
 import { isOtaPhotoSourceUrl } from "@shared/photo-source-ota-guard";
@@ -103,6 +108,135 @@ function LocationConfirmationNote({ confirmation }: { confirmation: LocationConf
     <div className={`mt-1.5 flex items-start gap-1.5 rounded-md border px-2 py-1.5 text-xs ${cls}`}>
       <Icon className="h-3.5 w-3.5 mt-0.5 shrink-0" />
       <span><span className="font-medium">{label}:</span> {confirmation.note}</span>
+    </div>
+  );
+}
+
+function PhotoMatchComparison({
+  folder,
+  platformLabel,
+  match,
+  matchCount,
+}: {
+  folder: string;
+  platformLabel: string;
+  match: PreflightPhotoMatchEvidence;
+  matchCount: number;
+}) {
+  const initialMatchImage = match.matchImageUrl ?? null;
+  const [resolvedMatchImage, setResolvedMatchImage] = useState<string | null>(initialMatchImage);
+  const [resolving, setResolving] = useState(!initialMatchImage);
+  const [ourImageBroken, setOurImageBroken] = useState(false);
+  const [matchedImageBroken, setMatchedImageBroken] = useState(false);
+
+  useEffect(() => {
+    setResolvedMatchImage(initialMatchImage);
+    setMatchedImageBroken(false);
+    if (initialMatchImage) {
+      setResolving(false);
+      return;
+    }
+
+    let cancelled = false;
+    setResolving(true);
+    fetch("/api/photo-listing-check/match-image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ folder, listingUrl: match.listingUrl }),
+    })
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!cancelled) {
+          setResolvedMatchImage(
+            response.ok && typeof data?.matchImageUrl === "string" && /^https?:\/\//i.test(data.matchImageUrl)
+              ? data.matchImageUrl
+              : null,
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setResolvedMatchImage(null);
+      })
+      .finally(() => {
+        if (!cancelled) setResolving(false);
+      });
+    return () => { cancelled = true; };
+  }, [folder, initialMatchImage, match.listingUrl]);
+
+  const imageFallback = (label: string, loading = false) => (
+    <div className="flex aspect-[4/3] w-full items-center justify-center rounded-md border border-dashed border-muted-foreground/35 bg-muted/20 px-2 text-center text-[11px] leading-tight text-muted-foreground">
+      {loading ? "Loading matched photo…" : label}
+    </div>
+  );
+
+  return (
+    <div
+      className="rounded-md border border-red-200 bg-red-50/60 p-3 dark:border-red-900 dark:bg-red-950/20"
+      data-testid={`photo-match-comparison-${platformLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+    >
+      <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="text-xs font-semibold text-red-800 dark:text-red-300">
+            {platformLabel} photo match evidence
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            Compare the exact photo we searched with the photo Google Lens matched on the listing.
+          </p>
+        </div>
+        <Badge variant="outline" className="border-red-200 bg-background/70 text-[10px] text-red-700 dark:border-red-900 dark:text-red-300">
+          {matchCount} matched photo{matchCount === 1 ? "" : "s"}
+        </Badge>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <figure className="m-0 min-w-0 rounded-md border bg-background p-2">
+          {!ourImageBroken ? (
+            <a href={match.photoUrl ?? undefined} target="_blank" rel="noopener noreferrer" title="Open our photo full size">
+              <img
+                src={match.photoUrl ?? undefined}
+                alt="Our unit photo that matched"
+                className="aspect-[4/3] w-full rounded-md object-cover"
+                onError={() => setOurImageBroken(true)}
+              />
+            </a>
+          ) : imageFallback("Our saved photo is no longer available.")}
+          <figcaption className="mt-1.5 text-[11px] font-medium text-foreground">Our photo</figcaption>
+        </figure>
+
+        <figure className="m-0 min-w-0 rounded-md border border-red-200 bg-background p-2 dark:border-red-900">
+          {resolvedMatchImage && !matchedImageBroken ? (
+            <a href={resolvedMatchImage} target="_blank" rel="noopener noreferrer" title={`Open the matching ${platformLabel} photo full size`}>
+              <img
+                src={resolvedMatchImage}
+                alt={`Photo matched on ${platformLabel}`}
+                className="aspect-[4/3] w-full rounded-md object-cover"
+                onError={() => setMatchedImageBroken(true)}
+              />
+            </a>
+          ) : imageFallback(
+            resolving
+              ? "Loading matched photo…"
+              : "Matched photo unavailable — open the listing to compare.",
+            resolving,
+          )}
+          <figcaption className="mt-1.5 text-[11px] font-medium text-red-700 dark:text-red-300">
+            Matched on {platformLabel}
+          </figcaption>
+        </figure>
+      </div>
+
+      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+        {match.title ? <span className="min-w-0 truncate text-muted-foreground">{match.title}</span> : null}
+        <a
+          href={match.listingUrl ?? undefined}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex shrink-0 items-center gap-1 font-medium text-primary hover:underline"
+        >
+          Open matched listing <ExternalLink className="h-3 w-3" />
+        </a>
+      </div>
     </div>
   );
 }
@@ -216,6 +350,7 @@ type UnitPlatformResult = {
   status: "confirmed" | "photo-confirmed" | "not-listed" | "error";
   url: string | null;
   detection: string;
+  photoMatches?: PreflightPhotoMatchEvidence[];
 };
 
 type UnitCheckResult = {
@@ -395,9 +530,9 @@ type PhotoCheckRow = {
   airbnb?: PhotoMatchStatus;
   vrbo?: PhotoMatchStatus;
   booking?: PhotoMatchStatus;
-  airbnbMatches?: Array<{ listingUrl?: string; title?: string }>;
-  vrboMatches?: Array<{ listingUrl?: string; title?: string }>;
-  bookingMatches?: Array<{ listingUrl?: string; title?: string }>;
+  airbnbMatches?: PreflightPhotoMatchEvidence[];
+  vrboMatches?: PreflightPhotoMatchEvidence[];
+  bookingMatches?: PreflightPhotoMatchEvidence[];
   // How many photos this scan reverse-image-searched. The deep Full-unit-audit scans the whole
   // gallery; the background scheduler only scans 3. Used to decide whether a "clean" is decisive.
   photosChecked?: number;
@@ -3040,6 +3175,22 @@ export default function BuilderPreflight() {
                 const isReplaced = (unit as any)._isReplaced;
                 const displayAddress = (unit as any)._overrideAddress || `${property.address}, ${formatUnitDisplayLabel(unit.unitNumber)}`;
                 const unitChecking = checkingUnitIds.has(unit.id);
+                const folder = (unit as any).photoFolder as string | undefined;
+                const pc = folder ? photoChecks[folder] : undefined;
+                const photoEvidence = folder
+                  ? PLATFORM_LIST.flatMap(({ key, label }) => {
+                      const platformMatches = unitResult?.platforms[key]?.photoMatches ?? [];
+                      const scannerMatches = pc?.[`${key}Matches` as "airbnbMatches" | "vrboMatches" | "bookingMatches"] ?? [];
+                      const scannerFound = pc?.scanned && pc[key as "airbnb" | "vrbo" | "booking"] === "found";
+                      const matches = platformMatches.length > 0
+                        ? platformMatches
+                        : scannerFound
+                          ? scannerMatches
+                          : [];
+                      const match = firstPreflightPhotoMatchEvidence(matches);
+                      return match ? [{ key, label, match, matchCount: matches.length }] : [];
+                    })
+                  : [];
 
                 return (
                   <div
@@ -3064,8 +3215,6 @@ export default function BuilderPreflight() {
 
                       <div className="grid flex-1 grid-cols-1 gap-2 sm:grid-cols-3">
                         {PLATFORM_LIST.map(({ key, label }) => {
-                          const folder = (unit as any).photoFolder as string | undefined;
-                          const pc = folder ? photoChecks[folder] : undefined;
                           // Per-platform photo verdict for this folder, only once the folder was scanned.
                           const ps = (pc && pc.scanned ? pc[key as "airbnb" | "vrbo" | "booking"] : undefined) as PhotoMatchStatus | undefined;
                           // A "clean" only decides the verdict when it came from a DEEP scan (full
@@ -3106,7 +3255,7 @@ export default function BuilderPreflight() {
                               )}
                               {(() => {
                                 if (!folder) return null;
-                                const matches = (pc as any)?.[`${key}Matches`] as Array<{ listingUrl?: string }> | undefined;
+                                const matches = pc?.[`${key}Matches` as "airbnbMatches" | "vrboMatches" | "bookingMatches"];
                                 const matchUrl = matches?.find((m) => m?.listingUrl)?.listingUrl;
                                 if (photoScanning && (!pc || ps === undefined)) {
                                   return (
@@ -3154,6 +3303,19 @@ export default function BuilderPreflight() {
                         </Button>
                       )}
                     </div>
+                    {photoEvidence.length > 0 && (
+                      <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+                        {photoEvidence.map(({ key, label, match, matchCount }) => (
+                          <PhotoMatchComparison
+                            key={`${key}-${match.listingUrl}-${match.photoUrl}`}
+                            folder={folder!}
+                            platformLabel={label}
+                            match={match}
+                            matchCount={matchCount}
+                          />
+                        ))}
+                      </div>
+                    )}
                   </div>
                 );
               })}
