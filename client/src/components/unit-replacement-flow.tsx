@@ -258,6 +258,18 @@ export type ReplacementUnitData = {
   // (allowOtaListed) and this unit was kept despite being listed on that host.
   // Its real-estate photos were still verified as not reused on the OTA.
   otaListedOn?: string | null;
+  // Server-signed authorization for the exact full gallery returned above.
+  // POST /api/unit-swaps revalidates the signature, re-runs the scan, and
+  // hydrates only these receipt-bound photos.
+  photoVerificationReceipt?: string;
+  otaPhotoVerification?: {
+    status: "verified" | "matched" | "incomplete";
+    checkedPhotos: number;
+    totalPhotos: number;
+    checkedAt: number;
+    expiresAt?: number;
+    platforms: string[];
+  };
 };
 
 export function UnitReplacementFlow({
@@ -624,6 +636,7 @@ export function UnitReplacementFlow({
           ? result.photoUrls
           : result.photos.map((p) => p.url)
         ).filter(Boolean),
+        photoVerificationReceipt: result.photoVerificationReceipt,
       });
       if (!resp.ok) {
         const err = await resp.json();
@@ -749,9 +762,9 @@ export function UnitReplacementFlow({
                   onChange={(e) => setAllowOtaListed(e.target.checked)}
                 />
                 <span>
-                  Include units already on Airbnb/VRBO
+                  Include units already on Airbnb/VRBO/Booking.com
                   <span className="block text-[10px] opacity-80">
-                    For heavily-rented communities (e.g. Waikoloa Beach Villas) where most units are already short-term rentals. Photos still come only from real-estate sites and are checked for reuse.
+                    This changes only whether the property may already be advertised. Photos still come only from real-estate sites, and every proposed photo must pass Airbnb, VRBO, and Booking.com reuse checks.
                   </span>
                 </span>
               </label>
@@ -910,6 +923,11 @@ export function UnitReplacementFlow({
         // distinctly so the green "clean" shield never lies.
         const pc = result.platformCheck;
         const otaListedHost = result.otaListedOn;
+        const otaPhotoVerification = result.otaPhotoVerification;
+        const photosConclusive = otaPhotoVerification?.status === "verified"
+          && otaPhotoVerification.totalPhotos > 0
+          && otaPhotoVerification.checkedPhotos === otaPhotoVerification.totalPhotos
+          && Boolean(result.photoVerificationReceipt);
         const statuses: Array<[label: string, key: keyof PlatformCheck]> = [
           ["Airbnb",      "airbnb"],
           ["VRBO",        "vrbo"],
@@ -1002,9 +1020,27 @@ export function UnitReplacementFlow({
             </p>
             {otaListedHost && (
               <p className="text-[11px] text-amber-700 dark:text-amber-400" data-testid="replacement-ota-listed-note">
-                This unit is already a short-term rental on {otaListedHost}. Its real-estate photos were verified as not reused on the OTA, so they're safe to use.
+                This unit is already a short-term rental on {otaListedHost}. That is allowed because the setting changes only property eligibility, not the mandatory photo-reuse check.
               </p>
             )}
+            <div
+              className={`rounded border px-2 py-1.5 text-[11px] ${
+                photosConclusive
+                  ? "border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-300"
+                  : "border-red-200 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300"
+              }`}
+              data-testid="replacement-photo-ota-verification"
+            >
+              {photosConclusive ? (
+                <span className="font-semibold">
+                  ✓ {otaPhotoVerification.checkedPhotos} of {otaPhotoVerification.totalPhotos} proposed photos reverse-checked against Airbnb, VRBO, and Booking.com. No reused photos were detected.
+                </span>
+              ) : (
+                <span className="font-semibold">
+                  Photo verification is incomplete. This replacement cannot be committed; run the search again.
+                </span>
+              )}
+            </div>
             {pc && (
               <div className="flex items-center gap-1 flex-wrap">
                 {statuses.map(([label, key]) => {
@@ -1183,7 +1219,7 @@ export function UnitReplacementFlow({
               size="sm"
               onClick={handleReplaceUnit}
               className="flex-1"
-              disabled={stage === "replacing"}
+              disabled={stage === "replacing" || !photosConclusive}
               data-testid="button-push-to-builder"
             >
               {stage === "replacing" ? (
