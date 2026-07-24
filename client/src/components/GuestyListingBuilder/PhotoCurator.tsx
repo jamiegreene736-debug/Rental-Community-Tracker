@@ -115,6 +115,8 @@ export type PhotoCuratorProps = {
   coverCollageEnabled?: boolean;
   coverCollageDisabledReason?: string | null;
   coverCollageCurrentUrl?: string | null;
+  coverCollageOpenUrl?: string | null;
+  coverCollageVerification?: "checking" | "confirmed" | "unverified" | null;
   onRequestCoverCollage?: (selection: CoverCollageSelection) => void;
   // One-click AI path: the parent POSTs the candidates to
   // /api/builder/auto-cover-collage (Claude vision picks the pair, the server
@@ -157,6 +159,8 @@ export default function PhotoCurator({
   coverCollageEnabled,
   coverCollageDisabledReason,
   coverCollageCurrentUrl,
+  coverCollageOpenUrl,
+  coverCollageVerification,
   onRequestCoverCollage,
   onRequestAutoCoverCollage,
   coverCollageStatus,
@@ -1237,6 +1241,24 @@ export default function PhotoCurator({
         </div>
       )}
 
+      {coverCollageVerification === "checking" && !coverCollageCurrentUrl && (
+        <div
+          data-testid="cover-collage-loading"
+          style={{
+            marginBottom: 20,
+            padding: "14px 16px",
+            border: "1px solid #bae6fd",
+            borderRadius: 6,
+            background: "#f0f9ff",
+            color: "#075985",
+            fontSize: 12,
+            fontWeight: 600,
+          }}
+        >
+          ⏳ Checking for the saved Cover Collage…
+        </div>
+      )}
+
       {/* Cover collage tile — rendered above the regular sections when
           Guesty has a "Cover Collage"-captioned picture on the listing.
           Read-only (no delete/rename/hide); operator regenerates via
@@ -1252,7 +1274,11 @@ export default function PhotoCurator({
               fontSize: 12, fontWeight: 600, color: "#0369a1",
               textTransform: "uppercase", letterSpacing: "0.05em",
             }}>
-              Cover Collage — live on Guesty
+              {coverCollageVerification === "checking"
+                ? "Cover Collage — saved preview; confirming Guesty…"
+                : coverCollageVerification === "unverified"
+                  ? "Cover Collage — saved preview; Guesty check unavailable"
+                  : "Cover Collage — live on Guesty"}
             </div>
             {/* While a new collage is being built this tile still shows the
                 PREVIOUS cover (it's what Guesty is serving right now). Say so —
@@ -1265,7 +1291,7 @@ export default function PhotoCurator({
               </span>
             )}
             <a
-              href={coverCollageCurrentUrl}
+              href={coverCollageOpenUrl ?? coverCollageCurrentUrl}
               target="_blank"
               rel="noopener noreferrer"
               style={{
@@ -1292,7 +1318,17 @@ export default function PhotoCurator({
                 <img
                   src={coverCollageCurrentUrl}
                   alt="Cover Collage"
-                  loading="lazy"
+                  loading="eager"
+                  fetchPriority="high"
+                  decoding="async"
+                  onError={(event) => {
+                    const fallback = coverCollageOpenUrl;
+                    if (!fallback) return;
+                    const fallbackAbsolute = new URL(fallback, window.location.href).href;
+                    if (event.currentTarget.src !== fallbackAbsolute) {
+                      event.currentTarget.src = fallback;
+                    }
+                  }}
                   style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
                 />
                 <div style={{

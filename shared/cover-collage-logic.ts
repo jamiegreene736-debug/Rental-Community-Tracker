@@ -48,6 +48,52 @@ export const COVER_COLLAGE_DISK_FOLDER = "cover-collages";
 /** app_settings key holding the map of listingId → saved-collage record. */
 export const COVER_COLLAGE_SETTING_KEY = "cover_collages.v1";
 
+export type PersistedCoverCollagePreview = {
+  collageUrl: string;
+  previewUrl: string;
+};
+
+function validHttpUrl(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const value = raw.trim();
+  if (!value || value.length > 2_000) return null;
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && !!parsed.hostname
+      ? value
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Turn a durable cover-collage receipt into a safe fast-preview hint.
+ *
+ * Only a receipt that records a successful Guesty sync can appear while the
+ * authoritative live gallery read is still running. The local preview path is
+ * constrained to the synthetic cover-collage folder; malformed or legacy
+ * paths fall back to the verified remote URL.
+ */
+export function parsePersistedCoverCollagePreview(raw: unknown): PersistedCoverCollagePreview | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  if (record.guestySynced !== true) return null;
+  const collageUrl = validHttpUrl(record.collageUrl);
+  if (!collageUrl) return null;
+  const localPath = typeof record.localPath === "string" ? record.localPath.trim() : "";
+  const safeLocalPath = new RegExp(
+    `^/photos/${COVER_COLLAGE_DISK_FOLDER}/[a-zA-Z0-9_-]+\\.jpe?g$`,
+    "i",
+  ).test(localPath)
+    ? localPath
+    : null;
+  return {
+    collageUrl,
+    previewUrl: safeLocalPath ?? collageUrl,
+  };
+}
+
 /** Parse a local gallery URL ("/photos/<folder>/<file>", absolute URLs
  * tolerated) into its folder + filename. Returns null for external photos —
  * the vision pick needs bytes on disk. */
