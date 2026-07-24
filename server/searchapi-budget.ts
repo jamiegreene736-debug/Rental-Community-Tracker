@@ -77,7 +77,17 @@ export function searchApiQuotaExhausted(
   minCredits: number = searchApiMinCredits(),
 ): boolean {
   if (!snapshot) return false; // fail-open: no reading, no block
-  return snapshot.remaining <= minCredits;
+  // Two independent "remaining" signals, because SearchAPI accounts report them
+  // differently: a subscription plan tracks usage in current_month_usage against
+  // monthly_allowance and leaves remaining_credits at 0 (that field is the
+  // pay-as-you-go prepaid balance, unused on a plan), while a prepaid account
+  // tracks remaining_credits directly. A key is only exhausted when BOTH the
+  // prepaid balance AND the monthly-allowance headroom are spent — otherwise a
+  // healthy plan key (remaining_credits: 0, but 34,971/35,000 allowance free)
+  // would be wrongly read as dead and block discovery. Live-verified 2026-07-09
+  // against the second rotation key, which searches fine at remaining_credits 0.
+  const allowanceHeadroom = snapshot.allowance - snapshot.used;
+  return snapshot.remaining <= minCredits && allowanceHeadroom <= minCredits;
 }
 
 export function describeSearchApiQuota(snapshot: SearchApiQuotaSnapshot): string {
