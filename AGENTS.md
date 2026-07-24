@@ -1907,6 +1907,79 @@ the rescue is the self-healing layer for communities nobody has curated
 yet. Locked by tests/discovery-root-rescue.test.ts (29, incl. source
 guards on the routes.ts wiring).
 
+### Unit photos may NEVER be sourced from an OTA (Load-Bearing, 2026-07-23)
+
+A gallery scraped off a live Airbnb / VRBO / Booking.com listing is, by
+construction, another host's published photo set. Publishing it to our
+Guesty listing duplicates their live content on every channel and is
+exactly what the weekly reverse-image scanner flags — so the scanner
+firing on our OWN folder means we sourced the photos wrong, not that the
+scanner is noisy.
+
+**The incident this encodes (property 4 / `unit-621`, Regency at Poipu
+Kai).** The folder's `_source.json` carried
+`sourceListing.url = https://www.vrbo.com/982364` (`verifiedBy:
+"alert-remediate"`, `scrapedDate: 2026-04-30`); its 43 photos ARE that
+VRBO listing's photos; `photo_listing_checks` correctly recorded
+`vrbo_status = found` on 2026-06-30. Discovery had been portal-gated
+since PR #338 (`detectRealEstateListingPortal` → Zillow / Realtor /
+Redfin / Homes only), but **every path that CONSUMES a saved source URL
+was ungated**, so the one poisoned stamp kept re-poisoning the gallery:
+the preflight "Re-pull all photos" job posts `_source.json`'s url
+straight into the direct-`url` leg of `fetch-unit-photos`;
+`rescrape-unit-photos` re-resolves the same stamp; the same-unit hunt
+anchors on it; and both unit-swap commit routes accepted any `http(s)`
+URL as `newSourceUrl`.
+
+`shared/photo-source-ota-guard.ts` is the single pure classifier. It is
+built on `otaPlatformForUrl` (shared/ota-host-match.ts) — **the same
+host-family matcher the duplicate-photo scanner buckets with**, so the
+guard and the detector can never disagree: whatever the scanner would
+call "found on an OTA" is exactly what we refuse to source from. That
+buys the regional VRBO family (homeaway / abritel / fewo-direkt / stayz
+/ bookabach), Airbnb's ~40 country TLDs, and `m.booking.com` for free,
+while rejecting lookalikes (`airbnb.evil.com`). A short supplementary
+list covers the OTAs the scanner has no bucket for (Expedia group,
+TripAdvisor / FlipKey, Agoda, HomeToGo).
+
+Invariants — don't loosen any of them:
+
+1. **Enforced at every seam, not just the entry points.** `fetch-unit-photos`
+   direct `url`; `rescrape-unit-photos` **supplied AND resolved** legs (the
+   resolved one is the load-bearing half — the poison arrives from
+   `_source.json` / a legacy `unit_swaps` row / the community map);
+   `POST /api/unit-swaps`; `/api/preflight/manual-unit-replacement`;
+   `hydrateUnitSwapPhotoFolder`; the curated `COMMUNITY_SOURCE_URLS`
+   primary (it is injected at the head of the pool labeled
+   `source: "zillow"` regardless of host, so it bypasses the portal
+   filter); both `readFolderSourceUrl` readers; and
+   `writeFolderSourceUrlIfMissing`.
+2. **FAIL-OPEN.** Only positively identified OTA hosts are refused. An
+   unrecognized host passes. Property-manager and resort sites stay
+   valid sources — two are configured community primaries
+   (`parrishkauai.com`, `olaproperties.com`) — because the operator's
+   rule is "not an OTA", not "not a site that rents units". The failure
+   mode being closed is the false ACCEPT.
+3. **A refusal never destroys a gallery.** Every seam refuses BEFORE any
+   folder mutation and reports `keptExisting`. The rescrape route
+   answers `needsUrl: true` so the UI prompts once for a real-estate URL.
+4. **The swap refusal is a burnable candidate rejection**
+   (`candidateRejection: "ota-source"`, HTTP 422), so the auto-replace
+   orchestrator burns that option, tries the next, and counts it in its
+   own `burnedOtaSource` bucket — an OTA burn must never be reported as
+   a community mismatch.
+5. **A poisoned `_source.json` is made INERT, not rewritten.** The
+   readers report an OTA stamp as absent and
+   `writeFolderSourceUrlIfMissing` still refuses to clobber an existing
+   stamp, so the operator's provenance record survives for audit. The
+   preflight Photo Sources card renders it as a red "⚠ These photos came
+   from a live OTA listing" warning; the remedy is replacing the unit,
+   which is an operator decision.
+
+Locked by `tests/photo-source-ota-guard.test.ts` (58, npm chain) —
+including the exact live URL, the fail-open matrix, lookalike rejection,
+and source guards on all ten seams.
+
 ### Photo scraping & curation
 
 1. **Zillow photo extractors read ONLY whitelisted keys** on the
@@ -6420,3 +6493,5 @@ Welcome. When in doubt, ask the human.
 2026-07-23 · Jamie: "On the revenue projections on the dashboard instead of using a 90 day average etc use the past 30 days instead" · ACCEPTED · The trailing run-rate basis in server/revenue-projection-aggregate.ts is now the PAST 30 DAYS: collectedDailyAvg30/revenueDailyAvg30 = last30/30 (fields RENAMED from *DailyAvg90 in shared/revenue-projection-types.ts — don't reintroduce a 90-day divisor; source-guarded in tests/revenue-projection-aggregate.test.ts), the annualized run-rate KPIs = dailyAvg30 × 365, and the 12-month projection's far-month baseline fill = revenueDailyAvg30 × daysInMonth × seasonalWeight. The T60/T90/T365 window stats + momentum/YoY are still computed and reported for context — only the headline average and the baseline basis changed. UI labels in revenue-projection-band.tsx + home.tsx now read "30-day run rate". More reactive to the current pace by design (a slow 30 days pulls the projection down faster than the old T90 smoothing) — that's the operator's explicit choice. Stale cached snapshots keep rendering (the band reads only fields that survived the rename); the next scheduler tick recomputes on the new basis.
 
 2026-07-23 · Jamie (Photos-tab screenshot): "confirm how many photos are in Guesty ... if we have 31 photos in our system and push that to Guesty ... it now should only have 31 photos" · ACCEPTED · Guesty's master gallery is now an AUTHORITATIVE EXACT REPLACEMENT: every full-gallery writer is serialized per listing; uploads finish before one whole-array `pictures` replace; readback must match every normalized URL + caption in order (count-only is insufficient); retries end with a read, and an unconfirmed replacement is an error rather than a green receipt. The Photos-tab cover-collage path rebuilds from the curated system gallery plus the new collage instead of republishing Guesty's stale gallery. UI Guesty count comes only from a no-store live Guesty read, refreshes on focus, and is green only when it equals the local expected count; mismatches explicitly show extra/missing photos and read failures never fall back to browser push history. Async push/collage completions and delayed count refreshes are fenced by listing + operation identity, selection changes clear old receipts, and failures invalidate any prior green count. Locked by `tests/guesty-picture-replacement.test.ts` plus photo-repush, collage, reconciliation, and push-history suites; full `npm test` and production build pass.
+
+2026-07-23 · Jamie: "I just replaced a unit and it pulled a source listing from VRBO. As you know this is a huge issue. It cannot be a listing already on an OTA. Please diagnose and fix" · DIAGNOSED LIVE + SHIPPED (`claude/vrbo-listing-conflict-c6cdfe`) · PROVEN FROM PROD (don't re-chase): the FIND side was never the leak — `unit_swaps` holds only Zillow/Redfin URLs, and the find-unit runs from that session correctly reported "3 found on Airbnb/VRBO/Booking.com" and rejected them. Sweeping every photo folder's `_source.json` on the volume surfaced exactly ONE OTA-sourced folder: `unit-621` (property 4, Regency at Poipu Kai) → `sourceListing.url = https://www.vrbo.com/982364`, `verifiedBy: "alert-remediate"`, `scrapedDate: 2026-04-30`, 43 photos — and `photo_listing_checks` had flagged that folder `vrbo_status = found` on 2026-06-30. The scanner was right; we had sourced the gallery off VRBO in April, which is why the operator was replacing that very unit. ROOT CAUSE: discovery was portal-gated (`detectRealEstateListingPortal` → Zillow/Realtor/Redfin/Homes) but every path that CONSUMES a saved source URL was not, so one poisoned stamp kept re-poisoning the gallery — preflight "Re-pull all photos" posts `_source.json`'s url to the UNGUARDED direct-`url` leg of `fetch-unit-photos`; `rescrape-unit-photos` re-resolves the same stamp (it even had a `platform: "vrbo"|"airbnb"` label branch); the same-unit hunt anchors on it; and `POST /api/unit-swaps` + `/api/preflight/manual-unit-replacement` accepted any `http(s)` URL as `newSourceUrl` (the manual route's copy said "Zillow, Redfin, Realtor" but nothing enforced it). FIX = one pure classifier, `shared/photo-source-ota-guard.ts`, built on the SAME host-family matcher the duplicate-photo scanner buckets with (`otaPlatformForUrl` — regional VRBO family/Airbnb country TLDs/booking.com, lookalike-safe) plus a short supplementary OTA list (Expedia group, TripAdvisor/FlipKey, Agoda, HomeToGo), enforced at every seam: fetch-unit-photos direct url (400), rescrape-unit-photos supplied AND RESOLVED legs (400 / 409 `needsUrl`+`keptExisting` — nothing is overwritten), both unit-swap commit routes (422 `candidateRejection:"ota-source"` so the auto-replace orchestrator BURNS the candidate and tries the next, with its own burn bucket + honest receipt line), `hydrateUnitSwapPhotoFolder`, the curated `COMMUNITY_SOURCE_URLS` primary (it bypasses the portal filter by design), both `readFolderSourceUrl` readers (an OTA stamp reports as ABSENT), and `writeFolderSourceUrlIfMissing` (never records one). Client: the preflight never re-sends an OTA stamp as a re-pull target, the Photo Sources card renders it as a red "⚠ These photos came from a live OTA listing" warning instead of an ordinary source, and Replace-with-URL rejects a pasted OTA link. FAIL-OPEN BY DESIGN — only positively identified OTA hosts are refused; property-manager and resort sites stay valid sources (two are configured community primaries: parrishkauai.com, olaproperties.com), because the operator's rule is "not an OTA", not "not a site that rents units". Nothing rewrites the operator's existing `_source.json` — the poisoned stamp is inert, not deleted. Locked by tests/photo-source-ota-guard.test.ts (58: live-incident URL, OTA host families, lookalike rejection, fail-open matrix, + source guards on all 10 seams; npm chain). Verified: full `npm test` REAL exit 0, build clean (strings bundle-grepped both bundles), `npm run check` 335 = baseline (stash A/B identical). LIVE FOLLOW-UP for the operator: `unit-621`'s 43 on-disk photos ARE the VRBO gallery — replacing that unit (swap 80 → Zillow APT 923) is the remedy; the guard stops it recurring.

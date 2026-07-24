@@ -816,6 +816,11 @@ async function runAutoReplaceJob(
       let burnedCoverage = 0;
       let burnedCommunity = 0;
       let burnedBedrooms = 0;
+      // A candidate whose listing URL is a live OTA page (VRBO/Airbnb/
+      // Booking.com …). find-unit only surfaces real-estate portals, so this
+      // should stay zero — it exists so the 2026-07-23 OTA photo-source gate
+      // can never read as a community mismatch in the failure receipt.
+      let burnedOtaSource = 0;
       for (;;) {
         const candidate = pickCommitCandidate(units as Array<{ url?: unknown }>, record.attemptedUrls);
         if (!candidate) {
@@ -825,8 +830,8 @@ async function runAutoReplaceJob(
           // same bounded restart budget the deploy-burst path uses. An
           // all-409/bot-wall exhaustion still fails: a fresh first-hit search
           // would simply refind the same unusable pool.
-          if ((burnedCoverage > 0 || burnedCommunity > 0 || burnedBedrooms > 0) && record.findRestarts < MAX_AUTO_REPLACE_FIND_RESTARTS) {
-            console.warn(`[auto-replace] ${record.jobId}: all ${burnedCoverage + burnedCommunity + burnedInUse + burnedPhotos + burnedBedrooms} option(s) burned (${burnedCoverage} bedroom coverage, ${burnedCommunity} community mismatch, ${burnedBedrooms} wrong bedroom count) — searching for more candidates (restart ${record.findRestarts + 1}/${MAX_AUTO_REPLACE_FIND_RESTARTS})`);
+          if ((burnedCoverage > 0 || burnedCommunity > 0 || burnedBedrooms > 0 || burnedOtaSource > 0) && record.findRestarts < MAX_AUTO_REPLACE_FIND_RESTARTS) {
+            console.warn(`[auto-replace] ${record.jobId}: all ${burnedCoverage + burnedCommunity + burnedInUse + burnedPhotos + burnedBedrooms + burnedOtaSource} option(s) burned (${burnedCoverage} bedroom coverage, ${burnedCommunity} community mismatch, ${burnedBedrooms} wrong bedroom count, ${burnedOtaSource} OTA-hosted source) — searching for more candidates (restart ${record.findRestarts + 1}/${MAX_AUTO_REPLACE_FIND_RESTARTS})`);
             touch(record, {
               phase: "finding",
               findJobId: null,
@@ -841,6 +846,7 @@ async function runAutoReplaceJob(
             burnedCoverage > 0 ? `${burnedCoverage} photographed fewer bedrooms than the unit claims (the audit needs every bedroom in the gallery)` : null,
             burnedCommunity > 0 ? `${burnedCommunity} positively mismatched the property's community` : null,
             burnedBedrooms > 0 ? `${burnedBedrooms} had a different bedroom count than this unit (replacements must match exactly)` : null,
+            burnedOtaSource > 0 ? `${burnedOtaSource} were live OTA listings (photos may never be sourced from Airbnb/VRBO/Booking.com)` : null,
           ].filter(Boolean).join("; ");
           await finishAutoReplaceFailure(
             record,
@@ -967,14 +973,19 @@ async function runAutoReplaceJob(
         // which is never burned and falls through to the explicit job failure
         // below so the current unit remains untouched.
         if (status === 422 && data?.candidateRejected === true) {
-          const coverageReject = data?.candidateRejection === "bedroom-coverage";
+          const rejection = data?.candidateRejection;
+          const coverageReject = rejection === "bedroom-coverage";
+          const otaReject = rejection === "ota-source";
           if (coverageReject) burnedCoverage += 1;
+          else if (otaReject) burnedOtaSource += 1;
           else burnedCommunity += 1;
           touch(record, {
             attemptedUrls: [...record.attemptedUrls, url],
             message: coverageReject
               ? "Candidate's staged gallery failed bedroom coverage — trying the next option…"
-              : "Candidate's staged gallery is not in this community — trying the next option…",
+              : otaReject
+                ? "Candidate is a live OTA listing — photos may never be sourced from an OTA; trying the next option…"
+                : "Candidate's staged gallery is not in this community — trying the next option…",
           });
           continue;
         }

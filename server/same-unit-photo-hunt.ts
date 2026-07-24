@@ -22,6 +22,7 @@ import { fetchSearchApiWithFallback } from "./searchapi";
 import { MIN_INDEPENDENT_UNIT_PHOTOS } from "./unit-photo-resolver";
 import { replacementPhotoFolderRef } from "@shared/photo-folder-utils";
 import { extractListingUnitIdentity } from "@shared/real-estate-listing-discovery";
+import { isOtaPhotoSourceUrl } from "@shared/photo-source-ota-guard";
 import { fetchRemoteImage } from "./remote-image-fetch";
 import {
   evaluateGalleryNovelty,
@@ -92,6 +93,17 @@ export async function readFolderSourceUrl(
     const doc = JSON.parse(raw) as { sourceListing?: { url?: unknown } };
     const url = doc?.sourceListing?.url;
     savedUrl = typeof url === "string" && /^https?:\/\//i.test(url) ? url : null;
+    // OTA PHOTO-SOURCE GATE (2026-07-23): a stamp pointing at a live OTA
+    // listing is not a usable anchor — it is the poison itself. `unit-621`
+    // carried https://www.vrbo.com/982364 from an April alert-remediate run,
+    // and every consumer of this reader (the same-unit hunt anchor, the
+    // server-side re-pull fallback) would have kept feeding it back into the
+    // photo pipeline. Treat it as ABSENT so callers report "no saved source
+    // listing" and the operator supplies a real-estate URL.
+    if (savedUrl && isOtaPhotoSourceUrl(savedUrl)) {
+      console.warn(`[photo-source] ${folder}: saved source ${savedUrl} is a live OTA listing — ignoring it as a photo source`);
+      savedUrl = null;
+    }
   } catch {}
 
   const replacementRef = replacementPhotoFolderRef(folder);

@@ -137,6 +137,11 @@ import {
   selectBestPhotoGalleryOption,
 } from "@shared/real-estate-listing-discovery";
 import {
+  isOtaPhotoSourceUrl,
+  otaPhotoSourceMessage,
+  otaPhotoSourceRejection,
+} from "@shared/photo-source-ota-guard";
+import {
   collectReservationPaymentIssues,
   PAYMENT_WARNING_WINDOW_DAYS,
   PAYMENT_WARNING_WINDOW_MS,
@@ -34257,6 +34262,18 @@ Return ONLY compact JSON with this exact shape:
         ? suppliedUrl : null;
       let urlSource: "supplied" | "_source.json" | "unit_swap" | "community_map" | null =
         sourceUrl ? "supplied" : null;
+      // OTA PHOTO-SOURCE GATE (2026-07-23) — supplied leg. See
+      // shared/photo-source-ota-guard.ts. Refused BEFORE any folder mutation,
+      // so the existing gallery is untouched.
+      const suppliedOtaRejection = otaPhotoSourceRejection(sourceUrl);
+      if (suppliedOtaRejection) {
+        return res.status(400).json({
+          error: otaPhotoSourceMessage(suppliedOtaRejection, "Photo source"),
+          keptExisting: true,
+          otaSource: true,
+          otaHost: suppliedOtaRejection.host,
+        });
+      }
       const authoritativeSwap = await authoritativeReplacementPhotoSource(folder);
       const authoritativeSwapUrl = authoritativeSwap?.sourceUrl ?? null;
       if (replacementPhotoFolderRef(folder) && !authoritativeSwapUrl) {
@@ -34345,6 +34362,29 @@ Return ONLY compact JSON with this exact shape:
         return res.status(409).json({
           needsUrl: true,
           error: "No source URL on file for this folder. Paste the listing URL and I'll save it for next time.",
+        });
+      }
+      // OTA PHOTO-SOURCE GATE (2026-07-23) — RESOLVED leg. The supplied-URL
+      // check above cannot cover this: the poisoned value arrives from the
+      // folder's own `_source.json` (property 4 / unit-621 carried
+      // https://www.vrbo.com/982364 from an April alert-remediate run), from a
+      // legacy unit_swap row, or from the community map. Without this, every
+      // "Re-pull all photos" faithfully re-downloaded a live VRBO gallery.
+      // Reported as `needsUrl` so the UI prompts for a real-estate listing
+      // exactly once — and `keptExisting` because nothing was touched.
+      const resolvedOtaRejection = otaPhotoSourceRejection(sourceUrl);
+      if (resolvedOtaRejection) {
+        console.warn(
+          `[rescrape] ${folder}: refusing OTA photo source ${sourceUrl} (${resolvedOtaRejection.host}, via ${urlSource ?? "unknown"})`,
+        );
+        return res.status(409).json({
+          needsUrl: true,
+          keptExisting: true,
+          otaSource: true,
+          otaHost: resolvedOtaRejection.host,
+          error:
+            `${otaPhotoSourceMessage(resolvedOtaRejection, `The source listing saved for this folder (${urlSource ?? "unknown"})`)} ` +
+            `The existing gallery was kept — paste a real-estate listing URL to re-pull.`,
         });
       }
       const findPhasePhotoUrls = typeof rawPhotoProofToken === "string"
@@ -39279,7 +39319,7 @@ Return ONLY compact JSON with this exact shape:
     };
     /** Positive candidate-specific contradiction: safe for auto-replace to burn. */
     candidateRejected?: boolean;
-    candidateRejection?: "community-mismatch" | "bedroom-coverage";
+    candidateRejection?: "community-mismatch" | "bedroom-coverage" | "ota-source";
     /** Infrastructure or missing evidence: current unit remains untouched and candidate is not burned. */
     communityGateInconclusive?: boolean;
     retryable?: boolean;
@@ -39479,6 +39519,21 @@ Return ONLY compact JSON with this exact shape:
     const url = swap.newSourceUrl;
     const folder = replacementPhotoFolderForUnit(swap.propertyId, swap.oldUnitId);
     if (!/^https?:\/\//i.test(url)) return { ok: false, folder, savedCount: 0, error: "Replacement source URL is invalid" };
+    // OTA PHOTO-SOURCE GATE (2026-07-23) — last line before any scrape. Both
+    // commit routes screen `newSourceUrl` already; this catches any future
+    // caller. `candidateRejected` makes the auto-replace orchestrator burn
+    // this candidate and try the next option rather than failing the job.
+    const hydrationOtaRejection = otaPhotoSourceRejection(url);
+    if (hydrationOtaRejection) {
+      return {
+        ok: false,
+        folder,
+        savedCount: 0,
+        candidateRejected: true,
+        candidateRejection: "ota-source",
+        error: otaPhotoSourceMessage(hydrationOtaRejection, "Replacement listing"),
+      };
+    }
     const photosBase = path.join(process.cwd(), "client/public/photos");
     const folderPath = path.join(photosBase, folder);
     const releaseFolderLock = await acquirePhotoFolderWriteLock(folderPath);
@@ -39749,6 +39804,17 @@ Return ONLY compact JSON with this exact shape:
     if (!/^https?:\/\//i.test(sourceUrl)) {
       return res.status(400).json({ error: "Paste a full listing URL (Zillow, Redfin, Realtor, etc.)" });
     }
+    // OTA PHOTO-SOURCE GATE (2026-07-23): this route's copy has always said
+    // "Zillow, Redfin, Realtor" but nothing enforced it, so a pasted VRBO /
+    // Airbnb / Booking.com listing became a unit's photo source outright.
+    const manualOtaRejection = otaPhotoSourceRejection(sourceUrl);
+    if (manualOtaRejection) {
+      return res.status(400).json({
+        error: otaPhotoSourceMessage(manualOtaRejection, "Replacement listing"),
+        otaSource: true,
+        otaHost: manualOtaRejection.host,
+      });
+    }
 
     const { url, newAddress, newUnitLabel } = manualReplacementFromUrl(sourceUrl, oldUnitNumber);
     const swapInput = {
@@ -39869,6 +39935,21 @@ Return ONLY compact JSON with this exact shape:
     const parsed = insertUnitSwapSchema.safeParse(swapBody);
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid unit swap data", details: parsed.error.flatten() });
+    }
+    // OTA PHOTO-SOURCE GATE (2026-07-23): find-unit only ever surfaces
+    // real-estate portals, but this route is also the commit seam for the
+    // "pick manually" dialog and for the auto-replace orchestrator's loopback
+    // — neither re-validated the host. 422 + candidateRejected so a machine
+    // caller burns the candidate and moves on instead of failing the job.
+    const swapOtaRejection = otaPhotoSourceRejection(parsed.data.newSourceUrl);
+    if (swapOtaRejection) {
+      return res.status(422).json({
+        error: otaPhotoSourceMessage(swapOtaRejection, "Replacement listing"),
+        candidateRejected: true,
+        candidateRejection: "ota-source",
+        otaSource: true,
+        otaHost: swapOtaRejection.host,
+      });
     }
     return withUnitSwapPropertyWriteLock(parsed.data.propertyId, async () => {
     // The same dedicated lock covers the precondition, folder replacement,
@@ -43967,6 +44048,26 @@ Return ONLY compact JSON with this exact shape:
         ? baseJson({ locationConfirmation: unitLocationConfirmation, ...payload })
         : baseJson(payload);
 
+    // OTA PHOTO-SOURCE GATE (2026-07-23). The DISCOVERY leg below only ever
+    // admits real-estate portals (`detectRealEstateListingPortal`), but this
+    // DIRECT-`url` leg scraped whatever it was handed — and it is the single
+    // funnel every saved-source re-pull flows through: the preflight
+    // "Re-pull all photos" job posts `_source.json`'s url here, and so does
+    // the same-unit hunt's gallery scrape. Property 4 / unit-621 had
+    // `https://www.vrbo.com/982364` stamped as its source in April, so every
+    // re-pull re-downloaded a live VRBO listing's gallery into our folder
+    // (the weekly scanner then flagged that folder vrbo=found, correctly).
+    // Refuse at the funnel: no OTA gallery may enter the photo pipeline.
+    const directUrlOtaRejection = otaPhotoSourceRejection(url);
+    if (directUrlOtaRejection) {
+      console.warn(`[fetch-unit-photos] refusing OTA photo source ${url} (${directUrlOtaRejection.host})`);
+      return res.status(400).json({
+        error: otaPhotoSourceMessage(directUrlOtaRejection, "Photo source"),
+        otaSource: true,
+        otaHost: directUrlOtaRejection.host,
+      });
+    }
+
     let listingUrl: string | undefined = url || undefined;
     let foundVia: "url" | "search" = "url";
     const requestedBedrooms = bedrooms === "any"
@@ -44479,7 +44580,15 @@ Return ONLY compact JSON with this exact shape:
           if (onStreet.length > 0) orderedCandidates = [...onStreet, ...offStreet];
         }
       }
-      const knownPhotoSourceUrl = COMMUNITY_SOURCE_URLS[communityName]?.primary;
+      // The curated primary is injected at the head of the pool and labeled
+      // `source: "zillow"` regardless of its real host, so it bypasses the
+      // portal filter above — guard it explicitly. Every curated entry is a
+      // real-estate or PM/resort page today; this keeps a future OTA edit
+      // from silently becoming a scrape target.
+      const curatedPrimary = COMMUNITY_SOURCE_URLS[communityName]?.primary;
+      const knownPhotoSourceUrl = curatedPrimary && !isOtaPhotoSourceUrl(curatedPrimary)
+        ? curatedPrimary
+        : undefined;
       if (knownPhotoSourceUrl && !skipSet.has(listingKey(knownPhotoSourceUrl))) {
         const knownKey = listingKey(knownPhotoSourceUrl);
         orderedCandidates = [
