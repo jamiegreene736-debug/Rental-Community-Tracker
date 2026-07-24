@@ -1,9 +1,11 @@
 // Locks the decisive YES/NO merge for the builder Pre-Flight "Full unit audit"
 // (shared/preflight-verdict.ts mergeUnitVerdict).
 import assert from "node:assert";
+import { readFileSync } from "node:fs";
 import {
   mergeUnitVerdict,
   DEEP_PHOTO_MIN,
+  firstPreflightPhotoMatchEvidence,
   type PreflightTextResult,
   type PreflightPhotoStatus,
 } from "../shared/preflight-verdict";
@@ -81,6 +83,50 @@ check("quick: no text + found → No",
 
 // ── DEEP_PHOTO_MIN sanity ───────────────────────────────────────────────────────
 check("DEEP_PHOTO_MIN is above the background scheduler's 3-photo scan", DEEP_PHOTO_MIN > 3);
+
+// ── Full-audit photo evidence selection ────────────────────────────────────────
+const evidence = firstPreflightPhotoMatchEvidence([
+  { photoUrl: "javascript:alert(1)", listingUrl: "https://vrbo.com/1" },
+  {
+    photoUrl: "/photos/unit-b/bedroom.jpg",
+    listingUrl: "https://www.vrbo.com/123",
+    matchImageUrl: "https://images.example.com/matched.jpg",
+    title: "Unit B",
+  },
+]);
+check("photo evidence skips unsafe rows and accepts the app-owned /photos path",
+  evidence?.photoUrl === "/photos/unit-b/bedroom.jpg" && evidence.listingUrl === "https://www.vrbo.com/123");
+
+check("photo evidence drops an unsafe optional matched-image URL",
+  firstPreflightPhotoMatchEvidence([{
+    photoUrl: "https://admin.example.com/photos/unit-b/bedroom.jpg",
+    listingUrl: "https://www.vrbo.com/123",
+    matchImageUrl: "data:image/svg+xml,unsafe",
+  }])?.matchImageUrl === null);
+
+check("photo evidence requires both our image and an http(s) listing link",
+  firstPreflightPhotoMatchEvidence([
+    { photoUrl: "/photos/unit-b/bedroom.jpg", listingUrl: "javascript:alert(1)" },
+  ]) === null);
+
+const preflightPageSource = readFileSync(
+  new URL("../client/src/pages/builder-preflight.tsx", import.meta.url),
+  "utf8",
+);
+const routesSource = readFileSync(new URL("../server/routes.ts", import.meta.url), "utf8");
+check("full-audit UI renders the exact ours-versus-listing photo comparison",
+  preflightPageSource.includes("PhotoMatchComparison") &&
+    preflightPageSource.includes("Our photo") &&
+    preflightPageSource.includes("Matched on {platformLabel}"));
+
+check("legacy evidence resolves the matched listing image instead of leaving a silent blank",
+  preflightPageSource.includes('"/api/photo-listing-check/match-image"') &&
+    preflightPageSource.includes("Matched photo unavailable — open the listing to compare."));
+
+check("the live preflight photo search carries both image URLs into the audit result",
+  routesSource.includes("photoMatches?: PreflightPhotoMatchEvidence[]") &&
+    routesSource.includes("photoUrl: ourPhotoUrl") &&
+    routesSource.includes("matchImageUrl"));
 
 console.log(failed === 0
   ? `preflight-verdict: all ${passed} checks passed`

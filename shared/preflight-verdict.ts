@@ -31,6 +31,42 @@ export type PreflightTextResult = {
 
 export type PreflightPhotoStatus = "clean" | "found" | "unknown";
 
+export type PreflightPhotoMatchEvidence = {
+  photoUrl?: string | null;
+  listingUrl?: string | null;
+  title?: string | null;
+  source?: string | null;
+  verified?: boolean;
+  matchImageUrl?: string | null;
+};
+
+const isHttpUrl = (value: unknown): value is string =>
+  typeof value === "string" && /^https?:\/\//i.test(value.trim());
+
+const isOurPhotoUrl = (value: unknown): value is string =>
+  isHttpUrl(value) || (typeof value === "string" && /^\/photos\/[^/]+\/[^/]+/i.test(value.trim()));
+
+/**
+ * Chooses the first stored Lens match that the preflight UI can safely show.
+ * The listing link must be http(s), while our own image may also use the
+ * app-owned /photos/... path. Invalid optional thumbnails are omitted so a
+ * stale/malformed row never becomes an unsafe image or link target.
+ */
+export function firstPreflightPhotoMatchEvidence(
+  matches: readonly (PreflightPhotoMatchEvidence | null | undefined)[] | null | undefined,
+): PreflightPhotoMatchEvidence | null {
+  for (const match of matches ?? []) {
+    if (!match || !isOurPhotoUrl(match.photoUrl) || !isHttpUrl(match.listingUrl)) continue;
+    return {
+      ...match,
+      photoUrl: match.photoUrl.trim(),
+      listingUrl: match.listingUrl.trim(),
+      matchImageUrl: isHttpUrl(match.matchImageUrl) ? match.matchImageUrl.trim() : null,
+    };
+  }
+  return null;
+}
+
 export type MergeUnitVerdictOptions = {
   /** Full unit audit: YES only when text AND photo both confirm. */
   requireDual?: boolean;
