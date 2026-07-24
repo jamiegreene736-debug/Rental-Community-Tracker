@@ -5,6 +5,7 @@
 
 import fs from "fs";
 import path from "path";
+import { isOtaPhotoSourceUrl } from "@shared/photo-source-ota-guard";
 
 const INTERNAL_STAGING_FOLDER_RE = /^\.[a-zA-Z0-9_-]+\.staging-\d+-[a-f0-9]{8}$/;
 
@@ -29,6 +30,15 @@ export function publicPhotoDir(folder: string): string {
  * Read the source listing URL a folder's photos were scraped from (stamped into
  * `_source.json` by the last rescrape / Guesty import). Feeds the source-page
  * community-verification leg. Fail-soft: returns undefined on any error.
+ *
+ * OTA PHOTO-SOURCE GATE (2026-07-23): a stamp naming a live OTA listing is
+ * reported as ABSENT. It is not provenance we can act on — every consumer
+ * (source-page community check, the audit sweep's find-new skip list and its
+ * description grounding) treats this value as "the listing this unit's photos
+ * legitimately came from", which a VRBO/Airbnb/Booking page never is. The
+ * `unit-621` folder carried https://www.vrbo.com/982364 for three months.
+ * Note this does NOT rewrite the file — `writeFolderSourceUrlIfMissing` still
+ * refuses to clobber an existing stamp, so the operator's record is intact.
  */
 export async function readFolderSourceUrl(folder: string): Promise<string | undefined> {
   const sourcePath = path.join(publicPhotoDir(folder), "_source.json");
@@ -37,7 +47,8 @@ export async function readFolderSourceUrl(folder: string): Promise<string | unde
       sourceListing?: { url?: string } | null;
     };
     const url = doc?.sourceListing?.url;
-    return typeof url === "string" && url.trim() ? url.trim() : undefined;
+    if (typeof url !== "string" || !url.trim()) return undefined;
+    return isOtaPhotoSourceUrl(url.trim()) ? undefined : url.trim();
   } catch {
     return undefined;
   }
@@ -54,6 +65,12 @@ export async function readFolderSourceUrl(folder: string): Promise<string | unde
 export async function writeFolderSourceUrlIfMissing(folder: string, url: string): Promise<boolean> {
   const trimmed = String(url ?? "").trim();
   if (!/^https?:\/\//i.test(trimmed)) return false;
+  // OTA PHOTO-SOURCE GATE (2026-07-23): never record a live OTA listing as a
+  // folder's photo provenance. A stamp here is read back by the re-pull job,
+  // rescrape-unit-photos, and the source-page community check — writing one
+  // would recreate exactly the `unit-621` → vrbo.com/982364 poisoning this
+  // guard exists to end. See shared/photo-source-ota-guard.ts.
+  if (isOtaPhotoSourceUrl(trimmed)) return false;
   const dir = publicPhotoDir(folder);
   const sourcePath = path.join(dir, "_source.json");
   let doc: Record<string, unknown> = {};

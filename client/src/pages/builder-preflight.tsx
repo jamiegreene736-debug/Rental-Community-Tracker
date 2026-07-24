@@ -40,6 +40,7 @@ import {
 import { mergeUnitVerdict, DEEP_PHOTO_MIN } from "@shared/preflight-verdict";
 import { confirmCommunityLocation, type LocationConfirmation } from "@shared/photo-location-confirmation";
 import { communityPhotosCorrectAnswer } from "@shared/photo-community-check-logic";
+import { isOtaPhotoSourceUrl } from "@shared/photo-source-ota-guard";
 
 type PreflightPhotoFetchJob = {
   id: string;
@@ -1181,7 +1182,13 @@ export default function BuilderPreflight() {
       const replacingExistingPhotos = isDraft
         ? (unit.photos?.length ?? 0) > 0
         : photoCountForUnit(unit.id, unit.photos?.length ?? 0) > 0;
-      const currentSourceUrl = await loadSourceUrl(unit.photoFolder);
+      // OTA PHOTO-SOURCE GATE (2026-07-23): a folder whose `_source.json`
+      // points at a live OTA listing (property 4 / unit-621 carried
+      // https://www.vrbo.com/982364) must never have that URL fed back as a
+      // re-pull target or hunt anchor. The server refuses it too — this just
+      // keeps the client from starting a job that can only fail.
+      const savedSourceUrl = await loadSourceUrl(unit.photoFolder);
+      const currentSourceUrl = savedSourceUrl && isOtaPhotoSourceUrl(savedSourceUrl) ? null : savedSourceUrl;
       // skipUrls only governs the DISCOVERY fallback (when the unit's own
       // saved listing is dead/thin). Block sibling sources so discovery can't
       // re-save the same listing on both units, and block this unit's own
@@ -1869,6 +1876,16 @@ export default function BuilderPreflight() {
       toast({ title: "Paste a listing URL", description: "Add the Zillow, Redfin, or Realtor URL for the replacement unit.", variant: "destructive" });
       return;
     }
+    // OTA PHOTO-SOURCE GATE (2026-07-23): the server refuses this too — this
+    // just fails fast with a message that names the actual rule.
+    if (isOtaPhotoSourceUrl(url)) {
+      toast({
+        title: "That's a live OTA listing",
+        description: "Unit photos may never be scraped from Airbnb, VRBO, or Booking.com — they would duplicate that host's live listing. Paste a Zillow, Redfin, Realtor.com, or Homes.com URL instead.",
+        variant: "destructive",
+      });
+      return;
+    }
     setManualReplacingUnitId(unit.id);
     try {
       const resp = await apiRequest("POST", "/api/preflight/manual-unit-replacement", {
@@ -2408,6 +2425,33 @@ export default function BuilderPreflight() {
                           <span className="inline-flex items-center gap-1 text-muted-foreground">
                             <Loader2 className="h-3 w-3 animate-spin" /> Loading source…
                           </span>
+                        ) : unitSource && isOtaPhotoSourceUrl(unitSource.url) ? (
+                          /* OTA-sourced gallery (2026-07-23). These photos were
+                             scraped off a live short-term-rental listing, so they
+                             duplicate another host's live content on every channel
+                             we publish to — that is what trips the duplicate-photo
+                             scanner. Say so plainly instead of rendering it as an
+                             ordinary source; re-pull is refused server-side. */
+                          <div className="flex items-start gap-1.5 text-red-700 dark:text-red-300">
+                            <MapPin className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                            <span className="min-w-0">
+                              <span className="font-medium">⚠ These photos came from a live OTA listing:</span>{" "}
+                              <a
+                                href={unitSource.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="underline break-all"
+                              >
+                                {unitSource.url}
+                              </a>
+                              <span className="block mt-1">
+                                Photos may never be sourced from Airbnb, VRBO, or Booking.com — they duplicate
+                                that host&apos;s live listing. Re-pull is blocked for this source; use
+                                &quot;Find replacement unit&quot; or &quot;Replace with URL&quot; with a
+                                real-estate listing (Zillow, Redfin, Realtor.com, Homes.com).
+                              </span>
+                            </span>
+                          </div>
                         ) : unitSource ? (
                           <div className="flex items-start gap-1.5">
                             <MapPin className="h-3.5 w-3.5 mt-0.5 flex-shrink-0 text-muted-foreground" />
