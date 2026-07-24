@@ -2,15 +2,58 @@
  * Provider-neutral guardrails shared by every virtual-staging image backend.
  * Scene-specific instructions are appended by buildVirtualStagingPrompt.
  */
-export const VIRTUAL_STAGING_RECIPE_VERSION = "room-preserving-refresh-v5";
+export const VIRTUAL_STAGING_RECIPE_VERSION = "manifest-complete-refresh-v6";
 export const VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX = "virtual-staging-recipe::";
 export const VIRTUAL_STAGING_SUPERSEDED_RECIPE_SIGNATURES = [
   `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-furnishings-v2`,
   `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-alternate-angle-v3`,
   `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-photo-feedback-v4`,
+  `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}room-preserving-refresh-v5`,
 ] as const;
 
 export const VIRTUAL_STAGING_FEEDBACK_MAX_LENGTH = 1_000;
+export const VIRTUAL_STAGING_MANIFEST_VERSION = "strict-source-manifest-v1";
+
+export type VirtualStagingNormalizedRegion = {
+  /** Normalized source-image coordinate from 0 through 1. */
+  x: number;
+  /** Normalized source-image coordinate from 0 through 1. */
+  y: number;
+  /** Normalized source-image width from 0 through 1. */
+  width: number;
+  /** Normalized source-image height from 0 through 1. */
+  height: number;
+};
+
+export type VirtualStagingManifestTarget = {
+  id: string;
+  category: string;
+  description: string;
+  region: VirtualStagingNormalizedRegion;
+  styleNotes: string;
+};
+
+export type VirtualStagingStyleProfile = {
+  designLanguage: string;
+  palette: string;
+  materials: string;
+  patternScale: string;
+  qualityLevel: string;
+  regionalCharacter: string;
+};
+
+/**
+ * Immutable, source-derived acceptance contract. It is created before a paid
+ * generation and then supplied unchanged to generation and every QA pass.
+ */
+export type VirtualStagingSourceManifest = {
+  version: typeof VIRTUAL_STAGING_MANIFEST_VERSION;
+  roomFunction: string;
+  styleProfile: VirtualStagingStyleProfile;
+  preserveTargets: VirtualStagingManifestTarget[];
+  mustChangeTargets: VirtualStagingManifestTarget[];
+  finishOnlyTargets: VirtualStagingManifestTarget[];
+};
 
 export function virtualStagingRecipeSignature(): string {
   return `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}${VIRTUAL_STAGING_RECIPE_VERSION}`;
@@ -51,10 +94,11 @@ export function virtualStagingViewpointDirectionForSource(
 
 export const VIRTUAL_STAGING_PROMPT = [
   "GOAL: Create one photorealistic vacation-rental listing photo of the exact same physical space, using the uploaded photograph as the sole visual reference.",
-  "SOURCE AUTHORITY: First inventory the visible permanent architecture, floor boundaries, room function, every movable object, and the established design language. The photograph is authoritative when metadata differs from visible evidence.",
+  "SOURCE AUTHORITY: The supplied source manifest is the complete, immutable inventory and acceptance contract derived from the photograph before generation. The photograph remains authoritative when metadata differs from visible evidence.",
   "CAMERA: Render a genuine adjacent-camera view with a level horizon, natural real-estate lens, source aspect ratio, source camera height, broadly similar framing, time of day, ambient lighting, and exterior-view identity. The small lateral move creates mild physical parallax while keeping the composition familiar.",
   "ARCHITECTURE: Preserve the room dimensions and geometry of walls, ceiling, windows, doors, trim, columns, openings, cabinets, countertops, appliances, built-ins, permanent fixtures, railings, and outdoor-platform boundaries. Preserve the floor plane, footprint, elevation, boundaries, transitions, baseboards, and perspective while visibly refreshing only its surface finish or material.",
-  "OBJECT INVENTORY: Map every visible movable object one-for-one to the same functional category, count, approximate scale, footprint, orientation, capacity, and placement. A source sofa remains one sofa, a sectional remains one sectional, a dining set keeps its table and seat count, a bed keeps its type and sleeping capacity, and each existing lamp maps to one lamp. Areas that are open in the source remain naturally open. The result contains exactly the source seating inventory and precisely the inventoried source furniture and decor.",
+  "OBJECT INVENTORY: Visibly replace every manifest must-change target with a recognizably different instance, one-for-one, while preserving its functional category, count, approximate scale, footprint, orientation, capacity, and placement. Recoloring or making a barely perceptible edit is not a replacement. A source sofa remains one sofa, a sectional remains one sectional, a dining set keeps its table and seat count, a bed keeps its type and sleeping capacity, and each existing lamp maps to one visibly different lamp. Areas that are open in the source remain naturally open. Add nothing and omit nothing.",
+  "FINISH INVENTORY: Every manifest finish-only target must receive a visibly different, style-compatible surface finish, material, color, pattern, textile, or hardware appearance while retaining its exact geometry, location, boundaries, function, and capacity.",
   "STYLE: Make each refreshed surface, textile, furnishing, lamp, artwork, plant, and accessory a close stylistic sibling of the source. Match its palette, material family, pattern scale and density, era, formality, quality level, function, and regional character. Hawaiian, tropical, island, coastal, or resort character remains distinctly recognizable in every refreshed item.",
   "PLACEMENT: Indoor objects remain indoor and appropriate to the visible room function. Outdoor furniture remains weather-resistant, outdoor-rated, and on the same private outdoor platform.",
   "REALISM: Use correct scale, material response, occlusion, contact shadows, reflections, and physically plausible lighting. Produce the new view through genuine physical camera translation and yaw with natural parallax.",
@@ -86,12 +130,12 @@ const SCENE_DESCRIPTION: Record<VirtualStagingScene, string> = {
 };
 
 const SCENE_REFRESH_RULE: Record<VirtualStagingScene, string> = {
-  "living-area": "Visibly refresh the floor surface and map each existing sofa, sectional, chair, table, rug, lamp, artwork, plant, and accessory one-for-one. Preserve seating counts and the room's circulation paths.",
-  bedroom: "Visibly refresh the floor surface, bed linens, and every existing movable lamp or lampshade. Bed linens include the duvet or coverlet, sheets, blankets, bed pillows, and decorative bed pillows. Keep the bed size, mattress position, frame, headboard, nightstands, seating inventory, and circulation space. Map any other visible movable decor one-for-one.",
-  kitchen: "Visibly refresh the floor surface and map each existing stool, rug, movable lamp, artwork, plant, and accessory one-for-one. Preserve cabinets, counters, backsplash geometry, appliances, islands, plumbing, stool count, and work clearances.",
-  bathroom: "Visibly refresh the floor surface and map each existing towel, bath mat, movable lamp, artwork, plant, and accessory one-for-one. Preserve the vanity, plumbing, mirrors, tub, shower, toilet, tile boundaries, and clearances.",
-  dining: "Visibly refresh the floor surface and map the existing dining table, every dining chair, rug, lamp, artwork, plant, and accessory one-for-one. Preserve the exact seat count, table footprint, and circulation space.",
-  "private-outdoor": "Visibly refresh the private platform's surface finish and map each existing outdoor seat, table, cushion, rug, lamp, plant, and accessory one-for-one. Preserve the exact seating count, platform geometry, railings, view, and circulation space; use outdoor-rated replacements.",
+  "living-area": "Visibly replace every sofa, sectional, chair, table, rug, lamp, artwork, plant, textile, and accessory identified by the manifest. Visibly refresh all identified floor and wall finishes. Preserve exact seating counts, footprints, placements, functions, and circulation paths.",
+  bedroom: "Visibly replace every bed-linen set, movable lamp or lampshade, nightstand, seat, rug, artwork, plant, textile, and accessory identified by the manifest. Bed linens include the duvet or coverlet, sheets, blankets, bed pillows, and decorative bed pillows. Visibly refresh all identified floor and wall finishes. Preserve the exact bed size, mattress position, frame and headboard geometry, furniture counts, placements, functions, sleeping capacity, and circulation space.",
+  kitchen: "Visibly replace every stool, rug, movable lamp, artwork, plant, textile, and accessory identified by the manifest. Visibly refresh all identified floor, wall, cabinet, counter, backsplash, appliance, hardware, and fixture finishes without changing their geometry. Preserve islands, plumbing, stool count, work clearances, placements, and functions.",
+  bathroom: "Visibly replace every towel, bath mat, movable lamp, artwork, plant, textile, and accessory identified by the manifest. Visibly refresh all identified floor, wall, vanity, counter, tile, hardware, and fixture finishes without changing their geometry. Preserve plumbing, mirrors, tub, shower, toilet, boundaries, placements, functions, and clearances.",
+  dining: "Visibly replace the dining table, every dining chair, rug, lamp, artwork, plant, textile, and accessory identified by the manifest. Visibly refresh all identified floor and wall finishes. Preserve exact seat count, table footprint, placements, functions, and circulation space.",
+  "private-outdoor": "Visibly replace every outdoor seat, table, cushion, rug, lamp, plant, textile, and accessory identified by the manifest. Visibly refresh all identified platform, wall, railing, hardware, and fixture finishes without changing their geometry. Preserve exact seating count, platform geometry, view, placements, functions, circulation space, and outdoor-rated suitability.",
 };
 
 export function virtualStagingSceneRefreshRule(context: VirtualStagingContext): string {
@@ -101,6 +145,7 @@ export function virtualStagingSceneRefreshRule(context: VirtualStagingContext): 
 export function buildVirtualStagingPrompt(
   context: VirtualStagingContext,
   viewpointDirection: VirtualStagingViewpointDirection,
+  manifest?: VirtualStagingSourceManifest,
 ): string {
   const viewpointInstruction =
     `CAMERA MOVE: Shift the camera approximately 6 to 12 inches to the ${viewpointDirection}, as the visible space safely permits, then yaw 2 to 5 degrees back toward the scene center. ` +
@@ -108,7 +153,10 @@ export function buildVirtualStagingPrompt(
   const sceneInstruction = context.placement === "outdoor"
     ? "SCENE: Metadata identifies a private outdoor patio, balcony, deck, or lanai. Keep the camera on that same private platform, within its plausible standing area and behind its railing. Furnishings remain weather-resistant and outdoor-rated."
     : `SCENE: Metadata identifies ${SCENE_DESCRIPTION[context.scene]}. Keep the camera inside that exact room and use interior furnishings appropriate to its visible function. Objects seen outside through an opening remain outside and outdoor-rated.`;
-  return `${VIRTUAL_STAGING_PROMPT} ${viewpointInstruction} ${sceneInstruction} REFRESH RECIPE: ${virtualStagingSceneRefreshRule(context)} ${VIRTUAL_STAGING_INELIGIBLE_SCENE_GUARD}`;
+  const manifestInstruction = manifest
+    ? `SOURCE MANIFEST (authoritative JSON; every target is mandatory): ${JSON.stringify(manifest)}`
+    : "SOURCE MANIFEST: Inventory every visible permanent feature, significant movable object, decor item, textile, finish, and fixture before editing; every inventoried target is mandatory.";
+  return `${VIRTUAL_STAGING_PROMPT} ${viewpointInstruction} ${sceneInstruction} REFRESH RECIPE: ${virtualStagingSceneRefreshRule(context)} ${manifestInstruction} ABSOLUTE ACCEPTANCE CONTRACT: Preserve every preserve target; visibly change every must-change and finish-only target; preserve exact object functions, counts, capacities, footprints, orientations, placements, and style; preserve finish-target geometry; and add or remove nothing. A candidate that misses any one target is a failure. ${VIRTUAL_STAGING_INELIGIBLE_SCENE_GUARD}`;
 }
 
 /**

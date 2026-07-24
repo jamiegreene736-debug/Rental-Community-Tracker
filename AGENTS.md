@@ -1907,6 +1907,38 @@ the rescue is the self-healing layer for communities nobody has curated
 yet. Locked by tests/discovery-root-rescue.test.ts (29, incl. source
 guards on the routes.ts wiring).
 
+### Virtual staging is manifest-complete and fail-closed (Load-Bearing, 2026-07-24)
+
+An alternate-angle staged photo may become selectable only after the
+following contract succeeds in full:
+
+1. Analyze the immutable original before any image-provider spend and
+   create one structured manifest covering permanent geometry, every
+   significant movable furnishing/decor/textile, every visible finish,
+   and the source style.
+2. Preserve the unit's bones: room geometry, openings, planes,
+   boundaries, built-ins, fixed-feature locations, object functions,
+   counts, capacities, footprints, orientations, and placements.
+3. Visibly replace every manifest `mustChangeTarget` with a recognizably
+   different same-style instance. A recolor or barely perceptible edit
+   is not a replacement.
+4. Visibly change every `finishOnlyTarget` (including the floor or
+   private platform) while preserving its exact geometry and function.
+5. Add nothing, omit nothing, and preserve open space.
+6. Pass deterministic per-target no-op/structure checks and two
+   independent, itemized vision reviews. Both reviews must cover every
+   manifest ID exactly once and pass unanimously.
+
+Any missing inventory, invalid verifier response, failed target,
+unexpected/missing object, geometry change, or verifier outage rejects
+the candidate. A bounded retry must start from the immutable original
+and include the prior rejection reason. Never make an unverified or
+partially passing candidate selectable. Per-photo operator feedback is
+still a narrow same-angle correction from the immutable original plus
+the reviewed preview; do not silently expand that flow into a complete
+restage. Locked by `tests/virtual-staging.test.ts` and
+`tests/virtual-staging-service.test.ts`.
+
 ### Unit photos may NEVER be sourced from an OTA (Load-Bearing, 2026-07-23)
 
 A gallery scraped off a live Airbnb / VRBO / Booking.com listing is, by
@@ -6495,3 +6527,5 @@ Welcome. When in doubt, ask the human.
 2026-07-23 · Jamie (Photos-tab screenshot): "confirm how many photos are in Guesty ... if we have 31 photos in our system and push that to Guesty ... it now should only have 31 photos" · ACCEPTED · Guesty's master gallery is now an AUTHORITATIVE EXACT REPLACEMENT: every full-gallery writer is serialized per listing; uploads finish before one whole-array `pictures` replace; readback must match every normalized URL + caption in order (count-only is insufficient); retries end with a read, and an unconfirmed replacement is an error rather than a green receipt. The Photos-tab cover-collage path rebuilds from the curated system gallery plus the new collage instead of republishing Guesty's stale gallery. UI Guesty count comes only from a no-store live Guesty read, refreshes on focus, and is green only when it equals the local expected count; mismatches explicitly show extra/missing photos and read failures never fall back to browser push history. Async push/collage completions and delayed count refreshes are fenced by listing + operation identity, selection changes clear old receipts, and failures invalidate any prior green count. Locked by `tests/guesty-picture-replacement.test.ts` plus photo-repush, collage, reconciliation, and push-history suites; full `npm test` and production build pass.
 
 2026-07-23 · Jamie: "I just replaced a unit and it pulled a source listing from VRBO. As you know this is a huge issue. It cannot be a listing already on an OTA. Please diagnose and fix" · DIAGNOSED LIVE + SHIPPED (`claude/vrbo-listing-conflict-c6cdfe`) · PROVEN FROM PROD (don't re-chase): the FIND side was never the leak — `unit_swaps` holds only Zillow/Redfin URLs, and the find-unit runs from that session correctly reported "3 found on Airbnb/VRBO/Booking.com" and rejected them. Sweeping every photo folder's `_source.json` on the volume surfaced exactly ONE OTA-sourced folder: `unit-621` (property 4, Regency at Poipu Kai) → `sourceListing.url = https://www.vrbo.com/982364`, `verifiedBy: "alert-remediate"`, `scrapedDate: 2026-04-30`, 43 photos — and `photo_listing_checks` had flagged that folder `vrbo_status = found` on 2026-06-30. The scanner was right; we had sourced the gallery off VRBO in April, which is why the operator was replacing that very unit. ROOT CAUSE: discovery was portal-gated (`detectRealEstateListingPortal` → Zillow/Realtor/Redfin/Homes) but every path that CONSUMES a saved source URL was not, so one poisoned stamp kept re-poisoning the gallery — preflight "Re-pull all photos" posts `_source.json`'s url to the UNGUARDED direct-`url` leg of `fetch-unit-photos`; `rescrape-unit-photos` re-resolves the same stamp (it even had a `platform: "vrbo"|"airbnb"` label branch); the same-unit hunt anchors on it; and `POST /api/unit-swaps` + `/api/preflight/manual-unit-replacement` accepted any `http(s)` URL as `newSourceUrl` (the manual route's copy said "Zillow, Redfin, Realtor" but nothing enforced it). FIX = one pure classifier, `shared/photo-source-ota-guard.ts`, built on the SAME host-family matcher the duplicate-photo scanner buckets with (`otaPlatformForUrl` — regional VRBO family/Airbnb country TLDs/booking.com, lookalike-safe) plus a short supplementary OTA list (Expedia group, TripAdvisor/FlipKey, Agoda, HomeToGo), enforced at every seam: fetch-unit-photos direct url (400), rescrape-unit-photos supplied AND RESOLVED legs (400 / 409 `needsUrl`+`keptExisting` — nothing is overwritten), both unit-swap commit routes (422 `candidateRejection:"ota-source"` so the auto-replace orchestrator BURNS the candidate and tries the next, with its own burn bucket + honest receipt line), `hydrateUnitSwapPhotoFolder`, the curated `COMMUNITY_SOURCE_URLS` primary (it bypasses the portal filter by design), both `readFolderSourceUrl` readers (an OTA stamp reports as ABSENT), and `writeFolderSourceUrlIfMissing` (never records one). Client: the preflight never re-sends an OTA stamp as a re-pull target, the Photo Sources card renders it as a red "⚠ These photos came from a live OTA listing" warning instead of an ordinary source, and Replace-with-URL rejects a pasted OTA link. FAIL-OPEN BY DESIGN — only positively identified OTA hosts are refused; property-manager and resort sites stay valid sources (two are configured community primaries: parrishkauai.com, olaproperties.com), because the operator's rule is "not an OTA", not "not a site that rents units". Nothing rewrites the operator's existing `_source.json` — the poisoned stamp is inert, not deleted. Locked by tests/photo-source-ota-guard.test.ts (58: live-incident URL, OTA host families, lookalike rejection, fail-open matrix, + source guards on all 10 seams; npm chain). Verified: full `npm test` REAL exit 0, build clean (strings bundle-grepped both bundles), `npm run check` 335 = baseline (stash A/B identical). LIVE FOLLOW-UP for the operator: `unit-621`'s 43 on-disk photos ARE the VRBO gallery — replacing that unit (swap 80 → Zillow APT 923) is the remedy; the guard stops it recurring.
+
+2026-07-24 · Jamie: "When the virtual restaging is done ... I want the frame/bones of the unit but everything else, as much as possible, I want changed except to ensure that the style stays the same" → "How would you change this so that it is strict enough to guarantee?" → "Please implement changes 1-8 and then merge PR with main." · ACCEPTED · Alternate-angle virtual staging is now manifest-complete and fail-closed: source inventory before spend; permanent bones preserved; every eligible furnishing/decor/textile visibly replaced; every visible finish changed without geometry drift; exact function/count/capacity/placement/style preserved; no additions or omissions; deterministic per-target guards; two independent itemized vision passes; failure-specific immutable-original retries; and no failed, partial, malformed, or unverified candidate can become selectable. The guarantee applies to the acceptance gate, not the image generator: generation may fail, but an output cannot pass unless every contract item passes. Per-photo feedback remains a narrow same-angle edit.

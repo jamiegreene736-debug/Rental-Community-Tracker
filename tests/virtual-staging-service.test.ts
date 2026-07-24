@@ -24,7 +24,13 @@ import {
   VirtualStagingViewpointVerificationUnavailableError,
   type VirtualStagingViewpointVerificationInput,
   type VirtualStagingViewpointVerifier,
+  type VirtualStagingSourceAnalysisInput,
 } from "../server/virtual-staging-viewpoint-verifier";
+import { assertManifestDrivenImageChecks } from "../server/virtual-staging-image-checks";
+import {
+  VIRTUAL_STAGING_MANIFEST_VERSION,
+  type VirtualStagingSourceManifest,
+} from "../shared/virtual-staging";
 
 type AsyncTest = { name: string; run: () => void | Promise<void> };
 const tests: AsyncTest[] = [];
@@ -83,15 +89,97 @@ class TestViewpointVerifier implements VirtualStagingViewpointVerifier {
     private readonly handler: (
       input: VirtualStagingViewpointVerificationInput,
     ) => void | Promise<void> = () => undefined,
+    private readonly analyzeHandler: (
+      input: VirtualStagingSourceAnalysisInput,
+    ) => VirtualStagingSourceManifest | Promise<VirtualStagingSourceManifest> = () =>
+      testSourceManifest,
   ) {}
 
   isConfigured(): boolean {
     return true;
   }
 
+  async analyzeSource(input: VirtualStagingSourceAnalysisInput): Promise<VirtualStagingSourceManifest> {
+    return this.analyzeHandler(input);
+  }
+
   async verify(input: VirtualStagingViewpointVerificationInput): Promise<void> {
     await this.handler(input);
   }
+}
+
+const testSourceManifest: VirtualStagingSourceManifest = {
+  version: VIRTUAL_STAGING_MANIFEST_VERSION,
+  roomFunction: "living area",
+  styleProfile: {
+    designLanguage: "coastal",
+    palette: "neutral blue",
+    materials: "wood and woven textiles",
+    patternScale: "medium",
+    qualityLevel: "upscale vacation rental",
+    regionalCharacter: "island coastal",
+  },
+  preserveTargets: [{
+    id: "room-shell",
+    category: "architecture",
+    description: "visible room shell",
+    region: { x: 0, y: 0, width: 1, height: 1 },
+    styleNotes: "preserve geometry",
+  }],
+  mustChangeTargets: [{
+    id: "main-sofa",
+    category: "sofa",
+    description: "main sofa",
+    region: { x: 0, y: 0, width: 1, height: 1 },
+    styleNotes: "coastal neutral",
+  }],
+  finishOnlyTargets: [{
+    id: "floor-finish",
+    category: "floor",
+    description: "visible floor finish",
+    region: { x: 0, y: 0, width: 1, height: 1 },
+    styleNotes: "coastal material",
+  }],
+};
+
+function strictAcceptingVerdict(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    samePhysicalSpace: true,
+    viewpointChange: "nearby-natural",
+    naturalParallax: true,
+    fakeTransformDetected: false,
+    architecturePreserved: true,
+    styleConsistent: true,
+    objectInventoryPreserved: true,
+    sceneRefreshApplied: true,
+    preserveReviews: [{
+      id: "room-shell",
+      geometryPreserved: true,
+      reason: "The room shell geometry is preserved.",
+    }],
+    mustChangeReviews: [{
+      id: "main-sofa",
+      visiblyChanged: true,
+      sameFunction: true,
+      countAndPlacementPreserved: true,
+      styleCompatible: true,
+      reason: "The sofa is recognizably different in the same location and style.",
+    }],
+    finishOnlyReviews: [{
+      id: "floor-finish",
+      finishChanged: true,
+      geometryPreserved: true,
+      styleCompatible: true,
+      reason: "The floor finish changed without changing its plane.",
+    }],
+    unexpectedObjects: [],
+    missingObjects: [],
+    geometryChanges: [],
+    reason: "Every manifest target passes.",
+    ...overrides,
+  };
 }
 
 function acceptingViewpointVerifier(): TestViewpointVerifier {
@@ -279,6 +367,33 @@ test("the provider receives the immutable source bytes unchanged", async () => {
   assert.equal(receivedHash, square.toString("base64"));
 });
 
+test("source analysis completes before paid generation and the manifest stays attached", async () => {
+  const events: string[] = [];
+  const provider = new TestProvider(async (input) => {
+    events.push("generate");
+    assert.match(input.prompt, /SOURCE MANIFEST \(authoritative JSON; every target is mandatory\)/);
+    assert.match(input.prompt, /"id":"main-sofa"/);
+    return editedSquare;
+  });
+  const verifier = new TestViewpointVerifier(
+    (input) => {
+      events.push("verify");
+      assert.deepEqual(input.manifest, testSourceManifest);
+    },
+    () => {
+      events.push("analyze");
+      return testSourceManifest;
+    },
+  );
+  await new VirtualStagingService([provider], 1, verifier).generate({
+    source: square,
+    sourceFilename: "room.jpg",
+    generationAttempt: 1,
+    context: indoorContext,
+  });
+  assert.deepEqual(events, ["analyze", "generate", "verify"]);
+});
+
 test("feedback derives from the immutable original, references the reviewed preview, and prefers OpenAI", async () => {
   let replicateCalls = 0;
   let openAICalls = 0;
@@ -451,8 +566,10 @@ test("a quality-rejected image gets one bounded retry before provider fallback",
   let firstCalls = 0;
   let secondCalls = 0;
   let verificationCalls = 0;
-  const first = new TestProvider(async () => {
+  const firstPrompts: string[] = [];
+  const first = new TestProvider(async (input) => {
     firstCalls += 1;
+    firstPrompts.push(input.prompt);
     return editedSquare;
   }, "first-provider");
   const second = new TestProvider(async () => {
@@ -476,6 +593,10 @@ test("a quality-rejected image gets one bounded retry before provider fallback",
     secondCalls: 1,
     verificationCalls: 3,
   });
+  assert.doesNotMatch(firstPrompts[0], /QUALITY RETRY/);
+  assert.match(firstPrompts[1], /QUALITY RETRY/);
+  assert.match(firstPrompts[1], /same camera position/);
+  assert.match(firstPrompts[1], /immutable original/i);
 });
 
 test("alternate-angle quality retries are capped at two paid generations per provider", async () => {
@@ -637,6 +758,115 @@ test("every real provider result must pass geometry-aware viewpoint verification
   assert.ok(verifiedDirection === "left" || verifiedDirection === "right");
 });
 
+test("manifest-driven deterministic checks reject an unchanged required target", async () => {
+  await assert.rejects(
+    assertManifestDrivenImageChecks({
+      source: square,
+      generated: square,
+      manifest: testSourceManifest,
+      provider: "test-provider",
+    }),
+    /Required target .* did not change visibly/,
+  );
+  await assertManifestDrivenImageChecks({
+    source: square,
+    generated: editedSquare,
+    manifest: testSourceManifest,
+    provider: "test-provider",
+  });
+});
+
+test("the Anthropic source analyzer creates a complete manifest before generation", async () => {
+  let requestBody: Record<string, unknown> | null = null;
+  const verifier = new AnthropicVirtualStagingViewpointVerifier(
+    "test-key",
+    "claude-review",
+    async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const { version: _version, ...analyzerManifest } = testSourceManifest;
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: JSON.stringify(analyzerManifest) }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 100, output_tokens: 200 },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+    "claude-manifest",
+  );
+  const manifest = await verifier.analyzeSource({
+    source: square,
+    sourceFilename: "living-room.jpg",
+    context: indoorContext,
+  });
+  assert.deepEqual(manifest, testSourceManifest);
+  assert.equal(requestBody?.model, "claude-manifest");
+  const schema = (requestBody?.output_config as {
+    format?: { schema?: { properties?: Record<string, unknown>; required?: string[] } };
+  })?.format?.schema;
+  assert.ok(schema?.properties?.preserveTargets);
+  assert.ok(schema?.properties?.mustChangeTargets);
+  assert.ok(schema?.properties?.finishOnlyTargets);
+  const messages = requestBody?.messages as Array<{
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+  const prompt = [...(messages[0]?.content ?? [])].reverse()
+    .find((block) => block.type === "text")?.text ?? "";
+  assert.match(prompt, /every clearly visible significant movable furnishing/i);
+  assert.match(prompt, /Always include the visible floor/i);
+  assert.match(prompt, /Completeness is mandatory/i);
+});
+
+test("strict manifest verification requires unanimous independent itemized reviews", async () => {
+  const requestBodies: Array<Record<string, unknown>> = [];
+  const verifier = new AnthropicVirtualStagingViewpointVerifier(
+    "test-key",
+    "claude-primary",
+    async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const verdict = requestBodies.length === 1
+        ? strictAcceptingVerdict()
+        : strictAcceptingVerdict({
+          mustChangeReviews: [{
+            id: "main-sofa",
+            visiblyChanged: false,
+            sameFunction: true,
+            countAndPlacementPreserved: true,
+            styleCompatible: true,
+            reason: "The source sofa remains recognizable after a color-only edit.",
+          }],
+          reason: "The sofa was not visibly replaced.",
+        });
+      return new Response(JSON.stringify({
+        content: [{ type: "text", text: JSON.stringify(verdict) }],
+        stop_reason: "end_turn",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+    "claude-manifest",
+    "claude-adversarial",
+  );
+  await assert.rejects(
+    verifier.verify({
+      source: square,
+      generated: editedSquare,
+      requestedDirection: "left",
+      context: indoorContext,
+      imageProvider: "test-provider",
+      generationAttempt: 1,
+      manifest: testSourceManifest,
+    }),
+    /failed alternate-angle verification.*sofa was not visibly replaced/i,
+  );
+  assert.equal(requestBodies.length, 2);
+  assert.equal(requestBodies[0].model, "claude-primary");
+  assert.equal(requestBodies[1].model, "claude-adversarial");
+  const secondMessages = requestBodies[1].messages as Array<{
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+  const adversarialPrompt = [...(secondMessages[0]?.content ?? [])].reverse()
+    .find((block) => block.type === "text")?.text ?? "";
+  assert.match(adversarialPrompt, /independent adversarial visual QA gate/i);
+  assert.match(adversarialPrompt, /Return exactly one itemized review for every manifest target ID/i);
+});
+
 test("the Anthropic verifier compares a reroll with both source and prior staged viewpoints", async () => {
   let requestBody: Record<string, unknown> | null = null;
   const verifier = new AnthropicVirtualStagingViewpointVerifier(
@@ -745,7 +975,7 @@ test("the Anthropic verifier rejects an otherwise valid bedroom angle with an ad
   const prompt = [...(messages[0]?.content ?? [])].reverse()
     .find((block) => block.type === "text")?.text ?? "";
   assert.match(prompt, /added chair/i);
-  assert.match(prompt, /refresh the floor surface, bed linens/i);
+  assert.match(prompt, /refreshed floor surface, refreshed bed linens/i);
   assert.match(prompt, /6 to 12 inches/i);
 });
 

@@ -7,6 +7,7 @@ import {
   virtualStagingRecipeSignature,
   virtualStagingViewpointDirectionForSource,
   type VirtualStagingContext,
+  type VirtualStagingSourceManifest,
 } from "@shared/virtual-staging";
 import { DUPLICATE_DISTANCE, hammingDistance, HASH_BITS } from "@shared/photo-hash-distance";
 import { ReplicateVirtualStagingProvider } from "./replicate-virtual-staging-provider";
@@ -16,6 +17,7 @@ import {
   VirtualStagingViewpointVerificationUnavailableError,
   type VirtualStagingViewpointVerifier,
 } from "./virtual-staging-viewpoint-verifier";
+import { assertManifestDrivenImageChecks } from "./virtual-staging-image-checks";
 
 const DEFAULT_MODEL = "gpt-image-2";
 const MAX_INPUT_BYTES = 50 * 1024 * 1024;
@@ -394,24 +396,43 @@ export class VirtualStagingService {
       input.sourceFilename,
       input.generationAttempt,
     );
-    const providerInput: VirtualStagingGenerationInput = {
-      ...input,
-      // The immutable original remains Image 1 for every generation. The
-      // reviewed preview is reference-only, preventing iterative edits from
-      // compounding generated pixels and architectural drift.
-      source: input.source,
-      ...(mode === "feedback-revision" ? { referenceSource: input.previousPreview! } : {}),
-      mode,
-      prompt: mode === "feedback-revision"
-        ? buildVirtualStagingFeedbackPrompt(input.context, feedback!)
-        : buildVirtualStagingPrompt(input.context, viewpointDirection),
-    };
     return this.limiter.run(async () => {
+      // A strict source manifest is created once, before any image-provider
+      // spend, and remains immutable across every provider and retry.
+      const hasRealProvider = this.providersFor(mode).some((provider) => provider.id !== "mock");
+      const manifest: VirtualStagingSourceManifest | undefined = mode === "alternate-angle"
+        && hasRealProvider
+        ? await this.viewpointVerifier.analyzeSource({
+          source: input.source,
+          sourceFilename: input.sourceFilename,
+          context: input.context,
+        })
+        : undefined;
+      const basePrompt = mode === "feedback-revision"
+        ? buildVirtualStagingFeedbackPrompt(input.context, feedback!)
+        : buildVirtualStagingPrompt(input.context, viewpointDirection, manifest);
+      const baseProviderInput: VirtualStagingGenerationInput = {
+        ...input,
+        // The immutable original remains Image 1 for every generation. The
+        // reviewed preview is reference-only, preventing iterative edits from
+        // compounding generated pixels and architectural drift.
+        source: input.source,
+        ...(mode === "feedback-revision" ? { referenceSource: input.previousPreview! } : {}),
+        mode,
+        prompt: basePrompt,
+      };
       const errors: string[] = [];
       for (const provider of this.providersFor(mode)) {
         const providerAttempts = mode === "alternate-angle" ? 2 : 1;
+        let qualityRetryReason: string | null = null;
         for (let providerAttempt = 1; providerAttempt <= providerAttempts; providerAttempt += 1) {
           try {
+            const providerInput: VirtualStagingGenerationInput = qualityRetryReason
+              ? {
+                ...baseProviderInput,
+                prompt: `${basePrompt} QUALITY RETRY: The prior candidate failed strict QA because ${JSON.stringify(qualityRetryReason)}. Correct that exact defect while satisfying every unchanged manifest requirement. Generate again from the immutable original; do not edit the rejected candidate.`,
+              }
+              : baseProviderInput;
             const result = await provider.generate(providerInput);
             const validated = await validateGeneratedImage(
               result.buffer,
@@ -428,6 +449,14 @@ export class VirtualStagingService {
                 result.provider,
                 previousPreviewHash,
               );
+              if (manifest) {
+                await assertManifestDrivenImageChecks({
+                  source: input.source,
+                  generated: validated.buffer,
+                  manifest,
+                  provider: result.provider,
+                });
+              }
             }
             if (result.provider !== "mock") {
               await this.viewpointVerifier.verify({
@@ -439,6 +468,7 @@ export class VirtualStagingService {
                 imageProvider: result.provider,
                 generationAttempt: input.generationAttempt,
                 mode,
+                ...(manifest ? { manifest } : {}),
                 ...(mode === "feedback-revision" ? { feedback } : {}),
               });
             }
@@ -452,11 +482,13 @@ export class VirtualStagingService {
               && error instanceof VirtualStagingViewpointRejectedError
               && providerAttempt < providerAttempts
             ) {
+              qualityRetryReason = safeProviderError(error);
               console.info(`[virtual-staging] ${JSON.stringify({
                 event: "quality-retry",
                 provider: provider.id,
                 generationAttempt: input.generationAttempt,
                 providerAttempt,
+                reason: qualityRetryReason,
               })}`);
               continue;
             }
@@ -504,6 +536,8 @@ export function getVirtualStagingService(): VirtualStagingService {
     process.env.OPENAI_IMAGE_MODEL ?? "",
     process.env.ANTHROPIC_API_KEY ? "anthropic" : "",
     process.env.VIRTUAL_STAGING_VIEWPOINT_MODEL ?? "",
+    process.env.VIRTUAL_STAGING_MANIFEST_MODEL ?? "",
+    process.env.VIRTUAL_STAGING_ADVERSARIAL_MODEL ?? "",
     parseVirtualStagingConcurrency(),
   ].join("|");
   if (!defaultService || defaultServiceSignature !== signature) {
