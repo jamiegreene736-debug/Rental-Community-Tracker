@@ -596,6 +596,11 @@ export type SidecarRequest = {
   createdAt: number;
   claimedAt?: number;
   claimedBy?: SidecarWorkerRuntime["source"];
+  // Incremented on every fresh claim, including a stale-claim reclaim. Unlike
+  // claimedAt (which heartbeats refresh), this is a stable claim identity that
+  // lets awaiters reset their wallet when ownership changes without needing to
+  // observe the brief pending state between claims.
+  claimGeneration?: number;
   completedAt?: number;
   cancelled?: boolean;
   pausedReason?: string;
@@ -1418,6 +1423,17 @@ function isOtaBrowserOp(opType: SidecarOpType): boolean {
   );
 }
 
+function isLocalInteractiveListingOp(opType: SidecarOpType): boolean {
+  return opType === "zillow_photo_scrape" || opType === "listing_gallery_scrape";
+}
+
+function localWorkerIsOnline(now = nowMs()): boolean {
+  return Boolean(
+    lastLocalWorkerPollAt !== null &&
+    now - lastLocalWorkerPollAt < LOCAL_WORKER_PREFERRED_WINDOW_MS
+  );
+}
+
 function localWorkerHasActiveOtaClaim(): boolean {
   for (const r of queue.values()) {
     if (r.status !== "in_progress" || !isOtaBrowserOp(r.opType)) continue;
@@ -1444,6 +1460,17 @@ function canClaimOp(request: SidecarRequest, runtime?: SidecarWorkerRuntime | nu
   // on the operator's own screen. Never let a server/Railway worker claim it
   // (it would throw "unknown opType: vrbo_book").
   if (request.opType === "vrbo_book" && runtime?.source !== "local") return false;
+  // Real-estate listing scrapes can surface an operator-solvable CAPTCHA in
+  // the Mac's real Chrome. While that worker is online, never let a remote
+  // Railway worker claim these jobs: a remote/headless claim cannot provide
+  // the yellow handoff and can strand the request until reclaim.
+  if (
+    runtime?.source === "server" &&
+    isLocalInteractiveListingOp(request.opType) &&
+    localWorkerIsOnline()
+  ) {
+    return false;
+  }
   if (runtime?.source === "server" && isOtaBrowserOp(request.opType) && localWorkerIsPreferred()) {
     return false;
   }
@@ -2023,6 +2050,7 @@ export function next(runtime?: Partial<SidecarWorkerRuntime> | null): SidecarReq
   oldest.status = "in_progress";
   oldest.claimedAt = nowMs();
   oldest.claimedBy = normalizedRuntime?.source;
+  oldest.claimGeneration = (oldest.claimGeneration ?? 0) + 1;
   return oldest;
 }
 
@@ -3468,12 +3496,14 @@ export async function fetchVrboPaymentScheduleViaSidecar(opts: {
 // The pause is freshness-gated (the stage must have been re-stamped within the
 // last 45s — the worker's wait loop heartbeats every ~2.5s) so a wedged/dead
 // worker can NOT pin a wallet open, and ceiling-bounded
-// (SIDECAR_MANUAL_SOLVE_HOLD_MS, default 6 min; 0 disables the pause).
+// (SIDECAR_MANUAL_SOLVE_HOLD_MS, default 12 min; 0 disables the pause). The
+// ceiling covers both waiting behind the single visible-challenge lock and
+// the operator's own solve window.
 const MANUAL_SOLVE_STAGE_RE = /waiting for manual\b.{0,40}\b(?:captcha|bot|verification|challenge)/i;
 const MANUAL_SOLVE_STAGE_FRESH_MS = 45_000;
 function manualSolveHoldCeilingMs(): number {
-  const raw = Number(process.env.SIDECAR_MANUAL_SOLVE_HOLD_MS ?? 6 * 60_000);
-  return Number.isFinite(raw) && raw >= 0 ? raw : 6 * 60_000;
+  const raw = Number(process.env.SIDECAR_MANUAL_SOLVE_HOLD_MS ?? 12 * 60_000);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 12 * 60_000;
 }
 
 // Shared enqueue + poll loop. Each `searchXViaSidecar` is a thin
@@ -3549,6 +3579,7 @@ async function awaitOpResult(opts: {
   }
   const { id, deduped } = enqueueOp(opts.enqueueArgs);
   let activeStartedAt: number | null = null;
+  let observedClaimGeneration: number | null = null;
   let manualHoldStartedAt: number | null = null;
   let aborted = false;
   const cancelIfOwned = (reason: string) => {
@@ -3626,7 +3657,16 @@ async function awaitOpResult(opts: {
         };
       }
       if (r.status === "in_progress") {
-        if (activeStartedAt === null) {
+        const claimGeneration = r.claimGeneration ?? 0;
+        if (observedClaimGeneration !== claimGeneration) {
+          // A stale claim can be reclaimed and claimed again between two poll
+          // ticks, so the waiter may never observe r.status === "pending".
+          // Reset from the new claim identity instead of carrying the expired
+          // worker wallet into the replacement worker's first seconds.
+          observedClaimGeneration = claimGeneration;
+          manualHoldStartedAt = null;
+          activeStartedAt = deduped ? now : (r.claimedAt ?? now);
+        } else if (activeStartedAt === null) {
           activeStartedAt = deduped ? now : (r.claimedAt ?? now);
         }
         // Manual-solve wallet pause — see MANUAL_SOLVE_STAGE_RE above. While the
@@ -3650,6 +3690,7 @@ async function awaitOpResult(opts: {
       } else if (activeStartedAt !== null) {
         // Reclaimed jobs return to pending; extend the wallet for the next claim.
         activeStartedAt = null;
+        observedClaimGeneration = null;
       }
       if (r.status === "pending" && now - startedAt >= queueBudgetMs) {
         const reason = `queue wait budget ${queueBudgetMs}ms exceeded waiting for worker`;

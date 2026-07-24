@@ -236,11 +236,13 @@ instances. In legacy local-CDP mode they map to local Chrome profiles:
 - `http://127.0.0.1:9222` using `VrboSidecar-Chrome`
 - `http://127.0.0.1:9223` using `VrboSidecar-Chrome-2`
 - `http://127.0.0.1:9224` using `VrboSidecar-Chrome-3`
-- ...through `VrboSidecar-Chrome-8` when `MAX_LOCAL_CHROME_INSTANCES=8`
 
-Set `MAX_LOCAL_CHROME_INSTANCES=1` through `8` for normal operation.
-The manager has a hard safety cap of `12`. PM website discovery and PM
-URL checks also use tab-level concurrency:
+The installed Mac default is three workers. Set
+`MAX_LOCAL_CHROME_INSTANCES=1` through `8` when deliberately tuning the
+pool; the manager has a hard safety cap of `12`. Manual CAPTCHA windows
+are serialized across workers, so parallel scrapes cannot cover the
+challenge currently waiting for the operator. PM website discovery and
+PM URL checks also use tab-level concurrency:
 
 ```sh
 SIDECAR_PM_SITE_TAB_CONCURRENCY=3
@@ -387,7 +389,7 @@ Manual plist reference:
   <key>EnvironmentVariables</key>
   <dict>
     <key>MAX_LOCAL_CHROME_INSTANCES</key>
-    <string>8</string>
+    <string>3</string>
     <key>SERVER_CHROME_FALLBACK_ENABLED</key>
     <string>0</string>
   </dict>

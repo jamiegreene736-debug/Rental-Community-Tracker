@@ -163,6 +163,14 @@ function scheduleReturnFocus() {
 const SERVER = process.env.SIDECAR_SERVER ?? "https://rental-community-tracker-production.up.railway.app";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
 const WORKER_SLOT = process.env.SIDECAR_WORKER_SLOT ?? "1";
+const MANUAL_CHALLENGE_LOCK_PATH =
+  process.env.SIDECAR_MANUAL_CHALLENGE_LOCK_PATH ??
+  path.join(os.tmpdir(), "rct-sidecar-manual-challenge.lock");
+const MANUAL_CHALLENGE_LOCK_WAIT_MS = Math.max(
+  30_000,
+  Number(process.env.SIDECAR_MANUAL_CHALLENGE_LOCK_WAIT_MS ?? 6 * 60_000) || 6 * 60_000,
+);
+const MANUAL_CHALLENGE_LOCK_WRITE_GRACE_MS = 5_000;
 
 const CHROME_PRIMARY = String(process.env.CHROME_PRIMARY ?? "local").toLowerCase();
 const WORKER_ROLE = String(process.env.SIDECAR_WORKER_ROLE ?? (CHROME_PRIMARY === "server" ? "server" : "local")).toLowerCase();
@@ -249,6 +257,113 @@ let pendingIdleChromeReset = false;
 let lastObservedWindowState = null;
 let lastViewportWarningAt = 0;
 let lastVrboChallengeAlertAt = 0;
+
+function manualChallengeLockOwnerIsAlive(owner) {
+  const pid = Number(owner?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readManualChallengeLockOwner() {
+  try {
+    return JSON.parse(fs.readFileSync(MANUAL_CHALLENGE_LOCK_PATH, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function removeStaleManualChallengeLock(label, id) {
+  try {
+    const stat = fs.statSync(MANUAL_CHALLENGE_LOCK_PATH);
+    const owner = readManualChallengeLockOwner();
+    const ageMs = Date.now() - stat.mtimeMs;
+    // open("wx") creates the lock before its owner JSON is written. Give that
+    // tiny initialization window time to finish so a competing worker cannot
+    // mistake a newly-created lock for an abandoned one.
+    if (!owner && ageMs < MANUAL_CHALLENGE_LOCK_WRITE_GRACE_MS) return false;
+    // A live worker may legitimately wait on a VRBO challenge for much longer
+    // than the lock wait. Never take the display lock away from a process that
+    // still owns it; only reclaim it after the owner process exits.
+    if (!manualChallengeLockOwnerIsAlive(owner)) {
+      fs.unlinkSync(MANUAL_CHALLENGE_LOCK_PATH);
+      log(
+        `${label} ${id}: removed stale manual-challenge display lock ` +
+        `(owner=${owner?.id ?? "unknown"}, age=${Math.max(0, Math.round(ageMs / 1000))}s)`,
+      );
+      return true;
+    }
+  } catch (e) {
+    if (e?.code === "ENOENT") return true;
+  }
+  return false;
+}
+
+async function acquireManualChallengeDisplayLock({ id, label, stage }) {
+  const token = `${process.pid}:${WORKER_SLOT}:${id}:${Date.now()}`;
+  const deadline = Date.now() + MANUAL_CHALLENGE_LOCK_WAIT_MS;
+  let announcedWait = false;
+  while (Date.now() < deadline) {
+    throwIfRequestCancelled(id);
+    // Register the manual-solve hold before any Chrome window is surfaced.
+    // This closes the cancellation gap between challenge detection and the
+    // first polling-loop heartbeat.
+    await sendHeartbeat(stage, true, id).catch((e) => {
+      if (e instanceof SidecarCancelledError) throw e;
+    });
+    try {
+      const fd = fs.openSync(MANUAL_CHALLENGE_LOCK_PATH, "wx", 0o600);
+      try {
+        fs.writeFileSync(fd, JSON.stringify({
+          token,
+          pid: process.pid,
+          slot: WORKER_SLOT,
+          id,
+          label,
+          acquiredAt: new Date().toISOString(),
+        }));
+      } finally {
+        fs.closeSync(fd);
+      }
+      log(`${label} ${id}: acquired the single manual-challenge display lock`);
+      return token;
+    } catch (e) {
+      if (e?.code !== "EEXIST") throw e;
+      if (removeStaleManualChallengeLock(label, id)) continue;
+      if (!announcedWait) {
+        announcedWait = true;
+        const owner = readManualChallengeLockOwner();
+        log(
+          `${label} ${id}: another challenge (${owner?.id ?? "unknown"}) is already visible; ` +
+          "waiting without covering its Chrome window",
+        );
+      }
+    }
+    await sleep(750);
+  }
+  throw new Error(
+    `Timed out waiting ${Math.round(MANUAL_CHALLENGE_LOCK_WAIT_MS / 1000)}s ` +
+    "for the existing manual challenge to finish",
+  );
+}
+
+function releaseManualChallengeDisplayLock(token, label, id) {
+  if (!token) return;
+  try {
+    const owner = readManualChallengeLockOwner();
+    if (owner?.token !== token) return;
+    fs.unlinkSync(MANUAL_CHALLENGE_LOCK_PATH);
+    log(`${label} ${id}: released the single manual-challenge display lock`);
+  } catch (e) {
+    if (e?.code !== "ENOENT") {
+      log(`${label} ${id}: failed to release manual-challenge display lock: ${e?.message ?? e}`);
+    }
+  }
+}
 
 function usingHeadlessRuntime() {
   return USE_HEADLESS_LOCAL_BROWSER || activeChromeAllocation?.type === "headless";
@@ -3724,88 +3839,96 @@ async function stopOtaProviderIfBlocked(targetPage, label, id, initialState = nu
   if (manualVerificationEnabled) {
     const timeoutMs = parseInt(process.env.SIDECAR_VRBO_MANUAL_VERIFICATION_TIMEOUT_MS, 10) || 8 * 60 * 60_000;
     const pollMs = parseInt(process.env.SIDECAR_VRBO_MANUAL_VERIFICATION_POLL_MS, 10) || 2_000;
-    const timeoutAt = Date.now() + timeoutMs;
     const sourceUrl = state?.url;
     const instructions =
       "VRBO CAPTCHA/human-verification page detected. This provider run is paused for manual verification in the real Chrome window. No CapSolver, automated slider, or press-and-hold action will be attempted; solve it yourself in Chrome and the worker will continue once the challenge clears.";
 
     log(`${label} ${id}: waiting for manual Chrome verification; automated CAPTCHA solving is disabled`);
-    await normalizePageDisplay(targetPage).catch(() => {});
-    await setCaptchaWindowVisibility(targetPage, true, label, id).catch(() => {});
-    await postScreenSnapshot(
-      { id, opType: label },
-      targetPage,
-      "VRBO waiting for manual CAPTCHA solve",
-      { captcha: true, force: true },
-    );
-
-    let lastSnapshotAt = 0;
-    while (Date.now() < timeoutAt) {
-      throwIfRequestCancelled(id);
-      await sendHeartbeat("VRBO waiting for manual CAPTCHA solve", true, id).catch((e) => {
-        if (e instanceof SidecarCancelledError) throw e;
-      });
-      await applyScreenControlCommands({ id, opType: label }, targetPage, label).catch(() => 0);
-      await boundedPageDelay(targetPage, Math.min(pollMs, 1_000));
-      state = await captureVrboChallengeState(targetPage);
-      if (stateLooksLikeVrboHardBlock(state)) {
-        await postScreenSnapshot(
-          { id, opType: label },
-          targetPage,
-          "VRBO hard-blocked after manual CAPTCHA input",
-          {
-            captcha: true,
-            force: true,
-            error: "VRBO changed this session from CAPTCHA to a hard block. The worker will abandon this browser/IP and retry with a fresh identity if retries remain.",
-          },
-        );
-        await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
-        throwIfVrboHardBlock(state, label, id);
-      }
-      if (state && !stateLooksLikeVrboHumanChallenge(state)) {
-        throwIfVrboHardBlock(state, label, id);
-        await boundedPageDelay(targetPage, 1_000);
-        await saveVrboManualSessionState(targetPage, label, id);
-        await postScreenSnapshot(
-          { id, opType: label },
-          targetPage,
-          "VRBO manual CAPTCHA solved",
-          { force: true },
-        );
-        await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
-        log(`${label} ${id}: manual VRBO verification cleared; continuing provider run`);
-        return true;
-      }
-      const now = Date.now();
-      if (now - lastSnapshotAt >= 1_000) {
-        lastSnapshotAt = now;
-        await postScreenSnapshot(
-          { id, opType: label },
-          targetPage,
-          "VRBO waiting for manual CAPTCHA solve",
-          { captcha: true, error: instructions },
-        );
-      }
-    }
-
-    await postScreenSnapshot(
-      { id, opType: label },
-      targetPage,
-      "VRBO manual CAPTCHA timed out",
-      { captcha: true, force: true },
-    );
-    await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
-    throw new VrboHardBlockError("VRBO manual verification timed out.", {
-      label,
+    const manualStage = "VRBO waiting for manual CAPTCHA solve";
+    const challengeLockToken = await acquireManualChallengeDisplayLock({
       id,
-      url: state?.url || sourceUrl,
-      title: state?.title,
-      excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
-      challengeType,
-      captchaSolverReason: solverReason,
-      manualVerificationTimedOut: true,
-      retryLater: true,
+      label,
+      stage: manualStage,
     });
+    const timeoutAt = Date.now() + timeoutMs;
+    try {
+      await normalizePageDisplay(targetPage).catch(() => {});
+      await setCaptchaWindowVisibility(targetPage, true, label, id).catch(() => {});
+      await postScreenSnapshot(
+        { id, opType: label },
+        targetPage,
+        manualStage,
+        { captcha: true, force: true },
+      );
+
+      let lastSnapshotAt = 0;
+      while (Date.now() < timeoutAt) {
+        throwIfRequestCancelled(id);
+        await sendHeartbeat(manualStage, true, id).catch((e) => {
+          if (e instanceof SidecarCancelledError) throw e;
+        });
+        await applyScreenControlCommands({ id, opType: label }, targetPage, label).catch(() => 0);
+        await boundedPageDelay(targetPage, Math.min(pollMs, 1_000));
+        state = await captureVrboChallengeState(targetPage);
+        if (stateLooksLikeVrboHardBlock(state)) {
+          await postScreenSnapshot(
+            { id, opType: label },
+            targetPage,
+            "VRBO hard-blocked after manual CAPTCHA input",
+            {
+              captcha: true,
+              force: true,
+              error: "VRBO changed this session from CAPTCHA to a hard block. The worker will abandon this browser/IP and retry with a fresh identity if retries remain.",
+            },
+          );
+          throwIfVrboHardBlock(state, label, id);
+        }
+        if (state && !stateLooksLikeVrboHumanChallenge(state)) {
+          throwIfVrboHardBlock(state, label, id);
+          await boundedPageDelay(targetPage, 1_000);
+          await saveVrboManualSessionState(targetPage, label, id);
+          await postScreenSnapshot(
+            { id, opType: label },
+            targetPage,
+            "VRBO manual CAPTCHA solved",
+            { force: true },
+          );
+          log(`${label} ${id}: manual VRBO verification cleared; continuing provider run`);
+          return true;
+        }
+        const now = Date.now();
+        if (now - lastSnapshotAt >= 1_000) {
+          lastSnapshotAt = now;
+          await postScreenSnapshot(
+            { id, opType: label },
+            targetPage,
+            manualStage,
+            { captcha: true, error: instructions },
+          );
+        }
+      }
+
+      await postScreenSnapshot(
+        { id, opType: label },
+        targetPage,
+        "VRBO manual CAPTCHA timed out",
+        { captcha: true, force: true },
+      );
+      throw new VrboHardBlockError("VRBO manual verification timed out.", {
+        label,
+        id,
+        url: state?.url || sourceUrl,
+        title: state?.title,
+        excerpt: String(state?.bodyExcerpt ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+        challengeType,
+        captchaSolverReason: solverReason,
+        manualVerificationTimedOut: true,
+        retryLater: true,
+      });
+    } finally {
+      await setCaptchaWindowVisibility(targetPage, false, label, id).catch(() => {});
+      releaseManualChallengeDisplayLock(challengeLockToken, label, id);
+    }
   }
 
   log(`${label} ${id}: CAPTCHA detected and manual verification is disabled — rotating/failing provider (type=${challengeType}, reason=${solverReason})`);
@@ -8437,13 +8560,18 @@ async function resolveListingBotWallManually(id, label, targetUrl) {
     return { cleared: false, waited: false };
   }
   const timeoutMs = Math.max(30_000, Number(process.env.SIDECAR_GALLERY_BOTWALL_WAIT_MS ?? 4 * 60_000) || 4 * 60_000);
-  const timeoutAt = Date.now() + timeoutMs;
   log(`${label} ${id}: bot detection on ${hostFromUrl(state?.url || targetUrl)} (${wallReason}); surfacing the yellow window for a manual solve (up to ${Math.round(timeoutMs / 1000)}s)`);
-  await normalizePageDisplay(page).catch(() => {});
-  await surfaceVrboChallengeWindow(page, label, id).catch(() => {});
-  await setListingBotWallBanner(page, label, id);
-  await postScreenSnapshot({ id, opType: label }, page, GALLERY_BOTWALL_STAGE, { captcha: true, force: true });
+  const challengeLockToken = await acquireManualChallengeDisplayLock({
+    id,
+    label,
+    stage: GALLERY_BOTWALL_STAGE,
+  });
+  const timeoutAt = Date.now() + timeoutMs;
   try {
+    await normalizePageDisplay(page).catch(() => {});
+    await surfaceVrboChallengeWindow(page, label, id).catch(() => {});
+    await setListingBotWallBanner(page, label, id);
+    await postScreenSnapshot({ id, opType: label }, page, GALLERY_BOTWALL_STAGE, { captcha: true, force: true });
     while (Date.now() < timeoutAt) {
       throwIfRequestCancelled(id);
       // Heartbeat with the contract-locked stage so the server-side wallet
@@ -8475,6 +8603,7 @@ async function resolveListingBotWallManually(id, label, targetUrl) {
   } finally {
     await setVrboChallengeHighlight(page, false, label, id).catch(() => {});
     await setCaptchaWindowVisibility(page, false, label, id).catch(() => {});
+    releaseManualChallengeDisplayLock(challengeLockToken, label, id);
   }
 }
 
@@ -12791,7 +12920,7 @@ function logSidecarStartupConfig() {
   const proxyProvider = (process.env.CHROME_PROXY_PROVIDER ?? process.env.PROXY_PROVIDER ?? "none").toLowerCase();
   log(
     `config: server=${SERVER}; role=${WORKER_ROLE}; browserMode=${SIDECAR_BROWSER_MODE}; ` +
-      `chromePrimary=${CHROME_PRIMARY}; slots=${process.env.MAX_LOCAL_CHROME_INSTANCES ?? "8"}; ` +
+      `chromePrimary=${CHROME_PRIMARY}; slots=${process.env.MAX_LOCAL_CHROME_INSTANCES ?? "3"}; ` +
       `CapSolver=${captchaOn ? "on" : "off"}; proxy=${proxyOn ? `on (${proxyProvider})` : "off"}`,
   );
 }

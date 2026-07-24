@@ -119,6 +119,45 @@ assert.equal(
 
 resetQueue();
 
+// Real-estate gallery operations are different from ordinary OTA searches:
+// they can surface a human-solvable bot wall in the Mac's Chrome. An online
+// local worker must own them so a Railway/headless claimant cannot strand the
+// request for 90s and then hand the Mac an already-expiring wallet.
+next({ slot: "1", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+enqueueOp({
+  opType: "zillow_photo_scrape",
+  params: { url: "https://www.zillow.com/homedetails/test/123_zpid/", maxPhotos: 40 },
+});
+assert.equal(
+  next({ slot: "8", workerRole: "server", browserMode: "server", chromePrimary: "server" }),
+  null,
+  "Railway cannot claim Zillow photo work while the local Mac worker is online",
+);
+assert.equal(
+  next({ slot: "2", workerRole: "local", browserMode: "cdp", chromePrimary: "local" })?.opType,
+  "zillow_photo_scrape",
+  "the local Mac worker claims Zillow photo work",
+);
+
+resetQueue();
+next({ slot: "1", workerRole: "local", browserMode: "cdp", chromePrimary: "local" });
+enqueueOp({
+  opType: "listing_gallery_scrape",
+  params: { url: "https://www.redfin.com/HI/Koloa/example", maxPhotos: 40, host: "Redfin" },
+});
+assert.equal(
+  next({ slot: "8", workerRole: "server", browserMode: "server", chromePrimary: "server" }),
+  null,
+  "Railway cannot claim real-estate gallery work while the local Mac worker is online",
+);
+assert.equal(
+  next({ slot: "3", workerRole: "local", browserMode: "cdp", chromePrimary: "local" })?.opType,
+  "listing_gallery_scrape",
+  "the local Mac worker claims generic real-estate gallery work",
+);
+
+resetQueue();
+
 // ── Cautious same-IP VRBO concurrency (2026-06-14) ───────────────────────────
 // The "vrbo_search" group default limit is SIDECAR_VRBO_CONCURRENCY (default 2):
 // when VRBO looks healthy, two VRBO ops run concurrently from the one IP (the

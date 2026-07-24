@@ -127,7 +127,7 @@ value_from_env_or_railway() {
 }
 
 SERVER_URL="${SIDECAR_SERVER:-https://admin.vacationrentalexpertz.com}"
-MAX_LOCAL_CHROME_INSTANCES="${MAX_LOCAL_CHROME_INSTANCES:-8}"
+MAX_LOCAL_CHROME_INSTANCES="${MAX_LOCAL_CHROME_INSTANCES:-3}"
 # Prefer local macOS Chrome/CDP. Chrome stays visible in an external-monitor
 # grid; the Operations UI only flashes/focuses the relevant slot.
 SIDECAR_BROWSER_MODE="${SIDECAR_BROWSER_MODE:-cdp}"
@@ -135,9 +135,9 @@ SIDECAR_HEADLESS_BROWSER_CHANNEL="${SIDECAR_HEADLESS_BROWSER_CHANNEL:-chrome}"
 CHROME_PRIMARY="${CHROME_PRIMARY:-local}"
 SIDECAR_DISABLE_LOCAL_CDP_FALLBACK="${SIDECAR_DISABLE_LOCAL_CDP_FALLBACK:-0}"
 SIDECAR_HEADLESS_FALLBACK_ENABLED="${SIDECAR_HEADLESS_FALLBACK_ENABLED:-0}"
-# Keep eight sidecar Chrome windows at full desktop dimensions for provider
-# accuracy. Slots intentionally overlap at one on-screen origin so every
-# worker gets a large desktop viewport without pushing windows off-display.
+# Keep the bounded sidecar pool at full desktop dimensions for provider
+# accuracy. Manual challenges are serialized by the worker so overlapping
+# scrape windows cannot cover the one the operator needs to solve.
 SIDECAR_VIEWPORT_SIZE="${SIDECAR_VIEWPORT_SIZE:-1600,1000}"
 # Default hidden/off-screen so the sidecar Chrome launches without a visible
 # grid of windows. Set SIDECAR_CHROME_VISIBLE=1 to show the grid again.
@@ -155,7 +155,7 @@ SIDECAR_CHROME_VISIBLE_SIZE="${SIDECAR_CHROME_VISIBLE_SIZE:-1600,1080}"
 SIDECAR_CHROME_VISIBLE_GRID_COLUMNS="${SIDECAR_CHROME_VISIBLE_GRID_COLUMNS:-2}"
 SIDECAR_CHROME_VISIBLE_GRID_GAP_X="${SIDECAR_CHROME_VISIBLE_GRID_GAP_X:-24}"
 SIDECAR_CHROME_VISIBLE_GRID_GAP_Y="${SIDECAR_CHROME_VISIBLE_GRID_GAP_Y:-35}"
-SIDECAR_CHROME_VISIBLE_POSITIONS="${SIDECAR_CHROME_VISIBLE_POSITIONS:-1440,60;1440,60;1440,60;1440,60;1440,60;1440,60;1440,60;1440,60}"
+SIDECAR_CHROME_VISIBLE_POSITIONS="${SIDECAR_CHROME_VISIBLE_POSITIONS:-1440,60;1440,60;1440,60}"
 SIDECAR_WARM_ALL_LOCAL_CHROME="${SIDECAR_WARM_ALL_LOCAL_CHROME:-0}"
 SIDECAR_WARM_LOCAL_CHROME_ON_STARTUP="${SIDECAR_WARM_LOCAL_CHROME_ON_STARTUP:-0}"
 SIDECAR_IDLE_CHROME_RESET_ENABLED="${SIDECAR_IDLE_CHROME_RESET_ENABLED:-0}"

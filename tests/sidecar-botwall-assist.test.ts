@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 
 const workerSrc = readFileSync(new URL("../daemon/vrbo-sidecar/worker.mjs", import.meta.url), "utf8");
 const managerSrc = readFileSync(new URL("../daemon/vrbo-sidecar/chrome-sidecar-manager.mjs", import.meta.url), "utf8");
+const supervisorSrc = readFileSync(new URL("../daemon/vrbo-sidecar/supervisor.mjs", import.meta.url), "utf8");
 const installerSrc = readFileSync(new URL("../scripts/install-vrbo-sidecar-launchagent.sh", import.meta.url), "utf8");
 const queueSrc = readFileSync(new URL("../server/vrbo-sidecar-queue.ts", import.meta.url), "utf8");
 
@@ -175,6 +176,33 @@ assert.ok(
 );
 console.log("  ✓ worker stage string and server wallet-pause regex are contract-locked");
 
+// The heartbeat must be registered before the yellow window is surfaced, and
+// only one worker process may surface a challenge at once.
+const lockFn = workerSrc.match(/async function acquireManualChallengeDisplayLock\([\s\S]*?\n\}/)?.[0] ?? "";
+assert.ok(lockFn.includes('fs.openSync(MANUAL_CHALLENGE_LOCK_PATH, "wx"'), "challenge lock uses atomic cross-process creation");
+assert.ok(
+  workerSrc.includes("MANUAL_CHALLENGE_LOCK_WRITE_GRACE_MS") &&
+    workerSrc.includes("!owner && ageMs < MANUAL_CHALLENGE_LOCK_WRITE_GRACE_MS"),
+  "a newly-created lock cannot be removed during its owner-metadata write window",
+);
+assert.ok(
+  workerSrc.includes("if (!manualChallengeLockOwnerIsAlive(owner))"),
+  "a live worker keeps ownership even during a long manual solve",
+);
+assert.ok(
+  lockFn.indexOf("sendHeartbeat(stage, true, id)") < lockFn.indexOf("fs.openSync"),
+  "manual-solve heartbeat is acknowledged before a worker acquires permission to surface Chrome",
+);
+assert.ok(
+  lockFn.includes("another challenge") && lockFn.includes("waiting without covering its Chrome window"),
+  "a second challenge waits instead of covering the first",
+);
+assert.ok(
+  workerSrc.includes("releaseManualChallengeDisplayLock(challengeLockToken, label, id)"),
+  "manual challenge ownership is released in the solve cleanup path",
+);
+console.log("  ✓ manual challenge display is serialized and pre-registered");
+
 // ── 3. Worker wiring source guards ──
 assert.ok(
   workerSrc.includes(`resolveListingBotWallManually(id, "listing_gallery_scrape", url)`),
@@ -193,6 +221,14 @@ assert.ok(
   "wait ceiling env SIDECAR_GALLERY_BOTWALL_WAIT_MS exists",
 );
 {
+  const vrboAssistFn = workerSrc.match(/async function stopOtaProviderIfBlocked\(targetPage[\s\S]*?\n\}\n/)?.[0] ?? "";
+  assert.ok(
+    vrboAssistFn.indexOf("acquireManualChallengeDisplayLock") <
+      vrboAssistFn.indexOf("setCaptchaWindowVisibility(targetPage, true"),
+    "VRBO bot walls acquire the global display lock before surfacing Chrome",
+  );
+}
+{
   const assistFn = workerSrc.match(/async function resolveListingBotWallManually\(id, label, targetUrl\) \{[\s\S]*?\n\}\n/)?.[0] ?? "";
   assert.ok(assistFn.includes("throwIfRequestCancelled(id)"), "wait loop observes server-side cancellation");
   assert.ok(assistFn.includes("usingHeadlessRuntime()"), "headless runtime skips the wait (nobody can solve)");
@@ -203,6 +239,10 @@ assert.ok(
   assert.ok(
     assistFn.includes("surfaceVrboChallengeWindow(page, label, id)"),
     "the assist reuses the existing surfaced-window machinery",
+  );
+  assert.ok(
+    assistFn.indexOf("acquireManualChallengeDisplayLock") < assistFn.indexOf("surfaceVrboChallengeWindow"),
+    "listing bot walls acquire the global display lock before surfacing Chrome",
   );
   assert.ok(
     assistFn.indexOf("detectListingTerminalDenial(state)") < assistFn.indexOf("detectListingBotWall(state)"),
@@ -338,6 +378,31 @@ assert.ok(
   /activeStartedAt = now; \/\/ freeze the wallet while the operator solves/.test(queueSrc),
   "the pause freezes the wallet clock rather than widening every wallet",
 );
+assert.ok(
+  queueSrc.includes('opType === "zillow_photo_scrape" || opType === "listing_gallery_scrape"')
+    && queueSrc.includes("isLocalInteractiveListingOp(request.opType)")
+    && queueSrc.includes("localWorkerIsOnline()"),
+  "an online local worker exclusively owns interactive real-estate listing scrapes",
+);
+assert.ok(
+  queueSrc.includes("claimGeneration = (oldest.claimGeneration ?? 0) + 1")
+    && queueSrc.includes("observedClaimGeneration !== claimGeneration")
+    && queueSrc.includes("activeStartedAt = deduped ? now : (r.claimedAt ?? now)"),
+  "a reclaim changes claim identity and resets the active wallet even if polling misses the pending state",
+);
 console.log("  ✓ server wallet-pause guards hold");
+
+// The installed Mac runtime must actually use the approved three-worker pool;
+// changing only source defaults would leave launchd on its old generated value.
+assert.ok(/const DEFAULT_MAX_WORKERS = 3;/.test(supervisorSrc), "supervisor defaults to three workers");
+assert.ok(
+  /MAX_LOCAL_CHROME_INSTANCES="\$\{MAX_LOCAL_CHROME_INSTANCES:-3\}"/.test(installerSrc),
+  "LaunchAgent installer writes the three-worker default",
+);
+assert.ok(
+  /SIDECAR_CHROME_VISIBLE_POSITIONS="\$\{SIDECAR_CHROME_VISIBLE_POSITIONS:-1440,60;1440,60;1440,60\}"/.test(installerSrc),
+  "generated visible-position list matches the three-worker pool",
+);
+console.log("  ✓ local worker pool defaults are locked to three");
 
 console.log("sidecar-botwall-assist: all assertions passed");

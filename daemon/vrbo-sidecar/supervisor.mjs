@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workerPath = path.join(__dirname, "worker.mjs");
-const DEFAULT_MAX_WORKERS = 8;
+const DEFAULT_MAX_WORKERS = 3;
 const HARD_MAX_WORKERS = 12;
 const requestedWorkers = Number(process.env.MAX_LOCAL_CHROME_INSTANCES ?? DEFAULT_MAX_WORKERS) || DEFAULT_MAX_WORKERS;
 const maxWorkers = Math.min(HARD_MAX_WORKERS, Math.max(1, Math.floor(requestedWorkers)));
