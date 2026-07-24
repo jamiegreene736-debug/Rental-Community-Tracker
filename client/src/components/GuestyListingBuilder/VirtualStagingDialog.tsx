@@ -816,7 +816,7 @@ export default function VirtualStagingDialog({
                               {retrying ? "Generating another angle…" : "Generate another angle"}
                             </Button>
                             <p className="mt-1 text-xs text-muted-foreground">
-                              Replaces this preview with a subtle new angle and same-style, one-for-one refresh. Open space stays open.
+                              Replaces this preview with a strict new version: the unit's bones stay fixed while every eligible finish and furnishing visibly changes in the same style. Open space stays open.
                             </p>
                           </div>
                           <div className="mt-4 rounded-md border bg-muted/20 p-3">

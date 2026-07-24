@@ -184,20 +184,22 @@ test("duplicate start clicks reuse one active unit job", () => {
 test("the staging recipe signature invalidates previews from older prompts", () => {
   assert.equal(
     virtualStagingRecipeSignature(),
-    "virtual-staging-recipe::room-preserving-refresh-v5",
+    "virtual-staging-recipe::manifest-complete-refresh-v6",
   );
   const v2 = `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-furnishings-v2`;
   const v3 = `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-alternate-angle-v3`;
   const v4 = `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}context-aware-photo-feedback-v4`;
-  assert.deepEqual(VIRTUAL_STAGING_SUPERSEDED_RECIPE_SIGNATURES, [v2, v3, v4]);
+  const v5 = `${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}room-preserving-refresh-v5`;
+  assert.deepEqual(VIRTUAL_STAGING_SUPERSEDED_RECIPE_SIGNATURES, [v2, v3, v4, v5]);
   assert.equal(isSupersededVirtualStagingRecipeSignature(v2), true);
   assert.equal(isSupersededVirtualStagingRecipeSignature(v3), true);
   assert.equal(isSupersededVirtualStagingRecipeSignature(v4), true);
+  assert.equal(isSupersededVirtualStagingRecipeSignature(v5), true);
   assert.equal(isSupersededVirtualStagingRecipeSignature("gpt-image-1.5"), true);
   assert.equal(isSupersededVirtualStagingRecipeSignature(null), true);
   assert.equal(isSupersededVirtualStagingRecipeSignature(virtualStagingRecipeSignature()), false);
   assert.equal(
-    isSupersededVirtualStagingRecipeSignature(`${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}future-v6`),
+    isSupersededVirtualStagingRecipeSignature(`${VIRTUAL_STAGING_RECIPE_SIGNATURE_PREFIX}future-v7`),
     false,
   );
 });
@@ -608,7 +610,8 @@ test("the maintained prompt requests a subtle angle and preserves style and obje
   assert.match(VIRTUAL_STAGING_PROMPT, /Hawaiian, tropical, island, coastal/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /close stylistic sibling/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /one-for-one/i);
-  assert.match(VIRTUAL_STAGING_PROMPT, /exactly the source seating inventory/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /Add nothing and omit nothing/i);
+  assert.match(VIRTUAL_STAGING_PROMPT, /Recoloring or making a barely perceptible edit is not a replacement/i);
   assert.match(VIRTUAL_STAGING_PROMPT, /Areas that are open in the source remain naturally open/i);
   assert.doesNotMatch(VIRTUAL_STAGING_PROMPT, /add(?:ed)? (?:a )?(?:random )?chair/i);
 
@@ -620,7 +623,7 @@ test("the maintained prompt requests a subtle angle and preserves style and obje
   assert.match(outdoorPrompt, /2 to 5 degrees/i);
   assert.match(outdoorPrompt, /same private platform/i);
   assert.match(outdoorPrompt, /weather-resistant and outdoor-rated/i);
-  assert.match(outdoorPrompt, /each existing outdoor seat, table, cushion, rug, lamp, plant, and accessory one-for-one/i);
+  assert.match(outdoorPrompt, /replace every outdoor seat, table, cushion, rug, lamp, plant, textile, and accessory/i);
   const indoorPrompt = buildVirtualStagingPrompt(
     { scene: "living-area", placement: "indoor" },
     "right",
@@ -638,26 +641,26 @@ test("the bedroom recipe refreshes floors, linens, and existing lamps without in
     { scene: "bedroom", placement: "indoor" },
     "left",
   );
-  assert.match(prompt, /refresh the floor surface, bed linens, and every existing movable lamp or lampshade/i);
+  assert.match(prompt, /replace every bed-linen set, movable lamp or lampshade/i);
   assert.match(prompt, /duvet or coverlet, sheets, blankets, bed pillows/i);
-  assert.match(prompt, /Keep the bed size, mattress position, frame, headboard, nightstands, seating inventory/i);
-  assert.match(prompt, /Map any other visible movable decor one-for-one/i);
+  assert.match(prompt, /Preserve the exact bed size, mattress position, frame and headboard geometry/i);
+  assert.match(prompt, /every inventoried target is mandatory/i);
   assert.match(prompt, /Areas that are open in the source remain naturally open/i);
 });
 
 test("every stageable scene has a one-for-one, function-preserving refresh recipe", () => {
   const cases = [
-    [{ scene: "living-area", placement: "indoor" } as const, /seating counts and the room's circulation paths/i],
-    [{ scene: "bedroom", placement: "indoor" } as const, /bed linens, and every existing movable lamp/i],
-    [{ scene: "kitchen", placement: "indoor" } as const, /stool count, and work clearances/i],
-    [{ scene: "bathroom", placement: "indoor" } as const, /vanity, plumbing, mirrors, tub, shower, toilet/i],
+    [{ scene: "living-area", placement: "indoor" } as const, /exact seating counts, footprints, placements/i],
+    [{ scene: "bedroom", placement: "indoor" } as const, /bed-linen set, movable lamp or lampshade/i],
+    [{ scene: "kitchen", placement: "indoor" } as const, /stool count, work clearances/i],
+    [{ scene: "bathroom", placement: "indoor" } as const, /plumbing, mirrors, tub, shower, toilet/i],
     [{ scene: "dining", placement: "indoor" } as const, /exact seat count, table footprint/i],
     [{ scene: "private-outdoor", placement: "outdoor" } as const, /outdoor seat, table, cushion, rug, lamp, plant/i],
   ] as const;
   for (const [context, distinctiveRule] of cases) {
     const rule = virtualStagingSceneRefreshRule(context);
-    assert.match(rule, /refresh the (?:floor|private platform's) surface/i);
-    assert.match(rule, /one-for-one/i);
+    assert.match(rule, /Visibly replace/i);
+    assert.match(rule, /Visibly refresh all identified/i);
     assert.match(rule, distinctiveRule);
   }
 });
@@ -722,7 +725,7 @@ test("frontend uses the accessible dialog and keeps zero-photo controls visible"
   assert.match(source, /button-finish-virtual-staging-without-swaps/);
   assert.match(source, /button-regenerate-staging-/);
   assert.match(source, /Generate another angle/);
-  assert.match(source, /subtle new angle and same-style, one-for-one refresh/);
+  assert.match(source, /every eligible finish and furnishing visibly changes in the same style/);
   assert.match(source, /Feedback for this photo/);
   assert.match(source, /Regenerate with feedback/);
   assert.match(source, /textarea-staging-feedback-/);

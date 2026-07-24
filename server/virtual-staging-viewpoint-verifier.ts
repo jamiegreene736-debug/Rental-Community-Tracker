@@ -1,8 +1,11 @@
 import sharp from "sharp";
 
 import {
+  VIRTUAL_STAGING_MANIFEST_VERSION,
   virtualStagingSceneRefreshRule,
   type VirtualStagingContext,
+  type VirtualStagingManifestTarget,
+  type VirtualStagingSourceManifest,
   type VirtualStagingViewpointDirection,
 } from "@shared/virtual-staging";
 
@@ -12,6 +15,12 @@ const DEFAULT_VIEWPOINT_MODEL = "claude-sonnet-4-6";
 const VIEWPOINT_TIMEOUT_MS = 60_000;
 const VIEWPOINT_IMAGE_LONG_EDGE = 1_200;
 const VIEWPOINT_MAX_ATTEMPTS = 3;
+
+export type VirtualStagingSourceAnalysisInput = {
+  source: Buffer;
+  sourceFilename: string;
+  context: VirtualStagingContext;
+};
 
 export type VirtualStagingViewpointVerificationInput = {
   source: Buffer;
@@ -23,12 +32,14 @@ export type VirtualStagingViewpointVerificationInput = {
   generationAttempt: number;
   mode?: "alternate-angle" | "feedback-revision";
   feedback?: string;
+  manifest?: VirtualStagingSourceManifest;
 };
 
 export interface VirtualStagingViewpointVerifier {
   readonly id: string;
   readonly model: string;
   isConfigured(): boolean;
+  analyzeSource(input: VirtualStagingSourceAnalysisInput): Promise<VirtualStagingSourceManifest>;
   verify(input: VirtualStagingViewpointVerificationInput): Promise<void>;
 }
 
@@ -67,6 +78,29 @@ type FeedbackVerdict = {
   styleConsistent: boolean;
   unrelatedContentPreserved: boolean;
   reason: string;
+};
+
+type StrictTargetReview = {
+  id: string;
+  reason: string;
+};
+
+type StrictViewpointVerdict = ViewpointVerdict & {
+  preserveReviews: Array<StrictTargetReview & { geometryPreserved: boolean }>;
+  mustChangeReviews: Array<StrictTargetReview & {
+    visiblyChanged: boolean;
+    sameFunction: boolean;
+    countAndPlacementPreserved: boolean;
+    styleCompatible: boolean;
+  }>;
+  finishOnlyReviews: Array<StrictTargetReview & {
+    finishChanged: boolean;
+    geometryPreserved: boolean;
+    styleCompatible: boolean;
+  }>;
+  unexpectedObjects: string[];
+  missingObjects: string[];
+  geometryChanges: string[];
 };
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -137,6 +171,156 @@ function viewpointOutputSchema(hasPreviousPreview: boolean): Record<string, unkn
   };
 }
 
+const targetSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    category: { type: "string" },
+    description: { type: "string" },
+    region: {
+      type: "object",
+      properties: {
+        x: { type: "number", minimum: 0, maximum: 1 },
+        y: { type: "number", minimum: 0, maximum: 1 },
+        width: { type: "number", exclusiveMinimum: 0, maximum: 1 },
+        height: { type: "number", exclusiveMinimum: 0, maximum: 1 },
+      },
+      required: ["x", "y", "width", "height"],
+      additionalProperties: false,
+    },
+    styleNotes: { type: "string" },
+  },
+  required: ["id", "category", "description", "region", "styleNotes"],
+  additionalProperties: false,
+} as const;
+
+function sourceManifestOutputSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      roomFunction: { type: "string" },
+      styleProfile: {
+        type: "object",
+        properties: {
+          designLanguage: { type: "string" },
+          palette: { type: "string" },
+          materials: { type: "string" },
+          patternScale: { type: "string" },
+          qualityLevel: { type: "string" },
+          regionalCharacter: { type: "string" },
+        },
+        required: [
+          "designLanguage",
+          "palette",
+          "materials",
+          "patternScale",
+          "qualityLevel",
+          "regionalCharacter",
+        ],
+        additionalProperties: false,
+      },
+      preserveTargets: { type: "array", minItems: 1, items: targetSchema },
+      mustChangeTargets: { type: "array", minItems: 1, items: targetSchema },
+      finishOnlyTargets: { type: "array", minItems: 1, items: targetSchema },
+    },
+    required: [
+      "roomFunction",
+      "styleProfile",
+      "preserveTargets",
+      "mustChangeTargets",
+      "finishOnlyTargets",
+    ],
+    additionalProperties: false,
+  };
+}
+
+function strictTargetReviewSchema(
+  outcomeProperties: Record<string, unknown>,
+  outcomeRequired: string[],
+): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      id: { type: "string" },
+      ...outcomeProperties,
+      reason: { type: "string" },
+    },
+    required: ["id", ...outcomeRequired, "reason"],
+    additionalProperties: false,
+  };
+}
+
+function strictViewpointOutputSchema(
+  hasPreviousPreview: boolean,
+  manifest: VirtualStagingSourceManifest,
+): Record<string, unknown> {
+  const base = viewpointOutputSchema(hasPreviousPreview) as {
+    type: string;
+    properties: Record<string, unknown>;
+    required: string[];
+    additionalProperties: boolean;
+  };
+  return {
+    ...base,
+    properties: {
+      ...base.properties,
+      preserveReviews: {
+        type: "array",
+        minItems: manifest.preserveTargets.length,
+        maxItems: manifest.preserveTargets.length,
+        items: strictTargetReviewSchema(
+          { geometryPreserved: { type: "boolean" } },
+          ["geometryPreserved"],
+        ),
+      },
+      mustChangeReviews: {
+        type: "array",
+        minItems: manifest.mustChangeTargets.length,
+        maxItems: manifest.mustChangeTargets.length,
+        items: strictTargetReviewSchema(
+          {
+            visiblyChanged: { type: "boolean" },
+            sameFunction: { type: "boolean" },
+            countAndPlacementPreserved: { type: "boolean" },
+            styleCompatible: { type: "boolean" },
+          },
+          [
+            "visiblyChanged",
+            "sameFunction",
+            "countAndPlacementPreserved",
+            "styleCompatible",
+          ],
+        ),
+      },
+      finishOnlyReviews: {
+        type: "array",
+        minItems: manifest.finishOnlyTargets.length,
+        maxItems: manifest.finishOnlyTargets.length,
+        items: strictTargetReviewSchema(
+          {
+            finishChanged: { type: "boolean" },
+            geometryPreserved: { type: "boolean" },
+            styleCompatible: { type: "boolean" },
+          },
+          ["finishChanged", "geometryPreserved", "styleCompatible"],
+        ),
+      },
+      unexpectedObjects: { type: "array", items: { type: "string" } },
+      missingObjects: { type: "array", items: { type: "string" } },
+      geometryChanges: { type: "array", items: { type: "string" } },
+    },
+    required: [
+      ...base.required,
+      "preserveReviews",
+      "mustChangeReviews",
+      "finishOnlyReviews",
+      "unexpectedObjects",
+      "missingObjects",
+      "geometryChanges",
+    ],
+  };
+}
+
 function feedbackOutputSchema(): Record<string, unknown> {
   return {
     type: "object",
@@ -182,9 +366,13 @@ function viewpointPrompt(
   requestedDirection: VirtualStagingViewpointDirection,
   hasPreviousPreview: boolean,
   context: VirtualStagingContext,
+  manifest?: VirtualStagingSourceManifest,
+  reviewPass: "primary" | "adversarial" = "primary",
 ): string {
   const instructions = [
-    "Act as a strict visual QA gate for a vacation-rental virtual-staging workflow.",
+    reviewPass === "adversarial"
+      ? "Act as an independent adversarial visual QA gate. Actively search for any reason this vacation-rental virtual-staging candidate must be rejected; do not assume another reviewer accepted it."
+      : "Act as a strict visual QA gate for a vacation-rental virtual-staging workflow.",
     `Image 1 is the immutable source photograph. ${hasPreviousPreview ? "Image 2 is the prior accepted staged preview, and Image 3 is the new generated candidate." : "Image 2 is the generated candidate."}`,
     `Determine whether the new generated candidate is the same physical space photographed from a subtly but genuinely different camera viewpoint${hasPreviousPreview ? " than both the source and the prior staged preview" : " than the source"}, with the source's object inventory and style preserved.`,
     "The requested camera change is approximately 6 to 12 inches laterally and 2 to 5 degrees of yaw. Require a small adjacent view; reject an unchanged camera as well as a conspicuously different or invented angle.",
@@ -200,6 +388,16 @@ function viewpointPrompt(
     `The generation requested a shift toward the ${requestedDirection}; direction is secondary, so accept a clearly genuine nearby shift in either direction.`,
     "Be conservative. If visual evidence is uncertain, return false for the uncertain criterion.",
   ];
+  if (manifest) {
+    instructions.push(
+      `SOURCE MANIFEST (immutable acceptance contract): ${JSON.stringify(manifest)}`,
+      "Return exactly one itemized review for every manifest target ID and no other IDs. preserveReviews must cover preserveTargets; mustChangeReviews must cover mustChangeTargets; finishOnlyReviews must cover finishOnlyTargets.",
+      "For each must-change target, visiblyChanged is false when the candidate merely recolors, slightly retouches, or preserves the same recognizable instance. Require a recognizably different object, artwork, textile, decor item, or accessory while retaining the same function, count, capacity, footprint, orientation, and placement.",
+      "For each finish-only target, finishChanged is true only for a clearly visible new surface/material/color/pattern/hardware treatment. Its geometry, boundaries, location, function, and capacity must remain unchanged.",
+      "List every added object in unexpectedObjects, every absent or unmatched source object in missingObjects, and every altered permanent shape, boundary, opening, plane, fixture location, or footprint in geometryChanges. An empty list means none were found.",
+      "Every target and every field is mandatory. Any uncertainty fails that target.",
+    );
+  }
   if (hasPreviousPreview) {
     instructions.splice(
       7,
@@ -208,6 +406,22 @@ function viewpointPrompt(
     );
   }
   return instructions.join(" ");
+}
+
+function sourceManifestPrompt(
+  context: VirtualStagingContext,
+  sourceFilename: string,
+): string {
+  return [
+    "Create a complete visual inventory of this vacation-rental source photograph before any image generation occurs.",
+    `Metadata classifies it as ${context.scene} (${context.placement}); the photograph is authoritative. Source filename: ${JSON.stringify(sourceFilename)}.`,
+    "preserveTargets: inventory visible permanent geometry and structural anchors, including walls, ceiling, floor plane and boundaries, windows, doors, openings, trim, columns, railings, cabinets, counters, islands, appliances, built-ins, plumbing, fixed fixtures, and the exterior view. Fixed elements may also appear in finishOnlyTargets when their appearance can change while their geometry remains fixed.",
+    "mustChangeTargets: inventory every clearly visible significant movable furnishing, textile, rug, lamp, lampshade, artwork, mirror, plant, decor object, and accessory. Each distinct object must have its own target unless several tiny items are visually inseparable, in which case describe the exact grouped count. Do not omit partially occluded objects.",
+    "finishOnlyTargets: inventory every clearly visible changeable surface or fixed appearance, including the floor or outdoor platform, wall finishes, cabinetry, counters, backsplash, tile, appliance finishes, hardware, and fixed fixtures. Always include the visible floor or private outdoor platform.",
+    "Each ID must be unique, stable, descriptive, and use lowercase letters, numbers, and hyphens. Each normalized region must tightly enclose the visible target, stay inside the image, and be large enough for visual comparison. Use the full visible extent when a permanent feature spans the frame.",
+    "Describe the source style precisely: design language, palette, materials, pattern scale, quality level, and regional character. This profile constrains replacements to the same overall style.",
+    "Completeness is mandatory. The downstream workflow rejects any generated photo that does not satisfy every target, so omission here defeats the safety contract. Be conservative and inventory ambiguous visible items rather than omitting them.",
+  ].join(" ");
 }
 
 function feedbackPrompt(feedback: string): string {
@@ -238,7 +452,7 @@ async function normalizeForVision(buffer: Buffer): Promise<Buffer> {
     .toBuffer();
 }
 
-function parseViewpointVerdict(payload: unknown, hasPreviousPreview: boolean): ViewpointVerdict | null {
+function parsedStructuredRecord(payload: unknown): Record<string, unknown> | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const content = (payload as Record<string, unknown>).content;
   if (!Array.isArray(content)) return null;
@@ -256,7 +470,137 @@ function parseViewpointVerdict(payload: unknown, hasPreviousPreview: boolean): V
     return null;
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const record = parsed as Record<string, unknown>;
+  return parsed as Record<string, unknown>;
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function parseManifestTarget(value: unknown): VirtualStagingManifestTarget | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const region = record.region;
+  if (!region || typeof region !== "object" || Array.isArray(region)) return null;
+  const box = region as Record<string, unknown>;
+  const coordinates = [box.x, box.y, box.width, box.height];
+  if (!coordinates.every((coordinate) => typeof coordinate === "number" && Number.isFinite(coordinate))) {
+    return null;
+  }
+  const x = box.x as number;
+  const y = box.y as number;
+  const width = box.width as number;
+  const height = box.height as number;
+  if (x < 0 || y < 0 || width < 0.03 || height < 0.03 || x + width > 1 || y + height > 1) {
+    return null;
+  }
+  if (!nonEmptyString(record.id)
+    || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(record.id)
+    || !nonEmptyString(record.category)
+    || !nonEmptyString(record.description)
+    || !nonEmptyString(record.styleNotes)) {
+    return null;
+  }
+  return {
+    id: record.id,
+    category: record.category.trim(),
+    description: record.description.trim(),
+    region: { x, y, width, height },
+    styleNotes: record.styleNotes.trim(),
+  };
+}
+
+function parseSourceManifest(payload: unknown): VirtualStagingSourceManifest | null {
+  const record = parsedStructuredRecord(payload);
+  if (!record || !nonEmptyString(record.roomFunction)) return null;
+  const style = record.styleProfile;
+  if (!style || typeof style !== "object" || Array.isArray(style)) return null;
+  const styleRecord = style as Record<string, unknown>;
+  const styleKeys = [
+    "designLanguage",
+    "palette",
+    "materials",
+    "patternScale",
+    "qualityLevel",
+    "regionalCharacter",
+  ] as const;
+  if (!styleKeys.every((key) => nonEmptyString(styleRecord[key]))) return null;
+
+  const parseTargets = (value: unknown): VirtualStagingManifestTarget[] | null => {
+    if (!Array.isArray(value) || value.length === 0) return null;
+    const parsed = value.map(parseManifestTarget);
+    return parsed.every((target): target is VirtualStagingManifestTarget => target !== null)
+      ? parsed
+      : null;
+  };
+  const preserveTargets = parseTargets(record.preserveTargets);
+  const mustChangeTargets = parseTargets(record.mustChangeTargets);
+  const finishOnlyTargets = parseTargets(record.finishOnlyTargets);
+  if (!preserveTargets || !mustChangeTargets || !finishOnlyTargets) return null;
+  const allTargets = [...preserveTargets, ...mustChangeTargets, ...finishOnlyTargets];
+  const ids = new Set(allTargets.map((target) => target.id));
+  if (ids.size !== allTargets.length) return null;
+  if (!finishOnlyTargets.some((target) => /\b(floor|flooring|platform|deck|lanai|patio)\b/i.test(
+    `${target.category} ${target.description}`,
+  ))) {
+    return null;
+  }
+  return {
+    version: VIRTUAL_STAGING_MANIFEST_VERSION,
+    roomFunction: record.roomFunction.trim(),
+    styleProfile: {
+      designLanguage: (styleRecord.designLanguage as string).trim(),
+      palette: (styleRecord.palette as string).trim(),
+      materials: (styleRecord.materials as string).trim(),
+      patternScale: (styleRecord.patternScale as string).trim(),
+      qualityLevel: (styleRecord.qualityLevel as string).trim(),
+      regionalCharacter: (styleRecord.regionalCharacter as string).trim(),
+    },
+    preserveTargets,
+    mustChangeTargets,
+    finishOnlyTargets,
+  };
+}
+
+function parseReviewArray(
+  value: unknown,
+  targets: VirtualStagingManifestTarget[],
+  booleanFields: string[],
+): Array<Record<string, unknown>> | null {
+  if (!Array.isArray(value) || value.length !== targets.length) return null;
+  const reviews = value.filter(
+    (review): review is Record<string, unknown> =>
+      !!review && typeof review === "object" && !Array.isArray(review),
+  );
+  if (reviews.length !== value.length) return null;
+  const targetIds = new Set(targets.map((target) => target.id));
+  const reviewIds = new Set<string>();
+  for (const review of reviews) {
+    if (!nonEmptyString(review.id)
+      || !targetIds.has(review.id)
+      || reviewIds.has(review.id)
+      || !nonEmptyString(review.reason)
+      || !booleanFields.every((field) => typeof review[field] === "boolean")) {
+      return null;
+    }
+    reviewIds.add(review.id);
+  }
+  return reviewIds.size === targetIds.size ? reviews : null;
+}
+
+function stringArray(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? value.map((item) => item.trim()).filter(Boolean)
+    : null;
+}
+
+function parseViewpointVerdict(
+  payload: unknown,
+  hasPreviousPreview: boolean,
+  manifest?: VirtualStagingSourceManifest,
+): ViewpointVerdict | StrictViewpointVerdict | null {
+  const record = parsedStructuredRecord(payload);
+  if (!record) return null;
   if (typeof record.samePhysicalSpace !== "boolean"
     || (record.viewpointChange !== "none"
       && record.viewpointChange !== "nearby-natural"
@@ -273,7 +617,7 @@ function parseViewpointVerdict(payload: unknown, hasPreviousPreview: boolean): V
     || !record.reason.trim()) {
     return null;
   }
-  return {
+  const base: ViewpointVerdict = {
     samePhysicalSpace: record.samePhysicalSpace,
     viewpointChange: record.viewpointChange,
     naturalParallax: record.naturalParallax,
@@ -287,27 +631,47 @@ function parseViewpointVerdict(payload: unknown, hasPreviousPreview: boolean): V
       : {}),
     reason: record.reason.trim().slice(0, 300),
   };
+  if (!manifest) return base;
+  const preserveReviews = parseReviewArray(
+    record.preserveReviews,
+    manifest.preserveTargets,
+    ["geometryPreserved"],
+  );
+  const mustChangeReviews = parseReviewArray(
+    record.mustChangeReviews,
+    manifest.mustChangeTargets,
+    ["visiblyChanged", "sameFunction", "countAndPlacementPreserved", "styleCompatible"],
+  );
+  const finishOnlyReviews = parseReviewArray(
+    record.finishOnlyReviews,
+    manifest.finishOnlyTargets,
+    ["finishChanged", "geometryPreserved", "styleCompatible"],
+  );
+  const unexpectedObjects = stringArray(record.unexpectedObjects);
+  const missingObjects = stringArray(record.missingObjects);
+  const geometryChanges = stringArray(record.geometryChanges);
+  if (!preserveReviews
+    || !mustChangeReviews
+    || !finishOnlyReviews
+    || !unexpectedObjects
+    || !missingObjects
+    || !geometryChanges) {
+    return null;
+  }
+  return {
+    ...base,
+    preserveReviews: preserveReviews as StrictViewpointVerdict["preserveReviews"],
+    mustChangeReviews: mustChangeReviews as StrictViewpointVerdict["mustChangeReviews"],
+    finishOnlyReviews: finishOnlyReviews as StrictViewpointVerdict["finishOnlyReviews"],
+    unexpectedObjects,
+    missingObjects,
+    geometryChanges,
+  };
 }
 
 function parseFeedbackVerdict(payload: unknown): FeedbackVerdict | null {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
-  const content = (payload as Record<string, unknown>).content;
-  if (!Array.isArray(content)) return null;
-  const text = content
-    .filter((block): block is Record<string, unknown> => !!block && typeof block === "object" && !Array.isArray(block))
-    .filter((block) => block.type === "text" && typeof block.text === "string")
-    .map((block) => block.text as string)
-    .join("\n")
-    .trim();
-  if (!text) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const record = parsed as Record<string, unknown>;
+  const record = parsedStructuredRecord(payload);
+  if (!record) return null;
   if (typeof record.samePhysicalSpace !== "boolean"
     || typeof record.cameraAndArchitecturePreserved !== "boolean"
     || typeof record.requestedEditsApplied !== "boolean"
@@ -365,12 +729,63 @@ export class AnthropicVirtualStagingViewpointVerifier implements VirtualStagingV
     private readonly apiKey = (process.env.ANTHROPIC_API_KEY ?? "").trim(),
     model = (process.env.VIRTUAL_STAGING_VIEWPOINT_MODEL ?? "").trim() || DEFAULT_VIEWPOINT_MODEL,
     private readonly fetchFn: FetchLike = fetch,
+    private readonly manifestModel =
+      (process.env.VIRTUAL_STAGING_MANIFEST_MODEL ?? "").trim() || model,
+    private readonly adversarialModel =
+      (process.env.VIRTUAL_STAGING_ADVERSARIAL_MODEL ?? "").trim() || model,
   ) {
     this.model = model;
   }
 
   isConfigured(): boolean {
     return this.apiKey.length > 0;
+  }
+
+  async analyzeSource(
+    input: VirtualStagingSourceAnalysisInput,
+  ): Promise<VirtualStagingSourceManifest> {
+    if (!this.isConfigured()) {
+      throw new VirtualStagingViewpointVerificationUnavailableError(
+        "ANTHROPIC_API_KEY is required to inventory virtual-staging source photos",
+      );
+    }
+    const source = await normalizeForVision(input.source);
+    const payload = await this.requestStructured({
+      model: this.manifestModel,
+      maxTokens: 6_000,
+      content: [
+        { type: "text", text: "Immutable source photograph:" },
+        {
+          type: "image",
+          source: { type: "base64", media_type: "image/jpeg", data: source.toString("base64") },
+        },
+        {
+          type: "text",
+          text: sourceManifestPrompt(input.context, input.sourceFilename),
+        },
+      ],
+      schema: sourceManifestOutputSchema(),
+      unavailableLabel: "Source-manifest analysis",
+    });
+    const manifest = parseSourceManifest(payload);
+    if (!manifest) {
+      throw new VirtualStagingViewpointVerificationUnavailableError(
+        "Virtual-staging source analyzer returned an incomplete or invalid manifest",
+      );
+    }
+    const usage = usageFromPayload(payload);
+    console.info(`[virtual-staging] ${JSON.stringify({
+      event: "source-manifest",
+      verifier: this.id,
+      model: this.manifestModel,
+      sourceFilename: input.sourceFilename,
+      preserveTargets: manifest.preserveTargets.length,
+      mustChangeTargets: manifest.mustChangeTargets.length,
+      finishOnlyTargets: manifest.finishOnlyTargets.length,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+    })}`);
+    return manifest;
   }
 
   async verify(input: VirtualStagingViewpointVerificationInput): Promise<void> {
@@ -421,81 +836,49 @@ export class AnthropicVirtualStagingViewpointVerifier implements VirtualStagingV
           source: { type: "base64", media_type: "image/jpeg", data: generated.toString("base64") },
         },
       ];
-    const requestBody = JSON.stringify({
-      model: this.model,
-      max_tokens: 400,
-      messages: [{
-        role: "user",
+    const reviewPasses = mode === "alternate-angle" && input.manifest
+      ? (["primary", "adversarial"] as const)
+      : (["primary"] as const);
+    for (const reviewPass of reviewPasses) {
+      const requestModel = reviewPass === "adversarial" ? this.adversarialModel : this.model;
+      const payload = await this.requestStructured({
+        model: requestModel,
+        maxTokens: input.manifest && mode === "alternate-angle" ? 6_000 : 600,
         content: [
           ...imageContent,
           {
             type: "text",
             text: mode === "feedback-revision"
               ? feedbackPrompt(input.feedback!.trim())
-              : viewpointPrompt(input.requestedDirection, hasPreviousPreview, input.context),
+              : viewpointPrompt(
+                input.requestedDirection,
+                hasPreviousPreview,
+                input.context,
+                input.manifest,
+                reviewPass,
+              ),
           },
         ],
-      }],
-      output_config: {
-        format: {
-          type: "json_schema",
-          schema: mode === "feedback-revision"
-            ? feedbackOutputSchema()
+        schema: mode === "feedback-revision"
+          ? feedbackOutputSchema()
+          : input.manifest
+            ? strictViewpointOutputSchema(hasPreviousPreview, input.manifest)
             : viewpointOutputSchema(hasPreviousPreview),
-        },
-      },
-    });
-
-    let lastError = "Viewpoint verification failed";
-    for (let attempt = 0; attempt < VIEWPOINT_MAX_ATTEMPTS; attempt += 1) {
-      let response: Response;
-      try {
-        response = await this.fetchFn(ANTHROPIC_MESSAGES_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": this.apiKey,
-            "anthropic-version": ANTHROPIC_VERSION,
-          },
-          body: requestBody,
-          signal: AbortSignal.timeout(VIEWPOINT_TIMEOUT_MS),
-        });
-      } catch (error) {
-        lastError = error instanceof Error && error.name === "TimeoutError"
-          ? "Viewpoint verification timed out"
-          : "Viewpoint verification request failed";
-        if (attempt + 1 < VIEWPOINT_MAX_ATTEMPTS) {
-          await waitBeforeRetry(attempt);
-          continue;
-        }
-        throw new VirtualStagingViewpointVerificationUnavailableError(lastError);
-      }
-      if (!response.ok) {
-        lastError = `Viewpoint verification failed (HTTP ${response.status})`;
-        await response.arrayBuffer().catch(() => undefined);
-        if (retryableStatus(response.status) && attempt + 1 < VIEWPOINT_MAX_ATTEMPTS) {
-          await waitBeforeRetry(attempt);
-          continue;
-        }
-        throw new VirtualStagingViewpointVerificationUnavailableError(lastError);
-      }
-      const payload = await response.json().catch(() => null) as unknown;
-      if (stopReasonFromPayload(payload) !== "end_turn") {
-        throw new VirtualStagingViewpointVerificationUnavailableError(
-          "Viewpoint verifier did not complete its structured response",
-        );
-      }
+        unavailableLabel: "Viewpoint verification",
+      });
       const verdict = mode === "feedback-revision"
         ? parseFeedbackVerdict(payload)
-        : parseViewpointVerdict(payload, hasPreviousPreview);
+        : parseViewpointVerdict(payload, hasPreviousPreview, input.manifest);
       if (!verdict) {
         throw new VirtualStagingViewpointVerificationUnavailableError(
           "Virtual-staging verifier returned an invalid structured response",
         );
       }
       const feedbackVerdict = mode === "feedback-revision" ? verdict as FeedbackVerdict : null;
-      const viewpointVerdict = mode === "alternate-angle" ? verdict as ViewpointVerdict : null;
-      const accepted = mode === "feedback-revision"
+      const viewpointVerdict = mode === "alternate-angle"
+        ? verdict as ViewpointVerdict | StrictViewpointVerdict
+        : null;
+      const broadCriteriaAccepted = mode === "feedback-revision"
         ? feedbackVerdict!.samePhysicalSpace
           && feedbackVerdict!.cameraAndArchitecturePreserved
           && feedbackVerdict!.requestedEditsApplied
@@ -510,11 +893,34 @@ export class AnthropicVirtualStagingViewpointVerifier implements VirtualStagingV
           && viewpointVerdict!.objectInventoryPreserved
           && viewpointVerdict!.sceneRefreshApplied
           && (!hasPreviousPreview || viewpointVerdict!.distinctFromPreviousViewpoint === true);
+      const strictVerdict = input.manifest && mode === "alternate-angle"
+        ? viewpointVerdict as StrictViewpointVerdict
+        : null;
+      const itemizedCriteriaAccepted = !strictVerdict
+        || (
+          strictVerdict.preserveReviews.every((review) => review.geometryPreserved)
+          && strictVerdict.mustChangeReviews.every(
+            (review) => review.visiblyChanged
+              && review.sameFunction
+              && review.countAndPlacementPreserved
+              && review.styleCompatible,
+          )
+          && strictVerdict.finishOnlyReviews.every(
+            (review) => review.finishChanged
+              && review.geometryPreserved
+              && review.styleCompatible,
+          )
+          && strictVerdict.unexpectedObjects.length === 0
+          && strictVerdict.missingObjects.length === 0
+          && strictVerdict.geometryChanges.length === 0
+        );
+      const accepted = broadCriteriaAccepted && itemizedCriteriaAccepted;
       const usage = usageFromPayload(payload);
       console.info(`[virtual-staging] ${JSON.stringify({
         event: mode === "feedback-revision" ? "feedback-verification" : "viewpoint-verification",
         verifier: this.id,
-        model: this.model,
+        model: requestModel,
+        reviewPass,
         imageProvider: input.imageProvider,
         generationAttempt: input.generationAttempt,
         accepted,
@@ -533,6 +939,13 @@ export class AnthropicVirtualStagingViewpointVerifier implements VirtualStagingV
           objectInventoryPreserved: viewpointVerdict!.objectInventoryPreserved,
           sceneRefreshApplied: viewpointVerdict!.sceneRefreshApplied,
           distinctFromPreviousViewpoint: viewpointVerdict!.distinctFromPreviousViewpoint ?? null,
+          itemizedCriteriaAccepted,
+          preserveTargetsReviewed: strictVerdict?.preserveReviews.length ?? null,
+          mustChangeTargetsReviewed: strictVerdict?.mustChangeReviews.length ?? null,
+          finishOnlyTargetsReviewed: strictVerdict?.finishOnlyReviews.length ?? null,
+          unexpectedObjects: strictVerdict?.unexpectedObjects.length ?? null,
+          missingObjects: strictVerdict?.missingObjects.length ?? null,
+          geometryChanges: strictVerdict?.geometryChanges.length ?? null,
         }),
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
@@ -544,7 +957,67 @@ export class AnthropicVirtualStagingViewpointVerifier implements VirtualStagingV
             : `Generated preview failed alternate-angle verification: ${verdict.reason}`,
         );
       }
-      return;
+    }
+  }
+
+  private async requestStructured(input: {
+    model: string;
+    maxTokens: number;
+    content: unknown[];
+    schema: Record<string, unknown>;
+    unavailableLabel: string;
+  }): Promise<unknown> {
+    const requestBody = JSON.stringify({
+      model: input.model,
+      max_tokens: input.maxTokens,
+      messages: [{ role: "user", content: input.content }],
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: input.schema,
+        },
+      },
+    });
+    let lastError = `${input.unavailableLabel} failed`;
+    for (let attempt = 0; attempt < VIEWPOINT_MAX_ATTEMPTS; attempt += 1) {
+      let response: Response;
+      try {
+        response = await this.fetchFn(ANTHROPIC_MESSAGES_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": this.apiKey,
+            "anthropic-version": ANTHROPIC_VERSION,
+          },
+          body: requestBody,
+          signal: AbortSignal.timeout(VIEWPOINT_TIMEOUT_MS),
+        });
+      } catch (error) {
+        lastError = error instanceof Error && error.name === "TimeoutError"
+          ? `${input.unavailableLabel} timed out`
+          : `${input.unavailableLabel} request failed`;
+        if (attempt + 1 < VIEWPOINT_MAX_ATTEMPTS) {
+          await waitBeforeRetry(attempt);
+          continue;
+        }
+        throw new VirtualStagingViewpointVerificationUnavailableError(lastError);
+      }
+      if (!response.ok) {
+        lastError = `${input.unavailableLabel} failed (HTTP ${response.status})`;
+        await response.arrayBuffer().catch(() => undefined);
+        if (retryableStatus(response.status) && attempt + 1 < VIEWPOINT_MAX_ATTEMPTS) {
+          await waitBeforeRetry(attempt);
+          continue;
+        }
+        throw new VirtualStagingViewpointVerificationUnavailableError(lastError);
+      }
+      const payload = await response.json().catch(() => null) as unknown;
+      if (stopReasonFromPayload(payload) !== "end_turn") {
+        throw new VirtualStagingViewpointVerificationUnavailableError(
+          `${input.unavailableLabel} did not complete its structured response`,
+        );
+      }
+      return payload;
     }
     throw new VirtualStagingViewpointVerificationUnavailableError(lastError);
   }
