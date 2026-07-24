@@ -1465,7 +1465,10 @@ assert.deepEqual(
 console.log("  ✓ live config has no duplicates");
 
 // ---------- Combo draft bedroom reconciliation ----------
-import { resolveComboUnitBedrooms } from "../shared/draft-unit-bedrooms.ts";
+import {
+  reconcileComboBedroomsAfterUnitChange,
+  resolveComboUnitBedrooms,
+} from "../shared/draft-unit-bedrooms.ts";
 
 console.log("\ndraft-unit-bedrooms suite");
 
@@ -1502,6 +1505,30 @@ assert.deepEqual(
   "already-correct counts should stay unchanged",
 );
 console.log("  ✓ correct 3+3 unchanged");
+
+assert.deepEqual(
+  resolveComboUnitBedrooms({
+    listingTitle: "The Cliffs at Princeville — 6BR Combined",
+    unit1Bedrooms: 3,
+    unit2Bedrooms: 4,
+    combinedBedrooms: 7,
+  }),
+  { unit1: 2, unit2: 4, combined: 6 },
+  "published 6BR total should repair stale 3+4 replacement drift to 2+4",
+);
+console.log("  ✓ published 6BR with confirmed 4BR resolves sibling to 2BR");
+
+assert.deepEqual(
+  reconcileComboBedroomsAfterUnitChange({
+    listingTitle: "The Cliffs at Princeville — 6BR Combined",
+    unit1Bedrooms: 3,
+    unit2Bedrooms: 3,
+    combinedBedrooms: 6,
+  }, "unit2", 4),
+  { unit1: 2, unit2: 4, combined: 6 },
+  "replacing Unit B with 4BR should preserve the 6BR product total",
+);
+console.log("  ✓ 4BR replacement makes the sibling 2BR");
 
 // ---------- Pricing tables (shared/pricing-rates) ----------
 console.log("\npricing tables suite");

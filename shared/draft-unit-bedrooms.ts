@@ -38,10 +38,32 @@ function firstBedroomInText(text: string): number | null {
 /** Combined bedroom total from structured field or listing-level copy. */
 export function inferCombinedBedroomsFromDraft(draft: DraftBedroomFields): number | null {
   const stored = positiveDraftInteger(draft.combinedBedrooms);
-  if (stored) return stored;
-  const text = [
+  const publishedText = [
     draft.listingTitle,
     draft.bookingTitle,
+  ].filter(Boolean).join(" ");
+  const published = firstBedroomInText(publishedText);
+  const storedUnit1 = positiveDraftInteger(draft.unit1Bedrooms);
+  const storedUnit2 = positiveDraftInteger(draft.unit2Bedrooms);
+
+  // A replacement used to rewrite combinedBedrooms to the sum of the stale
+  // sibling plus the replacement. That turned a published 6BR combo with a
+  // confirmed 4BR unit into 7BR (3+4), even though the remaining unit should
+  // be the 2BR remainder. When the stored total is exactly that unit sum and
+  // conflicts with the published title, the published total is authoritative.
+  if (
+    stored &&
+    published &&
+    published !== stored &&
+    storedUnit1 &&
+    storedUnit2 &&
+    stored === storedUnit1 + storedUnit2
+  ) {
+    return published;
+  }
+  if (stored) return stored;
+  const text = [
+    publishedText,
     draft.name,
     draft.unitTypes,
     draft.listingDescription,
@@ -109,11 +131,13 @@ export function resolveComboUnitBedrooms(draft: DraftBedroomFields): ResolvedDra
 
   if (combined && unitBedrooms.length === 2) {
     const sum = unitBedrooms[0] + unitBedrooms[1];
-    if (sum > 0 && sum < combined) {
+    if (sum > 0 && sum !== combined) {
       if (unitBedrooms[0] === unitBedrooms[1] && combined % 2 === 0) {
         unitBedrooms = [combined / 2, combined / 2];
-      } else if (unitBedrooms[0] > 0) {
+      } else if (unitBedrooms[0] > unitBedrooms[1] && unitBedrooms[0] < combined) {
         unitBedrooms = [unitBedrooms[0], combined - unitBedrooms[0]];
+      } else if (unitBedrooms[1] < combined) {
+        unitBedrooms = [combined - unitBedrooms[1], unitBedrooms[1]];
       }
     }
   }
@@ -131,6 +155,34 @@ export function resolveDraftUnitBedrooms(
 ): number {
   const resolved = resolveComboUnitBedrooms(draft);
   return unitKey === "unit1" ? resolved.unit1 : resolved.unit2;
+}
+
+/**
+ * Keeps a combo listing's published total fixed when one unit is replaced.
+ * The changed unit is authoritative; the sibling becomes the positive
+ * remainder. If no valid published total exists, fall back to summing the
+ * changed unit with the currently resolved sibling.
+ */
+export function reconcileComboBedroomsAfterUnitChange(
+  draft: DraftBedroomFields,
+  changedUnit: "unit1" | "unit2",
+  changedBedrooms: number,
+): ResolvedDraftBedrooms {
+  const changed = positiveDraftInteger(changedBedrooms);
+  const current = resolveComboUnitBedrooms(draft);
+  if (!changed) return current;
+
+  const combined = inferCombinedBedroomsFromDraft(draft);
+  if (combined && combined > changed) {
+    return changedUnit === "unit1"
+      ? { unit1: changed, unit2: combined - changed, combined }
+      : { unit1: combined - changed, unit2: changed, combined };
+  }
+
+  const sibling = changedUnit === "unit1" ? current.unit2 : current.unit1;
+  return changedUnit === "unit1"
+    ? { unit1: changed, unit2: sibling, combined: changed + sibling }
+    : { unit1: sibling, unit2: changed, combined: sibling + changed };
 }
 
 /**
