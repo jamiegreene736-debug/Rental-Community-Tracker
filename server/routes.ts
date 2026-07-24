@@ -110,6 +110,7 @@ import {
   comboBedroomSplitIsInferred,
   inferCombinedBedroomsFromDraft,
   positiveDraftInteger,
+  reconcileComboBedroomsAfterUnitChange,
   resolveComboUnitBedrooms,
   resolveDraftUnitBedrooms,
 } from "@shared/draft-unit-bedrooms";
@@ -40258,17 +40259,24 @@ Return ONLY compact JSON with this exact shape:
             update[`unit${n}Bedrooms`] = swap.newBedrooms;
           }
         }
-        // Reconcile the combo total whenever a repoint changed a unit's bedroom
-        // count. Root-caused 2026-07-18 (Cliffs at Princeville draft 20): a
-        // 3BR→4BR unit replacement updated unit2Bedrooms but left
-        // combinedBedrooms at the stale 6, so the audit's layout stage kept
-        // green-lighting the Guesty 6BR layout while the regenerated
-        // description honestly advertised "seven bedrooms" — a silent
-        // title/description/layout contradiction on the live listing. Keeping
-        // combinedBedrooms = sum of unit bedrooms makes the drift VISIBLE:
-        // the layout stage then flags the Guesty listing (and the title) as
-        // out of sync instead of validating against the stale total.
-        if (Object.keys(update).some((k) => /^unit[12]Bedrooms$/.test(k))) {
+        // A combo's published bedroom total is the product being sold. When one
+        // unit changes size, keep that total fixed and make the sibling the
+        // remainder (6BR total with a confirmed 4BR unit => search for 2BR).
+        // The previous sum-only behavior produced 3+4=7 for Cliffs draft 20.
+        const changedBedroomKeys = Object.keys(update)
+          .filter((key): key is "unit1Bedrooms" | "unit2Bedrooms" =>
+            key === "unit1Bedrooms" || key === "unit2Bedrooms");
+        if (draft.singleListing !== true && changedBedroomKeys.length === 1) {
+          const changedKey = changedBedroomKeys[0];
+          const reconciled = reconcileComboBedroomsAfterUnitChange(
+            draft,
+            changedKey === "unit1Bedrooms" ? "unit1" : "unit2",
+            Number(update[changedKey]),
+          );
+          update.unit1Bedrooms = reconciled.unit1;
+          update.unit2Bedrooms = reconciled.unit2;
+          update.combinedBedrooms = reconciled.combined;
+        } else if (changedBedroomKeys.length > 0) {
           const u1 = typeof update.unit1Bedrooms === "number" ? update.unit1Bedrooms : draft.unit1Bedrooms ?? 0;
           const u2 = draft.singleListing
             ? 0
