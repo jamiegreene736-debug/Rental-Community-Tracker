@@ -23,6 +23,7 @@ import {
   evenSampleIndices,
   heuristicCollagePick,
   parseCollageVisionPick,
+  parsePersistedCoverCollagePreview,
   parseLocalPhotoUrl,
   resolveForcedCollagePick,
   scoreCommunityShot,
@@ -44,6 +45,51 @@ assert.equal(parseLocalPhotoUrl("https://media.vrbo.com/x.jpg"), null, "external
 assert.equal(parseLocalPhotoUrl("/photos/only-folder"), null);
 assert.equal(parseLocalPhotoUrl(""), null);
 console.log("  ✓ parseLocalPhotoUrl");
+
+// ── fast persisted preview: safe local copy while Guesty verifies ──────────
+assert.deepEqual(
+  parsePersistedCoverCollagePreview({
+    guestySynced: true,
+    collageUrl: "https://i.ibb.co/example/cover.jpg",
+    localPath: "/photos/cover-collages/property-42.jpg",
+  }),
+  {
+    collageUrl: "https://i.ibb.co/example/cover.jpg",
+    previewUrl: "/photos/cover-collages/property-42.jpg",
+  },
+  "a Guesty-synced receipt uses the in-system JPEG as its immediate preview",
+);
+assert.equal(
+  parsePersistedCoverCollagePreview({
+    guestySynced: false,
+    collageUrl: "https://i.ibb.co/example/cover.jpg",
+    localPath: "/photos/cover-collages/property-42.jpg",
+  }),
+  null,
+  "an audit-only/local collage is never presented as a Guesty cover",
+);
+assert.deepEqual(
+  parsePersistedCoverCollagePreview({
+    guestySynced: true,
+    collageUrl: "https://i.ibb.co/example/cover.jpg",
+    localPath: "/photos/cover-collages/../../private.jpg",
+  }),
+  {
+    collageUrl: "https://i.ibb.co/example/cover.jpg",
+    previewUrl: "https://i.ibb.co/example/cover.jpg",
+  },
+  "an unsafe local path falls back to the verified remote URL",
+);
+assert.equal(
+  parsePersistedCoverCollagePreview({
+    guestySynced: true,
+    collageUrl: "javascript:alert(1)",
+    localPath: "/photos/cover-collages/property-42.jpg",
+  }),
+  null,
+  "a non-http Guesty URL cannot become a preview hint",
+);
+console.log("  ✓ persisted cover preview is fast, synced, and path-safe");
 
 // ── vision reply parser: strict, falls back on anything unusable ────────────
 assert.deepEqual(
@@ -312,6 +358,15 @@ assert.ok(
   routes.includes("await storage.setSetting(COVER_COLLAGE_SETTING_KEY"),
   "collage record persisted in app_settings",
 );
+const previewRouteStart = routes.indexOf('app.get("/api/builder/cover-collage-preview"');
+const previewRouteEnd = routes.indexOf('app.get("/api/builder/guesty-photo-gallery-status"', previewRouteStart);
+const previewRoute = routes.slice(previewRouteStart, previewRouteEnd);
+assert.ok(
+  previewRouteStart > 0
+  && previewRoute.includes("readPersistedCoverCollagePreview(listingId)")
+  && !previewRoute.includes("readGuestyPicturesForVerification"),
+  "fast preview reads only the durable receipt and never waits on Guesty",
+);
 assert.ok(
   autoRoute.includes("listingId?: string | null") &&
   autoRoute.includes("propertyId?: number | string | null") &&
@@ -399,6 +454,20 @@ assert.ok(
   !builderUi.includes("canvas.toDataURL(") &&
   !builderUi.includes('fetch("/api/builder/upscale-photo"'),
   "no client-side canvas compose or per-pick ESRGAN round-trip on the manual path",
+);
+assert.ok(
+  builderUi.includes("/api/builder/cover-collage-preview?") &&
+  builderUi.includes("guestyCoverCollageVerificationRef") &&
+  builderUi.includes("matchingCoverCollageHint") &&
+  builderUi.includes("coverCollageDisplayUrl"),
+  "the Photos tab hydrates a fast preview while fencing it against the live Guesty result",
+);
+assert.ok(
+  curator.includes('data-testid="cover-collage-loading"')
+  && curator.includes('loading="eager"')
+  && curator.includes('fetchPriority="high"')
+  && curator.includes("saved preview; confirming Guesty"),
+  "the collage has immediate loading feedback and its above-gallery image loads eagerly",
 );
 console.log("  ✓ builder client wiring locked");
 

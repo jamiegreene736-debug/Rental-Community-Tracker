@@ -266,7 +266,13 @@ import { runMarketRateScan, getMarketRateScanStatus } from "./market-rate-schedu
 import { validateAndFixPhoto, TARGET_WIDTH as PUSH_PHOTO_TARGET_WIDTH } from "./photo-validator";
 import { esrganScaleForPhoto } from "@shared/photo-upscale-plan";
 import { generateAutoCoverCollage, type AutoCoverCollageResult } from "./cover-collage";
-import { COVER_COLLAGE_DISK_FOLDER, COVER_COLLAGE_SETTING_KEY, type CollageCandidate } from "@shared/cover-collage-logic";
+import {
+  COVER_COLLAGE_DISK_FOLDER,
+  COVER_COLLAGE_SETTING_KEY,
+  parsePersistedCoverCollagePreview,
+  type CollageCandidate,
+  type PersistedCoverCollagePreview,
+} from "@shared/cover-collage-logic";
 import { resolveCuratedCommunityDescription } from "./community-descriptions";
 import { filterNonRentalUnitPhotos, UNIT_PHOTO_VISION_VERSION } from "./unit-photo-vision";
 import {
@@ -544,6 +550,27 @@ async function persistCoverCollageRecords(keys: string[], record: Record<string,
     await storage.setSetting(COVER_COLLAGE_SETTING_KEY, JSON.stringify(Object.fromEntries(entries.slice(0, 200))));
   });
   await coverCollageRecordTail;
+}
+
+async function readPersistedCoverCollagePreview(
+  listingId: string,
+): Promise<PersistedCoverCollagePreview | null> {
+  // Do not race a generation that is currently replacing this shared JSON
+  // document. A settled write failure is ignored here and the normal live
+  // Guesty read remains the fallback.
+  await coverCollageRecordTail.catch(() => undefined);
+  const raw = await storage.getSetting(COVER_COLLAGE_SETTING_KEY).catch(() => undefined);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const records = parsed as Record<string, unknown>;
+    return Object.prototype.hasOwnProperty.call(records, listingId)
+      ? parsePersistedCoverCollagePreview(records[listingId])
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -26753,6 +26780,21 @@ Requirements:
     } finally {
       releasePictureMutation();
     }
+  });
+
+  // Fast cover-collage preview for the Photos tab. Generation already saves an
+  // exact local JPEG plus the Guesty URL in app_settings; return that durable
+  // receipt immediately while the slower authoritative Guesty gallery read
+  // below continues independently. The client labels this as "confirming"
+  // until the live read proves the same remote URL is still the cover.
+  app.get("/api/builder/cover-collage-preview", async (req: Request, res: Response) => {
+    const listingId = String((req.query as Record<string, unknown>).listingId ?? "").trim();
+    if (!/^[a-zA-Z0-9_-]{1,200}$/.test(listingId)) {
+      return res.status(400).json({ error: "valid listingId required" });
+    }
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    const preview = await readPersistedCoverCollagePreview(listingId);
+    return res.json({ listingId, preview });
   });
 
   // Authoritative live Guesty count for the Photos tab. Never falls back to a

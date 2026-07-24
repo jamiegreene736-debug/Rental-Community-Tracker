@@ -2688,6 +2688,17 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // operator can see what's currently set as the cover without leaving
   // the Photos tab. Null when there's no collage on the listing.
   const [guestyCoverCollageUrl, setGuestyCoverCollageUrl] = useState<string | null>(null);
+  const [guestyCoverCollageHint, setGuestyCoverCollageHint] = useState<{
+    listingId: string;
+    collageUrl: string;
+    previewUrl: string;
+  } | null>(null);
+  const guestyCoverCollagePreviewRequestRef = useRef(0);
+  const guestyCoverCollageVerificationRef = useRef<{
+    listingId: string;
+    status: "pending" | "has-collage" | "no-collage" | "error";
+    collageUrl?: string;
+  } | null>(null);
 
   const savePushSummary = useCallback((summary: PushSummary, makeVisible = true) => {
     if (makeVisible && selectedIdRef.current === summary.listingId) setLastPushSummary(summary);
@@ -2697,6 +2708,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   const markGuestyPhotoCountUnverified = useCallback((listingId: string, message: string) => {
     if (selectedIdRef.current !== listingId) return;
     guestyPhotoMutationActiveRef.current = false;
+    guestyCoverCollageVerificationRef.current = { listingId, status: "error" };
     ++guestyPhotoCountRequestRef.current;
     setGuestyPhotoCount(null);
     setGuestyPhotoCountLoading(false);
@@ -2710,6 +2722,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       || guestyPhotoMutationActiveRef.current
     ) return false;
     guestyPhotoMutationActiveRef.current = true;
+    guestyCoverCollageVerificationRef.current = { listingId, status: "pending" };
     ++guestyPhotoCountRequestRef.current;
     setGuestyPhotoCount(null);
     setGuestyPhotoCountLoading(true);
@@ -2756,6 +2769,10 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     photoPushUiOperationRef.current = null;
     collageUiOperationRef.current++;
     guestyPhotoMutationActiveRef.current = false;
+    ++guestyCoverCollagePreviewRequestRef.current;
+    guestyCoverCollageVerificationRef.current = selectedId
+      ? { listingId: selectedId, status: "pending" }
+      : null;
     // Every completion/progress panel below is listing-scoped. Clear it at
     // the selection boundary so Listing B can never inherit Listing A's green
     // replacement receipt while its own live read is still pending.
@@ -2778,6 +2795,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setGuestyPhotoCountError(null);
       setGuestyPhotoCountCheckedAt(null);
       setGuestyCoverCollageUrl(null);
+      setGuestyCoverCollageHint(null);
       setGuestyPhotoCountLoading(false);
       setGuestyLiveAmenities(null);
       setFetchingLiveAmenities(false);
@@ -2795,8 +2813,54 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setGuestyPhotoCountError(null);
     setGuestyPhotoCountCheckedAt(null);
     setGuestyCoverCollageUrl(null);
+    setGuestyCoverCollageHint(null);
     setGuestyLiveAmenities(null);
     setFetchingLiveAmenities(true);
+  }, [selectedId]);
+
+  // The generated collage is already stored locally with a durable receipt.
+  // Hydrate that cheap preview independently so the Photos tab does not stay
+  // visually empty while Guesty's authoritative gallery API is still running.
+  // The live read below remains the source of truth and removes a stale hint.
+  useEffect(() => {
+    if (!selectedId) return;
+    const listingId = selectedId;
+    const requestId = ++guestyCoverCollagePreviewRequestRef.current;
+    void fetch(
+      `/api/builder/cover-collage-preview?listingId=${encodeURIComponent(listingId)}`,
+      { cache: "no-store" },
+    )
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Cover collage preview read failed (${response.status})`);
+        return response.json();
+      })
+      .then((data: any) => {
+        if (
+          guestyCoverCollagePreviewRequestRef.current !== requestId
+          || selectedIdRef.current !== listingId
+        ) return;
+        const preview = data?.preview;
+        if (
+          !preview
+          || typeof preview.collageUrl !== "string"
+          || typeof preview.previewUrl !== "string"
+        ) return;
+        const verification = guestyCoverCollageVerificationRef.current;
+        if (!verification || verification.listingId !== listingId || verification.status === "no-collage") return;
+        if (
+          verification.status === "has-collage"
+          && verification.collageUrl !== preview.collageUrl
+        ) return;
+        setGuestyCoverCollageHint({
+          listingId,
+          collageUrl: preview.collageUrl,
+          previewUrl: preview.previewUrl,
+        });
+      })
+      .catch(() => {
+        // A missing/corrupt receipt only removes the fast path. The live Guesty
+        // read below still discovers old or manually-created collages.
+      });
   }, [selectedId]);
 
   // Load the selected listing's authoritative live photo count. This effect
@@ -2808,6 +2872,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     setGuestyPhotoCountLoading(true);
     setGuestyPhotoCountError(null);
     setGuestyPhotoCountCheckedAt(null);
+    guestyCoverCollageVerificationRef.current = { listingId: selectedId, status: "pending" };
     // Photo count comes only from a no-store Guesty read; a browser receipt is
     // useful history but can never be labeled as the live Guesty total.
     void readGuestyGalleryStatus(selectedId)
@@ -2816,8 +2881,12 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           guestyPhotoCountRequestRef.current !== photoCountRequestId
           || selectedIdRef.current !== selectedId
         ) return;
+        guestyCoverCollageVerificationRef.current = status.collageUrl
+          ? { listingId: selectedId, status: "has-collage", collageUrl: status.collageUrl }
+          : { listingId: selectedId, status: "no-collage" };
         setGuestyPhotoCount(status.count);
         setGuestyCoverCollageUrl(status.collageUrl);
+        if (!status.collageUrl) setGuestyCoverCollageHint(null);
         setGuestyPhotoCountCheckedAt(status.checkedAt);
       })
       .catch((error: any) => {
@@ -2825,6 +2894,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
           guestyPhotoCountRequestRef.current !== photoCountRequestId
           || selectedIdRef.current !== selectedId
         ) return;
+        guestyCoverCollageVerificationRef.current = { listingId: selectedId, status: "error" };
         setGuestyPhotoCount(null);
         setGuestyCoverCollageUrl(null);
         setGuestyPhotoCountError(error?.message ?? "Guesty gallery count could not be verified.");
@@ -2952,6 +3022,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
   // Provenance of the last AI run: how the pair was chosen (vision vs the
   // caption heuristic the server degrades to) + the model's one-line why.
   const [collageMeta, setCollageMeta] = useState<{ method: string; reasoning: string | null } | null>(null);
+  const rememberVerifiedCoverCollage = useCallback((listingId: string, result: any) => {
+    const collageUrl = typeof result?.collageUrl === "string" ? result.collageUrl : "";
+    if (!collageUrl) return;
+    const savedPath = typeof result?.savedPath === "string"
+      && /^\/photos\/cover-collages\/[a-zA-Z0-9_-]+\.jpe?g$/i.test(result.savedPath)
+      ? result.savedPath
+      : null;
+    guestyCoverCollageVerificationRef.current = {
+      listingId,
+      status: "has-collage",
+      collageUrl,
+    };
+    setGuestyCoverCollageUrl(collageUrl);
+    setGuestyCoverCollageHint({
+      listingId,
+      collageUrl,
+      previewUrl: savedPath ?? collageUrl,
+    });
+    setCollagePreviewUrl(savedPath ?? collageUrl);
+  }, []);
 
   // Community scene: resort amenities, grounds, aerial shots. These are
   // the "sell the destination" photos — ocean views, pool complexes,
@@ -3101,10 +3191,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setGuestyPhotoCountError(null);
       setGuestyPhotoCountCheckedAt(new Date().toISOString());
       if (!isActiveCollage()) return;
-      if (result.collageUrl) {
-        setGuestyCoverCollageUrl(result.collageUrl);
-        setCollagePreviewUrl(result.collageUrl);
-      }
+      rememberVerifiedCoverCollage(listingId, result);
       setCollagePhase("done");
     } catch (e: any) {
       if (!isActiveCollage()) return;
@@ -3117,6 +3204,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     finishGuestyPhotoCountMutation,
     markGuestyPhotoCountUnverified,
     propertyId,
+    rememberVerifiedCoverCollage,
     refreshGuestyPhotoCountFor,
     selectedId,
   ]);
@@ -3177,10 +3265,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       setGuestyPhotoCountError(null);
       setGuestyPhotoCountCheckedAt(new Date().toISOString());
       if (!isActiveCollage()) return;
-      if (result.collageUrl) {
-        setGuestyCoverCollageUrl(result.collageUrl);
-        setCollagePreviewUrl(result.collageUrl);
-      }
+      rememberVerifiedCoverCollage(listingId, result);
       setCollagePhase("done");
     } catch (e: any) {
       if (!isActiveCollage()) return;
@@ -3193,6 +3278,7 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
     finishGuestyPhotoCountMutation,
     markGuestyPhotoCountUnverified,
     propertyId,
+    rememberVerifiedCoverCollage,
     selectedId,
   ]);
 
@@ -6510,6 +6596,26 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
       .finally(() => { if (!cancelled) setMarketCompsLoading(false); });
     return () => { cancelled = true; };
   }, [propertyId]);
+
+  const matchingCoverCollageHint = guestyCoverCollageHint?.listingId === selectedId
+    && (!guestyCoverCollageUrl || guestyCoverCollageHint.collageUrl === guestyCoverCollageUrl)
+    ? guestyCoverCollageHint
+    : null;
+  const coverCollageDisplayUrl = guestyCoverCollageUrl
+    ? matchingCoverCollageHint?.previewUrl ?? guestyCoverCollageUrl
+    : matchingCoverCollageHint?.previewUrl ?? null;
+  const coverCollageOpenUrl = guestyCoverCollageUrl
+    ?? matchingCoverCollageHint?.collageUrl
+    ?? null;
+  const coverCollageVerification = guestyCoverCollageUrl
+    ? "confirmed" as const
+    : matchingCoverCollageHint
+      ? guestyPhotoCountError
+        ? "unverified" as const
+        : "checking" as const
+      : guestyPhotoCountLoading
+        ? "checking" as const
+        : null;
 
   const expectedGuestyPhotoCount = photos.length + (guestyCoverCollageUrl ? 1 : 0);
   const guestyPhotoCountDelta = guestyPhotoCount == null
@@ -10474,7 +10580,9 @@ export default function GuestyListingBuilder({ propertyData, propertyId, sourceU
                                   ? "Wait for Guesty photo normalization to finish."
                                   : null
                           }
-                          coverCollageCurrentUrl={guestyCoverCollageUrl}
+                          coverCollageCurrentUrl={coverCollageDisplayUrl}
+                          coverCollageOpenUrl={coverCollageOpenUrl}
+                          coverCollageVerification={coverCollageVerification}
                           onRequestCoverCollage={(selection) => { setCollagePhase("idle"); generateCoverCollage(photos, selection); }}
                           onRequestAutoCoverCollage={(candidates) => { generateAutoCoverCollage(candidates); }}
                           coverCollageStatus={{
