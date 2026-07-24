@@ -451,6 +451,15 @@ import {
   isStrongLensMatch,
   lensMatchConfidence,
 } from "./photo-match-guardrails";
+import {
+  issueReplacementPhotoReceipt,
+  normalizeReplacementPhotoUrls,
+  publicReplacementPhotoVerification,
+  replacementPhotoContentDigest,
+  replacementPhotoReceiptSigningKey,
+  validateReplacementPhotoReceipt,
+  verifyReplacementPhotoSet,
+} from "./replacement-photo-ota-verification";
 import { MAX_COMBO_PHOTO_OTA_ATTEMPTS, runComboOtaPreflight } from "./combo-ota-preflight";
 import {
   buildUnitPhotoResolverProof,
@@ -37045,6 +37054,12 @@ Return ONLY compact JSON with this exact shape:
     const searchApiKey = process.env.SEARCHAPI_API_KEY;
     const imgbbKey = process.env.IMGBB_API_KEY;
     if (!searchApiKey) return res.status(500).json({ error: "SEARCHAPI_API_KEY not configured" });
+    const photoReceiptSecret = replacementPhotoReceiptSigningKey();
+    if (!photoReceiptSecret) {
+      return res.status(500).json({
+        error: "OTA photo verification receipt signing is not configured. Set OTA_PHOTO_RECEIPT_SECRET, ADMIN_SECRET, or SESSION_SECRET.",
+      });
+    }
 
     // `strict` opts channel-remediation callers into rejecting
     // candidates with any UNKNOWN platform verdict, not just FOUND.
@@ -38682,7 +38697,7 @@ Return ONLY compact JSON with this exact shape:
       source: CandidateSource;
       address: string;
       unit: string;
-      verdict: "skipped-found" | "skipped-photo-found" | "skipped-unknown-strict" | "skipped-internal-duplicate" | "skipped-outside-resort" | "skipped-bedroom-mismatch" | "skipped-property-type" | "skipped-too-few-photos" | "skipped-vision-rejected" | "skipped-unfurnished" | "error";
+      verdict: "skipped-found" | "skipped-photo-found" | "skipped-photo-incomplete" | "skipped-unknown-strict" | "skipped-internal-duplicate" | "skipped-outside-resort" | "skipped-bedroom-mismatch" | "skipped-property-type" | "skipped-too-few-photos" | "skipped-vision-rejected" | "skipped-unfurnished" | "error";
       reason: string;
       platformCheck?: PlatformCheck;
     };
@@ -39034,37 +39049,120 @@ Return ONLY compact JSON with this exact shape:
             // "unknown" (no key) or "pass" → fall through to confirm.
           }
 
-          if (!hasRouteBudget(PHOTO_REVERSE_SEARCH_TIMEOUT_MS + 5_000)) {
+          const proposedPhotoUrls = normalizeReplacementPhotoUrls(scrapedPhotoUrls);
+          const estimatedOtaScanMs = Math.min(
+            120_000,
+            Math.max(
+              PHOTO_REVERSE_SEARCH_TIMEOUT_MS,
+              Math.ceil(Math.max(1, proposedPhotoUrls.length) / 6)
+                * (expandedSearch ? 8_000 : 12_000)
+                + 15_000,
+            ),
+          );
+          if (!hasRouteBudget(estimatedOtaScanMs + 5_000)) {
             budgetStopped = true;
             console.warn(
               `[find-unit] route budget too low for photo reverse-search after ${attempts.length}/${candidates.length} platform checks`,
             );
             break;
           }
-
-          const photoOtaSearch = await withStepTimeout(
-            runPhotoReverseSearch(searchApiKey, scrapedPhotoUrls, {
-              maxPhotos: expandedSearch ? 2 : 3,
-              requestTimeoutMs: expandedSearch ? 8_000 : 12_000,
-              delayMs: 0,
-            }),
-            PHOTO_REVERSE_SEARCH_TIMEOUT_MS,
-            { matches: { airbnb: [], vrbo: [], booking: [] }, checked: 0 },
-            `photo OTA duplicate check ${sourceUrl}`,
+          if (
+            SEARCHAPI_CALL_BUDGET > 0
+            && searchApiCalls + proposedPhotoUrls.length > SEARCHAPI_CALL_BUDGET
+          ) {
+            attempts.push({
+              sourceUrl,
+              source,
+              address,
+              unit: unitNumber || "?",
+              verdict: "skipped-photo-incomplete",
+              reason: `The full ${proposedPhotoUrls.length}-photo OTA scan would exceed this pass's SearchAPI budget; no partial scan was accepted.`,
+              platformCheck,
+            });
+            continue;
+          }
+          const otaScanRemainingMs = Math.max(
+            1_000,
+            candidatePhaseStartedAt + candidateBudgetMs - Date.now() - 5_000,
           );
-          const photoFoundOn = platformHosts.find((p) => {
-            if (!enforcedKeys.includes(p.key)) return false;
-            const matchKey = p.key === "bookingCom" ? "booking" : p.key;
-            return photoOtaSearch.matches[matchKey as "airbnb" | "vrbo" | "booking"].length > 0;
+          const photoOtaVerification = await verifyReplacementPhotoSet({
+            apiKey: searchApiKey,
+            sourceUrl,
+            // Every photo that can be passed to hydration is checked. Do not
+            // sample or drop community-looking URLs here: if a photo may be
+            // published, it must be covered by the receipt.
+            photoUrls: proposedPhotoUrls,
+            concurrency: 6,
+            lensTimeoutMs: expandedSearch ? 8_000 : 12_000,
+            imageTimeoutMs: 12_000,
+            thumbnailTimeoutMs: 8_000,
+            overallTimeoutMs: Math.min(120_000, otaScanRemainingMs),
+            maxLensAttempts: 2,
           });
-          if (photoFoundOn) {
+          searchApiCalls += photoOtaVerification.lensCalls;
+          console.info("[replacement-photo-ota]", JSON.stringify({
+            phase: "find",
+            sourceUrl,
+            status: photoOtaVerification.status,
+            checkedPhotos: photoOtaVerification.checkedPhotos,
+            totalPhotos: photoOtaVerification.totalPhotos,
+            lensCalls: photoOtaVerification.lensCalls,
+            matches: photoOtaVerification.matches.length,
+            failures: photoOtaVerification.failures.length,
+            durationMs: photoOtaVerification.durationMs,
+          }));
+          if (photoOtaVerification.status === "matched") {
+            const matchedPlatforms = Array.from(new Set(
+              photoOtaVerification.matches.map((match) =>
+                match.platform === "booking" ? "Booking.com" : match.platform === "vrbo" ? "VRBO" : "Airbnb"),
+            ));
             console.error(
-              `[find-unit] [${source}] Unit ${unitNumber} had ${MIN_DISTINCT_STRONG_PHOTO_MATCHES}+ strong photo matches on ${photoFoundOn.host} — skipping`,
+              `[find-unit] [${source}] Unit ${unitNumber} had identity-verified photo reuse on ${matchedPlatforms.join(", ")} — skipping`,
             );
             attempts.push({
               sourceUrl, source, address, unit: unitNumber || "?",
               verdict: "skipped-photo-found",
-              reason: `Two or more private/unit photos matched ${photoFoundOn.host}.`,
+              reason: `${photoOtaVerification.matches.length} real-estate photo match${photoOtaVerification.matches.length === 1 ? "" : "es"} identity-verified on ${matchedPlatforms.join(", ")}.`,
+              platformCheck,
+            });
+            continue;
+          }
+          if (photoOtaVerification.status !== "verified") {
+            const firstFailure = photoOtaVerification.failures[0]?.reason ?? "provider coverage was incomplete";
+            console.error(
+              `[find-unit] [${source}] Unit ${unitNumber} OTA photo verification incomplete ` +
+              `(${photoOtaVerification.checkedPhotos}/${photoOtaVerification.totalPhotos}): ${firstFailure}`,
+            );
+            attempts.push({
+              sourceUrl,
+              source,
+              address,
+              unit: unitNumber || "?",
+              verdict: "skipped-photo-incomplete",
+              reason: `Only ${photoOtaVerification.checkedPhotos}/${photoOtaVerification.totalPhotos} photos received conclusive OTA checks: ${firstFailure}`,
+              platformCheck,
+            });
+            continue;
+          }
+          let photoVerificationReceipt: string;
+          let photoVerificationExpiresAt: number;
+          try {
+            const issued = issueReplacementPhotoReceipt({
+              verification: photoOtaVerification,
+              secret: photoReceiptSecret,
+              propertyId: Number(bodyPropertyId),
+              targetUnitId: String(targetUnitId ?? ""),
+            });
+            photoVerificationReceipt = issued.receipt;
+            photoVerificationExpiresAt = issued.claims.expiresAt;
+          } catch (error: any) {
+            attempts.push({
+              sourceUrl,
+              source,
+              address,
+              unit: unitNumber || "?",
+              verdict: "skipped-photo-incomplete",
+              reason: `The complete OTA scan could not be bound to a commit receipt: ${error?.message ?? error}`,
               platformCheck,
             });
             continue;
@@ -39114,8 +39212,13 @@ Return ONLY compact JSON with this exact shape:
             // "gallery could not be scraped" (the Poipu Kapili unit-B class).
             photoUrls: scrapedPhotoUrls
               .filter((u) => /^https?:\/\//i.test(String(u ?? "")))
-              .slice(0, 120),
-            photoCount,
+              .slice(0, 150),
+            photoCount: proposedPhotoUrls.length,
+            photoVerificationReceipt,
+            otaPhotoVerification: publicReplacementPhotoVerification(
+              photoOtaVerification,
+              photoVerificationExpiresAt,
+            ),
             sampledCategories,
             platformCheck,
             expandedSearch,
@@ -39202,6 +39305,7 @@ Return ONLY compact JSON with this exact shape:
 	    const breakdown = {
 	      "skipped-found": 0,
 	      "skipped-photo-found": 0,
+	      "skipped-photo-incomplete": 0,
 	      "skipped-unknown-strict": 0,
       "skipped-internal-duplicate": 0,
       "skipped-outside-resort": 0,
@@ -39235,7 +39339,8 @@ Return ONLY compact JSON with this exact shape:
       const uncheckedByCap = totalCandidates > MAX_CANDIDATES_TO_CHECK && !budgetStopped;
       if (uncheckedByCap) parts.push(`checked the best ${MAX_CANDIDATES_TO_CHECK} of ${totalCandidates} candidates`);
 	      if (breakdown["skipped-found"] > 0) parts.push(`${breakdown["skipped-found"]} found on ${cleanChannel ? "the enforced channel" : "Airbnb/VRBO/Booking.com"}`);
-	      if (breakdown["skipped-photo-found"] > 0) parts.push(`${breakdown["skipped-photo-found"]} had 2+ strong private-photo matches on the enforced channel`);
+	      if (breakdown["skipped-photo-found"] > 0) parts.push(`${breakdown["skipped-photo-found"]} had identity-verified photo reuse on Airbnb/VRBO/Booking.com`);
+	      if (breakdown["skipped-photo-incomplete"] > 0) parts.push(`${breakdown["skipped-photo-incomplete"]} had an incomplete full-gallery OTA photo check and were not accepted`);
 	      if (breakdown["skipped-unknown-strict"] > 0) parts.push(`${breakdown["skipped-unknown-strict"]} couldn't be verified (SearchAPI inconclusive — strict mode rejects)`);
       if (breakdown["skipped-internal-duplicate"] > 0) parts.push(`${breakdown["skipped-internal-duplicate"]} already used by another listing in this community`);
       if (breakdown["skipped-outside-resort"] > 0) parts.push(`${breakdown["skipped-outside-resort"]} outside the resort street`);
@@ -39362,7 +39467,12 @@ Return ONLY compact JSON with this exact shape:
     };
     /** Positive candidate-specific contradiction: safe for auto-replace to burn. */
     candidateRejected?: boolean;
-    candidateRejection?: "community-mismatch" | "bedroom-coverage" | "ota-source";
+    candidateRejection?:
+      | "community-mismatch"
+      | "bedroom-coverage"
+      | "ota-source"
+      | "ota-photo-reuse"
+      | "ota-photo-changed";
     /** Infrastructure or missing evidence: current unit remains untouched and candidate is not burned. */
     communityGateInconclusive?: boolean;
     retryable?: boolean;
@@ -39555,6 +39665,14 @@ Return ONLY compact JSON with this exact shape:
     opts: {
       useSidecar?: boolean;
       fallbackPhotoUrls?: string[];
+      verifiedPhotoUrls?: string[];
+      verifiedPhotoContentSha256?: Record<string, string>;
+      otaPhotoVerification?: {
+        checkedPhotos: number;
+        totalPhotos: number;
+        checkedAt: number;
+        policy: string;
+      };
       requireBedroomPhotoCoverage?: boolean;
       requireFullCommunityAudit?: boolean;
     } = {},
@@ -39585,7 +39703,7 @@ Return ONLY compact JSON with this exact shape:
       // Strict automatic replacement always rebuilds a disposable stage and
       // re-runs the live community audit. A prior receipt is provenance, not a
       // permanent pass: the folder may have changed since it was written.
-      if (existingSavedCount !== null && opts.requireFullCommunityAudit !== true) {
+      if (existingSavedCount !== null && opts.requireFullCommunityAudit !== true && !Array.isArray(opts.verifiedPhotoUrls)) {
         return { ok: true, folder, savedCount: existingSavedCount };
       }
 
@@ -39600,7 +39718,15 @@ Return ONLY compact JSON with this exact shape:
       try {
         const listingFacts: ListingFacts = {};
         const scrapeOpts = opts.useSidecar === true ? SCRAPE_WITH_SIDECAR : SCRAPE_WITHOUT_SIDECAR;
-        let scraped = await scrapeListingPhotos(url, undefined, listingFacts, scrapeOpts);
+        const verifiedPhotoUrls = normalizeReplacementPhotoUrls(opts.verifiedPhotoUrls ?? []);
+        let scraped = verifiedPhotoUrls.length > 0
+          ? verifiedPhotoUrls.map((photoUrl) => ({
+              url: photoUrl,
+              title: "",
+              source: "",
+              sourceLink: url,
+            }))
+          : await scrapeListingPhotos(url, undefined, listingFacts, scrapeOpts);
       // FIND-PHASE PHOTO PASS-THROUGH (2026-07-06): the commit re-scrape can
       // fail even when the FIND phase scraped the same gallery minutes
       // earlier — the Mauna Lani commit hit Apify 403 + ScrapingBee monthly
@@ -39616,6 +39742,8 @@ Return ONLY compact JSON with this exact shape:
       // floor below. The fresh scrape still leads (it reflects gallery
       // changes since the find); find-phase URLs are UNIONED in behind it.
       if (
+        verifiedPhotoUrls.length === 0
+        &&
         scraped.length < MIN_INDEPENDENT_UNIT_PHOTOS
         && Array.isArray(opts.fallbackPhotoUrls) && opts.fallbackPhotoUrls.length > 0
       ) {
@@ -39668,6 +39796,33 @@ Return ONLY compact JSON with this exact shape:
         requiredBedrooms: listingFacts.bedrooms ?? swap.newBedrooms ?? swap.oldBedrooms ?? undefined,
         requiredBathrooms: listingFacts.bathrooms ?? undefined,
       });
+      if (opts.verifiedPhotoContentSha256) {
+        const changed: string[] = [];
+        for (let index = 0; index < result.keptSourceUrls.length; index += 1) {
+          const sourcePhotoUrl = result.keptSourceUrls[index];
+          const expected = opts.verifiedPhotoContentSha256[sourcePhotoUrl];
+          const filename = result.keptFilenames[index];
+          if (!expected || !filename) {
+            changed.push(sourcePhotoUrl || `photo ${index + 1}`);
+            continue;
+          }
+          const actual = createHash("sha256")
+            .update(await fs.promises.readFile(path.join(stagingPath, filename)))
+            .digest("hex");
+          if (actual !== expected) changed.push(sourcePhotoUrl);
+        }
+        if (changed.length > 0) {
+          await cleanupStaging();
+          return {
+            ok: false,
+            folder,
+            savedCount: 0,
+            candidateRejected: true,
+            candidateRejection: "ota-photo-changed",
+            error: `${changed.length} replacement photo${changed.length === 1 ? "" : "s"} changed between OTA verification and hydration. Run the replacement search again.`,
+          };
+        }
+      }
       console.log(`[unit-swap rescrape] ${folder}: kept ${result.kept}/${result.downloaded} photos (${result.bedroomCount} bedrooms, ${result.bathroomCount} bathrooms)`);
       if (result.kept < MIN_INDEPENDENT_UNIT_PHOTOS) {
         await cleanupStaging();
@@ -39749,6 +39904,12 @@ Return ONLY compact JSON with this exact shape:
           contentFingerprint: result.keptContentFingerprints[index] ?? null,
         })),
       };
+      if (opts.otaPhotoVerification) {
+        sourceDoc.otaPhotoVerification = {
+          ...opts.otaPhotoVerification,
+          verifiedDate: new Date().toISOString(),
+        };
+      }
       sourceDoc.verificationStatus = "needs-review";
       sourceDoc.verifiedDate = new Date().toISOString().slice(0, 10);
       sourceDoc.verifiedBy = "unit-swap";
@@ -39956,14 +40117,18 @@ Return ONLY compact JSON with this exact shape:
     const {
       photoFolder: _legacyPhotoFolder,
       photoUrls: rawPhotoUrls,
+      photoVerificationReceipt: rawPhotoVerificationReceipt,
       requireBedroomPhotoCoverage: rawRequireCoverage,
       expectedUnitSwapSnapshot: rawExpectedSnapshot,
       requireFullCommunityAudit: rawRequireFullCommunityAudit,
       ...swapBody
     } = req.body as any;
-    const fallbackPhotoUrls = Array.isArray(rawPhotoUrls)
-      ? rawPhotoUrls.filter((u: unknown): u is string => typeof u === "string" && /^https?:\/\//i.test(u)).slice(0, 120)
-      : [];
+    const fallbackPhotoUrls = normalizeReplacementPhotoUrls(
+      Array.isArray(rawPhotoUrls) ? rawPhotoUrls : [],
+    );
+    const photoVerificationReceipt = typeof rawPhotoVerificationReceipt === "string"
+      ? rawPhotoVerificationReceipt.trim()
+      : "";
     // Audit-ladder bedroom-shortfall replacements only: the new gallery must
     // photograph every claimed bedroom or the commit aborts at staging (the
     // orchestrator burns the candidate and tries the next option).
@@ -39994,6 +40159,98 @@ Return ONLY compact JSON with this exact shape:
         otaHost: swapOtaRejection.host,
       });
     }
+    const photoReceiptSecret = replacementPhotoReceiptSigningKey();
+    if (!photoReceiptSecret) {
+      return res.status(503).json({
+        error: "OTA photo verification receipt signing is not configured. The replacement was not committed.",
+        otaPhotoVerificationInconclusive: true,
+        retryable: true,
+      });
+    }
+    if (!photoVerificationReceipt) {
+      return res.status(428).json({
+        error: "This replacement has no authoritative OTA photo verification receipt. Run Find Replacement Unit again before replacing.",
+        photoVerificationReceiptInvalid: true,
+        retryable: true,
+      });
+    }
+    const receiptValidation = validateReplacementPhotoReceipt({
+      receipt: photoVerificationReceipt,
+      secret: photoReceiptSecret,
+      sourceUrl: parsed.data.newSourceUrl,
+      propertyId: parsed.data.propertyId,
+      targetUnitId: parsed.data.oldUnitId,
+      photoUrls: fallbackPhotoUrls,
+    });
+    if (!receiptValidation.ok) {
+      return res.status(428).json({
+        error: receiptValidation.error,
+        photoVerificationReceiptInvalid: true,
+        retryable: true,
+      });
+    }
+
+    // Re-run the authoritative full-gallery check immediately before the
+    // transactional swap. The signed receipt proves what discovery checked;
+    // this fresh result proves neither the gallery bytes nor OTA evidence
+    // changed while the operator reviewed the candidate.
+    const commitPhotoVerification = await verifyReplacementPhotoSet({
+      apiKey: process.env.SEARCHAPI_API_KEY ?? "",
+      sourceUrl: parsed.data.newSourceUrl,
+      photoUrls: fallbackPhotoUrls,
+      concurrency: 6,
+      lensTimeoutMs: 12_000,
+      imageTimeoutMs: 12_000,
+      thumbnailTimeoutMs: 8_000,
+      overallTimeoutMs: 120_000,
+      maxLensAttempts: 2,
+    });
+    console.info("[replacement-photo-ota]", JSON.stringify({
+      phase: "commit",
+      sourceUrl: parsed.data.newSourceUrl,
+      status: commitPhotoVerification.status,
+      checkedPhotos: commitPhotoVerification.checkedPhotos,
+      totalPhotos: commitPhotoVerification.totalPhotos,
+      lensCalls: commitPhotoVerification.lensCalls,
+      matches: commitPhotoVerification.matches.length,
+      failures: commitPhotoVerification.failures.length,
+      durationMs: commitPhotoVerification.durationMs,
+    }));
+    if (commitPhotoVerification.status === "matched") {
+      const platforms = Array.from(new Set(commitPhotoVerification.matches.map((match) =>
+        match.platform === "booking" ? "Booking.com" : match.platform === "vrbo" ? "VRBO" : "Airbnb")));
+      return res.status(422).json({
+        error: `Replacement rejected: ${commitPhotoVerification.matches.length} proposed photo${commitPhotoVerification.matches.length === 1 ? "" : "s"} matched ${platforms.join(", ")} during the commit-time recheck.`,
+        candidateRejected: true,
+        candidateRejection: "ota-photo-reuse",
+        otaPhotoMatch: true,
+        matchedPlatforms: platforms,
+      });
+    }
+    if (commitPhotoVerification.status !== "verified") {
+      return res.status(503).json({
+        error:
+          `OTA photo verification was incomplete at commit time ` +
+          `(${commitPhotoVerification.checkedPhotos}/${commitPhotoVerification.totalPhotos} photos checked). ` +
+          `${commitPhotoVerification.failures[0]?.reason ?? "Try again when the provider is available."}`,
+        otaPhotoVerificationInconclusive: true,
+        retryable: true,
+      });
+    }
+    if (
+      replacementPhotoContentDigest(commitPhotoVerification.photos)
+      !== receiptValidation.claims.photoContentDigest
+    ) {
+      return res.status(422).json({
+        error: "The replacement gallery changed after it was verified. The candidate was not committed; run the search again.",
+        candidateRejected: true,
+        candidateRejection: "ota-photo-changed",
+        photoVerificationChanged: true,
+      });
+    }
+    const verifiedPhotoContentSha256 = Object.fromEntries(
+      commitPhotoVerification.photos.map((photo) => [photo.url, photo.contentSha256]),
+    );
     return withUnitSwapPropertyWriteLock(parsed.data.propertyId, async () => {
     // The same dedicated lock covers the precondition, folder replacement,
     // and insert. If a manual writer won while this auto job was searching, we
@@ -40052,6 +40309,14 @@ Return ONLY compact JSON with this exact shape:
       fallbackPhotoUrls,
       requireBedroomPhotoCoverage,
       requireFullCommunityAudit,
+      verifiedPhotoUrls: fallbackPhotoUrls,
+      verifiedPhotoContentSha256,
+      otaPhotoVerification: {
+        checkedPhotos: commitPhotoVerification.checkedPhotos,
+        totalPhotos: commitPhotoVerification.totalPhotos,
+        checkedAt: commitPhotoVerification.checkedAt,
+        policy: commitPhotoVerification.policy,
+      },
     });
     if (!hydrated.ok) {
       const status = hydrated.candidateRejected
@@ -45693,12 +45958,12 @@ Return ONLY compact JSON with this exact shape:
     };
   }
 
-  // Photo reverse-image search via Google Lens. Caps at 3 private-looking photo
-  // URLs per call to keep wallet bounded (~3 SearchAPI calls /
-  // qualifier check). Zillow CDN URLs (photos.zillowstatic.com)
-  // are publicly accessible so we skip ImgBB upload — Lens can
-  // crawl them directly. Returns per-platform match URLs only when
-  // at least two distinct source photos produce strong (>=80%) hits.
+  // Legacy qualifier adapter around the authoritative replacement-photo
+  // verifier. Unlike the former inline implementation, incomplete coverage
+  // throws instead of returning an empty match set: zero checks, provider
+  // outages, and unverifiable strong hits are not evidence that a gallery is
+  // safe. The replacement flow below calls verifyReplacementPhotoSet directly
+  // so it can bind the complete result to a signed commit receipt.
   async function runPhotoReverseSearch(
     apiKey: string,
     photoUrls: string[],
@@ -45711,71 +45976,45 @@ Return ONLY compact JSON with this exact shape:
     matches: { airbnb: string[]; vrbo: string[]; booking: string[] };
     checked: number;
   }> {
-    void apiKey;
-    void options;
-    if (photoUrls.length === 0) {
+    const normalized = normalizeReplacementPhotoUrls(photoUrls)
+      .filter((url) => !isCommunityOrSharedPhotoCandidate({ url }));
+    const sample = typeof options.maxPhotos === "number"
+      ? normalized.slice(0, Math.max(0, options.maxPhotos))
+      : normalized;
+    if (sample.length === 0) {
       return { matches: { airbnb: [], vrbo: [], booking: [] }, checked: 0 };
     }
-    return { matches: { airbnb: [], vrbo: [], booking: [] }, checked: 0 };
-    const PLATFORM_PATTERNS: Array<{ key: "airbnb" | "vrbo" | "booking"; urlPattern: RegExp }> = [
-      { key: "airbnb", urlPattern: /airbnb\.com\/(rooms|h)\// },
-      { key: "vrbo",   urlPattern: /vrbo\.com\/\d+/ },
-      { key: "booking",urlPattern: /booking\.com\/(hotel|apartments)\// },
-    ];
+    const requestTimeoutMs = options.requestTimeoutMs ?? 25_000;
+    const verification = await verifyReplacementPhotoSet({
+      apiKey,
+      sourceUrl: "legacy-photo-qualifier",
+      photoUrls: sample,
+      lensTimeoutMs: requestTimeoutMs,
+      overallTimeoutMs: Math.min(
+        180_000,
+        Math.max(requestTimeoutMs + 5_000, Math.ceil(sample.length / 6) * requestTimeoutMs * 2),
+      ),
+      maxLensAttempts: 2,
+    });
+    if (verification.status === "incomplete") {
+      const reason = verification.failures[0]?.reason ?? "coverage incomplete";
+      throw new Error(
+        `OTA reverse-image verification incomplete (${verification.checkedPhotos}/${verification.totalPhotos} photos checked): ${reason}`,
+      );
+    }
     const matches = {
       airbnb: new Set<string>(),
       vrbo: new Set<string>(),
       booking: new Set<string>(),
     };
-    const sample = photoUrls
-      .filter((url) => !isCommunityOrSharedPhotoCandidate({ url }))
-      .slice(0, options.maxPhotos ?? 3);
-    const requestTimeoutMs = options.requestTimeoutMs ?? 25_000;
-    const delayMs = options.delayMs ?? 500;
-    let checked = 0;
-    const photoHits = {
-      airbnb: new Set<string>(),
-      vrbo: new Set<string>(),
-      booking: new Set<string>(),
-    };
-    for (const photoUrl of sample) {
-      try {
-        const url = `https://www.searchapi.io/api/v1/search?engine=google_lens&url=${encodeURIComponent(photoUrl)}&api_key=${apiKey}`;
-        const resp = await fetch(url, { signal: AbortSignal.timeout(requestTimeoutMs) });
-        if (!resp.ok) continue;
-        const data: any = await resp.json();
-        checked++;
-        const rowsFrom = (source: string, rows: any[] | undefined): Array<{ source: string; row: any; idx: number }> =>
-          Array.isArray(rows) ? rows.map((row, idx) => ({ source, row, idx })) : [];
-        const allRows = [
-          ...rowsFrom("visual", data.visual_matches),
-          ...rowsFrom("page", data.pages_with_matching_images),
-          ...rowsFrom("image", data.image_results),
-          ...rowsFrom("organic", data.organic_results),
-        ].filter(({ source, row, idx }) => isStrongLensMatch(row, source, Number(row?.position ?? idx + 1)));
-        for (const { row } of allRows) {
-          const link = String(row?.link || row?.url || row?.source_url || row?.source?.link || row?.source?.url || "");
-          if (!link) continue;
-          for (const p of PLATFORM_PATTERNS) {
-            if (p.urlPattern.test(link)) {
-              matches[p.key].add(link);
-              photoHits[p.key].add(photoUrl);
-            }
-          }
-        }
-      } catch {
-        // best effort — keep going
-      }
-      // Small optional breather between Lens calls so we don't trip rate limits.
-      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
-    }
+    for (const match of verification.matches) matches[match.platform].add(match.listingUrl);
     return {
       matches: {
-        airbnb: photoHits.airbnb.size >= MIN_DISTINCT_STRONG_PHOTO_MATCHES ? Array.from(matches.airbnb) : [],
-        vrbo: photoHits.vrbo.size >= MIN_DISTINCT_STRONG_PHOTO_MATCHES ? Array.from(matches.vrbo) : [],
-        booking: photoHits.booking.size >= MIN_DISTINCT_STRONG_PHOTO_MATCHES ? Array.from(matches.booking) : [],
+        airbnb: Array.from(matches.airbnb),
+        vrbo: Array.from(matches.vrbo),
+        booking: Array.from(matches.booking),
       },
-      checked,
+      checked: verification.checkedPhotos,
     };
   }
 

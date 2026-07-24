@@ -925,10 +925,11 @@ async function runAutoReplaceJob(
           // fallback permanently EMPTY on the find-unit path (the Poipu
           // Kapili unit-B burn class).
           photoUrls: Array.isArray(c.photoUrls) && c.photoUrls.length > 0
-            ? (c.photoUrls as unknown[]).map((u) => String(u ?? "")).filter((u) => /^https?:\/\//i.test(u)).slice(0, 120)
+            ? (c.photoUrls as unknown[]).map((u) => String(u ?? "")).filter((u) => /^https?:\/\//i.test(u)).slice(0, 150)
             : Array.isArray(c.photos)
               ? (c.photos as Array<{ url?: unknown }>).map((p) => String(p?.url ?? "")).filter((u) => /^https?:\/\//i.test(u))
               : [],
+          photoVerificationReceipt: String(c.photoVerificationReceipt ?? ""),
           // Re-checked transactionally by POST /api/unit-swaps AFTER photo
           // hydration and immediately before INSERT. A newer manual choice
           // therefore wins even if it lands during the long scrape.
@@ -963,6 +964,14 @@ async function runAutoReplaceJob(
           );
           return;
         }
+        if (status === 428 && data?.photoVerificationReceiptInvalid === true) {
+          await finishAutoReplaceFailure(
+            record,
+            String(data?.error ?? "The candidate's OTA photo verification receipt expired or changed. Re-run the replacement search."),
+            { retryablePreCommit: true },
+          );
+          return;
+        }
         if (status === 409) {
           burnedInUse += 1;
           touch(record, { attemptedUrls: [...record.attemptedUrls, url], message: "Candidate already in use — trying the next option…" });
@@ -975,7 +984,9 @@ async function runAutoReplaceJob(
         if (status === 422 && data?.candidateRejected === true) {
           const rejection = data?.candidateRejection;
           const coverageReject = rejection === "bedroom-coverage";
-          const otaReject = rejection === "ota-source";
+          const otaReject = rejection === "ota-source"
+            || rejection === "ota-photo-reuse"
+            || rejection === "ota-photo-changed";
           if (coverageReject) burnedCoverage += 1;
           else if (otaReject) burnedOtaSource += 1;
           else burnedCommunity += 1;
@@ -984,10 +995,22 @@ async function runAutoReplaceJob(
             message: coverageReject
               ? "Candidate's staged gallery failed bedroom coverage — trying the next option…"
               : otaReject
-                ? "Candidate is a live OTA listing — photos may never be sourced from an OTA; trying the next option…"
+                ? rejection === "ota-source"
+                  ? "Candidate is a live OTA listing — photos may never be sourced from an OTA; trying the next option…"
+                  : rejection === "ota-photo-changed"
+                    ? "Candidate's real-estate gallery changed after verification — trying the next option…"
+                    : "Candidate's real-estate photos matched an OTA listing — trying the next option…"
                 : "Candidate's staged gallery is not in this community — trying the next option…",
           });
           continue;
+        }
+        if (status === 503 && data?.otaPhotoVerificationInconclusive === true) {
+          await finishAutoReplaceFailure(
+            record,
+            String(data?.error ?? "The OTA photo provider could not conclusively recheck every candidate photo. The current unit was kept."),
+            { retryablePreCommit: true },
+          );
+          return;
         }
         if (isStagedCommunityAuditInconclusive(status, data)) {
           await finishAutoReplaceFailure(
