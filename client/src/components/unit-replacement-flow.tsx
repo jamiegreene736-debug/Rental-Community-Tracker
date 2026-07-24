@@ -42,7 +42,10 @@ type PreflightReplacementFindJob = {
   stuckUnresumable?: boolean;
 };
 
-const replacementJobStorageKey = (propertyId: number) => `preflight.replacementFindJob.v1:${propertyId}`;
+const replacementJobStoragePrefix = (propertyId: number) => `preflight.replacementFindJob.v2:${propertyId}:`;
+const replacementJobStorageKey = (propertyId: number, targetUnitId: string) =>
+  `${replacementJobStoragePrefix(propertyId)}${encodeURIComponent(targetUnitId)}`;
+const legacyReplacementJobStorageKey = (propertyId: number) => `preflight.replacementFindJob.v1:${propertyId}`;
 // NOTE FOR CODEX: the find-unit job lives ONLY in server memory
 // (preflight-background-jobs.ts `replacementFindJobs` Map). Railway recycles the
 // process on every deploy / idle-cycle / crash, which evicts the in-flight job —
@@ -69,9 +72,8 @@ type ReplacementJobRef = {
   lastAliveAt?: number;
   resumeCount?: number;
 };
-const loadReplacementJobRef = (propertyId: number): ReplacementJobRef | null => {
+const parseReplacementJobRef = (raw: string | null): ReplacementJobRef | null => {
   try {
-    const raw = localStorage.getItem(replacementJobStorageKey(propertyId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<ReplacementJobRef>;
     if (parsed?.jobId && parsed?.targetUnitId) {
@@ -89,19 +91,61 @@ const loadReplacementJobRef = (propertyId: number): ReplacementJobRef | null => 
     return null;
   }
 };
-const saveReplacementJobRef = (propertyId: number, ref: ReplacementJobRef | null) => {
+
+const loadReplacementJobRef = (propertyId: number, targetUnitId: string): ReplacementJobRef | null => {
   try {
-    if (!ref) localStorage.removeItem(replacementJobStorageKey(propertyId));
-    else localStorage.setItem(replacementJobStorageKey(propertyId), JSON.stringify(ref));
+    const current = parseReplacementJobRef(
+      localStorage.getItem(replacementJobStorageKey(propertyId, targetUnitId)),
+    );
+    if (current) return current;
+
+    // One-time migration from the property-wide key. Only the matching unit may
+    // claim it; sibling panels must never attach to the same job.
+    const legacyKey = legacyReplacementJobStorageKey(propertyId);
+    const legacy = parseReplacementJobRef(localStorage.getItem(legacyKey));
+    if (!legacy || legacy.targetUnitId !== targetUnitId) return null;
+    localStorage.setItem(replacementJobStorageKey(propertyId, targetUnitId), JSON.stringify(legacy));
+    localStorage.removeItem(legacyKey);
+    return legacy;
+  } catch {
+    return null;
+  }
+};
+
+const loadReplacementJobRefsForProperty = (propertyId: number): ReplacementJobRef[] => {
+  const refs: ReplacementJobRef[] = [];
+  try {
+    const prefix = replacementJobStoragePrefix(propertyId);
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith(prefix)) continue;
+      const ref = parseReplacementJobRef(localStorage.getItem(key));
+      if (ref) refs.push(ref);
+    }
+    const legacy = parseReplacementJobRef(localStorage.getItem(legacyReplacementJobStorageKey(propertyId)));
+    if (legacy) refs.push(legacy);
+  } catch { /* ignore */ }
+  return refs;
+};
+
+const saveReplacementJobRef = (
+  propertyId: number,
+  targetUnitId: string,
+  ref: ReplacementJobRef | null,
+) => {
+  try {
+    const key = replacementJobStorageKey(propertyId, targetUnitId);
+    if (!ref) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(ref));
   } catch { /* ignore */ }
 };
 // Refresh the persisted "last known alive" stamp on every successful poll so the
 // freshness window measures time-since-last-alive, not time-since-first-click —
 // a long search the operator is actively watching never ages out of resumability.
-const markReplacementJobRefAlive = (propertyId: number) => {
-  const ref = loadReplacementJobRef(propertyId);
+const markReplacementJobRefAlive = (propertyId: number, targetUnitId: string) => {
+  const ref = loadReplacementJobRef(propertyId, targetUnitId);
   if (!ref) return;
-  saveReplacementJobRef(propertyId, { ...ref, lastAliveAt: Date.now() });
+  saveReplacementJobRef(propertyId, targetUnitId, { ...ref, lastAliveAt: Date.now() });
 };
 
 // Only auto-resume a recently-alive search. A stale localStorage ref (e.g. the
@@ -120,12 +164,12 @@ export function findLiveReplacementJobRef(
 ): { propertyId: number; targetUnitId: string } | null {
   let best: { propertyId: number; targetUnitId: string; aliveAt: number } | null = null;
   for (const propertyId of propertyIds) {
-    const ref = loadReplacementJobRef(propertyId);
-    if (!ref) continue;
-    const aliveAt = ref.lastAliveAt ?? ref.startedAt ?? 0;
-    if (!aliveAt || Date.now() - aliveAt > REPLACEMENT_AUTO_RESUME_WINDOW_MS) continue;
-    if (!best || aliveAt > best.aliveAt) {
-      best = { propertyId, targetUnitId: ref.targetUnitId, aliveAt };
+    for (const ref of loadReplacementJobRefsForProperty(propertyId)) {
+      const aliveAt = ref.lastAliveAt ?? ref.startedAt ?? 0;
+      if (!aliveAt || Date.now() - aliveAt > REPLACEMENT_AUTO_RESUME_WINDOW_MS) continue;
+      if (!best || aliveAt > best.aliveAt) {
+        best = { propertyId, targetUnitId: ref.targetUnitId, aliveAt };
+      }
     }
   }
   return best ? { propertyId: best.propertyId, targetUnitId: best.targetUnitId } : null;
@@ -227,6 +271,7 @@ export function UnitReplacementFlow({
   state,
   propertyId,
   skipUrls = [],
+  lockUnitSelection = false,
   onClose,
   onUnitReplaced,
 }: {
@@ -240,6 +285,7 @@ export function UnitReplacementFlow({
   state?: string;
   propertyId: number;
   skipUrls?: string[];
+  lockUnitSelection?: boolean;
   onClose?: () => void;
   onUnitReplaced?: (oldUnitId: string, newUnit: ReplacementUnitData, swapId: number) => void;
 }) {
@@ -263,7 +309,7 @@ export function UnitReplacementFlow({
   // the next find-unit call so we don't surface the same listing again.
   const [extraSkipUrls, setExtraSkipUrls] = useState<string[]>([]);
   const [replacementJobId, setReplacementJobId] = useState<string | null>(() =>
-    loadReplacementJobRef(propertyId)?.jobId ?? null,
+    loadReplacementJobRef(propertyId, unit.id)?.jobId ?? null,
   );
   const [replacementJob, setReplacementJob] = useState<PreflightReplacementFindJob | null>(null);
   const lastSearchPayloadRef = useRef<Record<string, unknown> | null>(null);
@@ -299,7 +345,7 @@ export function UnitReplacementFlow({
       return;
     }
     setSearchStartedAt(null);
-    saveReplacementJobRef(propertyId, null);
+    saveReplacementJobRef(propertyId, selectedUnit.id, null);
     setReplacementJobId(null);
     if (job.status === "completed" && job.unit) {
       setStage("found");
@@ -327,7 +373,7 @@ export function UnitReplacementFlow({
   };
 
   useEffect(() => {
-    const stored = loadReplacementJobRef(propertyId);
+    const stored = loadReplacementJobRef(propertyId, selectedUnitId);
     if (!stored?.jobId) return;
     if (stored.targetUnitId !== selectedUnitId) return;
     // Rehydrate the payload so a 404 (or the error-state remediation) can
@@ -358,7 +404,7 @@ export function UnitReplacementFlow({
     // failed start-POST can't strand the UI on a permanent "in-progress" spinner.
     if (autoResumedFromRef.current.has(evictedJobId)) return "in-progress";
 
-    const stored = loadReplacementJobRef(propertyId);
+    const stored = loadReplacementJobRef(propertyId, selectedUnit.id);
     const payload = lastSearchPayloadRef.current ?? stored?.payload ?? null;
     if (!payload || !payload.communityFolder) return "cannot";
     const aliveAt = stored?.lastAliveAt ?? stored?.startedAt ?? Date.now();
@@ -379,7 +425,7 @@ export function UnitReplacementFlow({
         return "cannot";
       }
       const targetUnitId = typeof payload.targetUnitId === "string" ? payload.targetUnitId : selectedUnit.id;
-      saveReplacementJobRef(propertyId, {
+      saveReplacementJobRef(propertyId, targetUnitId, {
         jobId: data.job.id,
         targetUnitId,
         payload,
@@ -432,7 +478,7 @@ export function UnitReplacementFlow({
             if (outcome === "in-progress") return;
             // outcome === "cannot" → fall through to the error below.
           }
-          saveReplacementJobRef(propertyId, null);
+          saveReplacementJobRef(propertyId, selectedUnit.id, null);
           setReplacementJobId(null);
           setSearchStartedAt(null);
           setStage("error");
@@ -464,7 +510,7 @@ export function UnitReplacementFlow({
           // Refresh the freshness anchor while the job is genuinely alive, so a
           // long actively-watched search never ages out of auto-resume.
           if (job.status === "queued" || job.status === "running") {
-            markReplacementJobRefAlive(propertyId);
+            markReplacementJobRefAlive(propertyId, selectedUnit.id);
           }
           applyReplacementJob(job);
         }
@@ -538,7 +584,7 @@ export function UnitReplacementFlow({
       const data = await resp.json();
       if (!data?.job?.id) throw new Error("Replacement search did not start");
       setReplacementJobId(data.job.id as string);
-      saveReplacementJobRef(propertyId, {
+      saveReplacementJobRef(propertyId, selectedUnit.id, {
         jobId: data.job.id,
         targetUnitId: selectedUnit.id,
         payload: startPayload,
@@ -599,7 +645,7 @@ export function UnitReplacementFlow({
           duration: 12000,
         });
       }
-      saveReplacementJobRef(propertyId, null);
+      saveReplacementJobRef(propertyId, selectedUnit.id, null);
       setReplacementJobId(null);
       setReplacementJob(null);
       setSearchStartedAt(null);
@@ -658,7 +704,11 @@ export function UnitReplacementFlow({
         <>
           <div className="space-y-1.5">
             <p className="text-xs text-muted-foreground">Which unit would you like to replace?</p>
-            <Select value={selectedUnitId} onValueChange={setSelectedUnitId} disabled={stage !== "idle"}>
+            <Select
+              value={selectedUnitId}
+              onValueChange={setSelectedUnitId}
+              disabled={stage !== "idle" || lockUnitSelection}
+            >
               <SelectTrigger className="h-8 text-xs" data-testid="select-replacement-unit">
                 <SelectValue />
               </SelectTrigger>
@@ -823,7 +873,7 @@ export function UnitReplacementFlow({
                   autoResumedFromRef.current = new Set();
                   setResumedAfterRestart(false);
                   setReplacementJobId(next.id);
-                  saveReplacementJobRef(propertyId, {
+                  saveReplacementJobRef(propertyId, selectedUnit.id, {
                     jobId: next.id,
                     targetUnitId: selectedUnit.id,
                     payload: lastSearchPayloadRef.current ?? undefined,

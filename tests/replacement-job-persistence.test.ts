@@ -183,6 +183,22 @@ check("resume cap tolerates a 5-deploy merge burst", MAX_REPLACEMENT_SERVER_RESU
   check("client poll relaunches on a stuckUnresumable failed job (the old 404 path's replacement)",
     clientSrc.includes('job.stuckUnresumable === true') &&
     /stuckUnresumable === true[\s\S]{0,200}attemptAutoResume/.test(clientSrc));
+
+  // Concurrent sibling jobs need independent browser refs as well as independent
+  // server records. A property-wide localStorage key made one unit overwrite the
+  // other's resumable job whenever both were searched from the same dashboard.
+  check("client persists replacement jobs by property AND target unit",
+    clientSrc.includes("preflight.replacementFindJob.v2:${propertyId}:") &&
+    clientSrc.includes("encodeURIComponent(targetUnitId)") &&
+    clientSrc.includes("saveReplacementJobRef(propertyId, selectedUnit.id"));
+
+  const preflightSrc = readFileSync(new URL("../client/src/pages/builder-preflight.tsx", import.meta.url), "utf8");
+  check("preflight renders one locked replacement flow per active unit",
+    preflightSrc.includes("activeReplacementUnits.map((targetUnit)") &&
+    preflightSrc.includes("lockUnitSelection") &&
+    preflightSrc.includes("replacement-concurrency-note"));
+  check("completing one replacement removes only that unit's panel",
+    /handleUnitReplaced[\s\S]{0,1500}delete next\[oldUnitId\]/.test(preflightSrc));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

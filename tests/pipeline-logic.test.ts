@@ -2911,7 +2911,7 @@ assert.ok(
   "preflight replacement flow must pass canonical resort street like Find Photos does",
 );
 assert.ok(
-  preflightSource.includes("setReplacementSkipUrl(skipReplacementUrl);"),
+  /setReplacementFlowTargets\(\(current\) => \(\{[\s\S]{0,200}\[origUnit\.id\]: \{ skipUrl: skipReplacementUrl \}/.test(preflightSource),
   "Change replacement must skip the unit being replaced so search can find a different one",
 );
 assert.ok(
@@ -2943,7 +2943,7 @@ assert.ok(
   "preflight replacement flow must pass canonical resort street like Find Photos does",
 );
 assert.ok(
-  preflightSource.includes("setReplacementSkipUrl(skipReplacementUrl);"),
+  /setReplacementFlowTargets\(\(current\) => \(\{[\s\S]{0,200}\[origUnit\.id\]: \{ skipUrl: skipReplacementUrl \}/.test(preflightSource),
   "Change replacement must skip the unit being replaced so search can find a different one",
 );
 assert.ok(
@@ -3100,7 +3100,7 @@ assert.ok(
   "the replacement result must surface otaListedOn so the green 'clean' shield never lies about an OTA-listed unit",
 );
 assert.ok(
-  preflightSource.includes("replacementSourceUrl: unitOverrides[u.id]?.sourceUrl"),
+  /replacementSourceUrl: unitOverrides\[(?:u|candidate)\.id\]\?\.sourceUrl/.test(preflightSource),
   "preflight replacement flow must pass active swap URLs so follow-up searches use expanded mode",
 );
 assert.ok(
